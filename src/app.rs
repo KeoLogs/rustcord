@@ -1,104 +1,262 @@
-//! The RustCord UI.
-//!
-//! Default layout (Discord-style), every part movable and resizable:
-//!   ┌────────┬───────────┬──────────────────────────────┐
-//!   │Servers │ Channels  │ Messages                     │
-//!   │        │           │                              │
-//!   │        │           ├──────────────────────────────┤
-//!   │        │           │ Message box                  │
-//!   └────────┴───────────┴──────────────────────────────┘
+//! The RustCord UI: login screen, main layout, settings page.
 
-use std::collections::HashMap;
-use std::sync::mpsc::Receiver;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, RichText, vec2};
+use eframe::egui::{self, Color32, RichText, vec2};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::layout::{self, LayoutBehavior, Pane};
+use crate::config::{CONFIG_KEY, Config};
+use crate::emoji::{self, Segment};
+use crate::layout::{self, LAYOUT_KEY, LayoutBehavior, Pane};
+use crate::login::{LoginAction, LoginForm};
+use crate::settings::{SettingsAction, SettingsPage};
+use crate::theme::{Palette, ThemeChoice};
 use crate::types::{Attachment, DM_GUILD_ID, Guild, Message, ToBackend, ToUi, User};
 
-const LAYOUT_KEY: &str = "layout";
 const TYPING_TIMEOUT: Duration = Duration::from_secs(10);
 const TYPING_RESEND: Duration = Duration::from_secs(8);
 const IMAGE_MAX: (f32, f32) = (400.0, 300.0);
+/// Discord's default upload limit for accounts without Nitro.
+const UPLOAD_LIMIT: u64 = 10 * 1024 * 1024;
 
-// ---------------------------------------------------------------------------
-// App shell: layout + top bar
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// App shell
+// ===========================================================================
+
+enum Screen {
+    Login(LoginForm),
+    Main(Box<State>),
+}
 
 pub struct RustCordApp {
-    state: State,
+    config: Config,
+    screen: Screen,
     tree: egui_tiles::Tree<Pane>,
     editing_layout: bool,
+    settings: Option<SettingsPage>,
+    /// Theme + zoom currently applied, to re-apply only when they change.
+    applied: Option<(ThemeChoice, f32)>,
 }
 
 impl RustCordApp {
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
-        rx: Receiver<ToUi>,
-        tx: UnboundedSender<ToBackend>,
-    ) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, env_token: Option<String>, demo: bool) -> Self {
+        let config: Config = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, CONFIG_KEY))
+            .unwrap_or_default();
         let tree = cc
             .storage
-            .and_then(|s| eframe::get_value(s, LAYOUT_KEY))
+            .and_then(|s| eframe::get_value::<egui_tiles::Tree<Pane>>(s, LAYOUT_KEY))
+            .filter(layout::is_complete)
             .unwrap_or_else(layout::default_tree);
-        Self {
-            state: State::new(rx, tx),
+
+        let mut app = Self {
+            screen: Screen::Login(LoginForm::new(config.remember_login, None)),
+            config,
             tree,
             editing_layout: false,
+            settings: None,
+            applied: None,
+        };
+
+        // Log in straight away if we can: demo, DISCORD_TOKEN, or a saved token.
+        let saved = app
+            .config
+            .remember_login
+            .then(|| app.config.saved_token.clone())
+            .flatten();
+        if demo {
+            app.start_session(&cc.egui_ctx, String::new(), true);
+        } else if let Some(token) = env_token.or(saved) {
+            app.start_session(&cc.egui_ctx, token, false);
         }
+        app
+    }
+
+    fn start_session(&mut self, ctx: &egui::Context, token: String, demo: bool) {
+        let (ui_tx, ui_rx) = mpsc::channel();
+        let (be_tx, be_rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::backend::spawn(token, demo, ui_tx, be_rx, ctx.clone());
+        self.screen = Screen::Main(Box::new(State::new(ui_rx, be_tx)));
+    }
+
+    /// Back to the login screen. Dropping the State drops the backend's
+    /// channel, which shuts the backend thread down.
+    fn log_out(&mut self, error: Option<String>, forget_token: bool) {
+        if forget_token {
+            self.config.saved_token = None;
+        }
+        self.settings = None;
+        self.editing_layout = false;
+        self.screen = Screen::Login(LoginForm::new(self.config.remember_login, error));
+    }
+
+    fn apply_theme(&mut self, ctx: &egui::Context) {
+        let want = (self.config.theme, self.config.zoom);
+        if self.applied != Some(want) {
+            self.config.theme.palette().apply(ctx);
+            ctx.set_zoom_factor(self.config.zoom);
+            self.applied = Some(want);
+        }
+    }
+
+    fn top_bar(&mut self, ui: &mut egui::Ui, pal: &Palette, status: &str) {
+        egui::Panel::top("top_bar")
+            .frame(
+                egui::Frame::new()
+                    .fill(pal.servers)
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("RustCord").strong());
+                    if self.editing_layout {
+                        ui.separator();
+                        ui.label(RichText::new("✏ Editing layout").strong().color(pal.accent));
+                        ui.label(
+                            RichText::new(
+                                "hover a panel, hold and drag to move · drag the gaps to resize",
+                            )
+                            .small()
+                            .color(pal.muted),
+                        );
+                        if ui.button("↺ Reset").clicked() {
+                            self.tree = layout::default_tree();
+                        }
+                        if ui.add(pal.primary_button("✔ Done")).clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                        {
+                            self.editing_layout = false;
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(status).small().color(pal.muted));
+                    });
+                });
+            });
     }
 }
 
 impl eframe::App for RustCordApp {
-    /// Drain backend events before each frame.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.state.drain_events();
-        if self.state.expire_typing() {
+        let Screen::Main(state) = &mut self.screen else {
+            return;
+        };
+        state.drain_events(ctx, &self.config);
+
+        // Files dropped onto the window go into the upload list.
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            state.add_files(dropped);
+        }
+
+        if self.config.modules.typing_indicators && state.expire_typing() {
             // Keep ticking so "is typing…" disappears on time.
             ctx.request_repaint_after(Duration::from_secs(1));
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("top_bar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("RustCord").strong());
-                ui.separator();
-                ui.toggle_value(&mut self.editing_layout, "✏ Edit layout")
-                    .on_hover_text(
-                        "Drag a panel's title bar to move it.\n\
-                         Drag the lines between panels to resize.",
-                    );
-                if self.editing_layout && ui.button("↺ Reset layout").clicked() {
-                    self.tree = layout::default_tree();
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.weak(&self.state.status);
-                });
-            });
-        });
+        let ctx = ui.ctx().clone();
+        self.apply_theme(&ctx);
+        let pal = self.config.theme.palette();
 
+        // ---- Login screen
+        if let Screen::Login(form) = &mut self.screen {
+            match form.ui(ui, &pal) {
+                Some(LoginAction::Login { token, remember }) => {
+                    self.config.remember_login = remember;
+                    self.config.saved_token = remember.then(|| token.clone());
+                    self.start_session(&ctx, token, false);
+                }
+                Some(LoginAction::Demo) => self.start_session(&ctx, String::new(), true),
+                None => {}
+            }
+            return;
+        }
+
+        // ---- Main screen
+        let (status, fatal, wants_settings) = match &mut self.screen {
+            Screen::Main(state) => (
+                state.status.clone(),
+                state.fatal.take(),
+                std::mem::take(&mut state.open_settings),
+            ),
+            Screen::Login(_) => unreachable!(),
+        };
+        if let Some(reason) = fatal {
+            // Bad token etc.: back to login and forget the saved token.
+            self.log_out(Some(reason), true);
+            return;
+        }
+        if wants_settings {
+            self.settings = Some(SettingsPage::default());
+            self.editing_layout = false;
+        }
+
+        // Settings page replaces the main UI while open.
+        if let Some(page) = &mut self.settings {
+            let Screen::Main(state) = &mut self.screen else {
+                return;
+            };
+            let action = page.ui(ui, &mut self.config, state.me.as_ref(), &pal);
+            match action {
+                Some(SettingsAction::Close) => self.settings = None,
+                Some(SettingsAction::EditLayout) => {
+                    self.settings = None;
+                    self.editing_layout = true;
+                }
+                Some(SettingsAction::ResetLayout) => self.tree = layout::default_tree(),
+                Some(SettingsAction::LogOut) => self.log_out(None, true),
+                None => {}
+            }
+            return;
+        }
+
+        if !self.config.modules.layout_editor {
+            self.editing_layout = false;
+        }
+        self.top_bar(ui, &pal, &status);
+
+        let Screen::Main(state) = &mut self.screen else {
+            return;
+        };
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let mut behavior = LayoutBehavior {
-                state: &mut self.state,
+                state,
+                config: &self.config,
+                pal,
                 editing: self.editing_layout,
             };
             self.tree.ui(&mut behavior, ui);
         });
+        layout::end_frame(&self.tree, &ctx);
 
-        self.state.modals(ui);
+        state.overlays(ui, &pal);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if !self.config.remember_login {
+            self.config.saved_token = None;
+        }
+        eframe::set_value(storage, CONFIG_KEY, &self.config);
         eframe::set_value(storage, LAYOUT_KEY, &self.tree);
     }
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Chat state
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 /// What the message box is currently doing.
 enum Compose {
@@ -126,6 +284,12 @@ pub struct State {
     tx: UnboundedSender<ToBackend>,
 
     status: String,
+    connected: bool,
+    /// Set when the session can't continue (bad token); the app logs out.
+    fatal: Option<String>,
+    /// Set by the ⚙ button; the app opens settings.
+    open_settings: bool,
+
     me: Option<User>,
     guilds: Vec<Guild>,
     dms: Guild,
@@ -134,11 +298,14 @@ pub struct State {
 
     /// channel_id -> messages (oldest first)
     messages: HashMap<String, Vec<Message>>,
+    /// Most recently viewed channels first; used to free old channels.
+    recent_channels: VecDeque<String>,
     /// channel_id -> people typing there
     typing: HashMap<String, Vec<Typer>>,
 
     draft: String,
     compose: Compose,
+    pending_files: Vec<PathBuf>,
     last_typing_sent: Option<(String, Instant)>,
     confirm_delete: Option<(String, String)>,
 }
@@ -148,16 +315,21 @@ impl State {
         Self {
             rx,
             tx,
-            status: "Starting…".into(),
+            status: "Connecting…".into(),
+            connected: false,
+            fatal: None,
+            open_settings: false,
             me: None,
             guilds: Vec::new(),
             dms: Guild::dms(Vec::new()),
             selected_guild: None,
             selected_channel: None,
             messages: HashMap::new(),
+            recent_channels: VecDeque::new(),
             typing: HashMap::new(),
             draft: String::new(),
             compose: Compose::New,
+            pending_files: Vec::new(),
             last_typing_sent: None,
             confirm_delete: None,
         }
@@ -165,17 +337,24 @@ impl State {
 
     // ----- events --------------------------------------------------------
 
-    fn drain_events(&mut self) {
+    fn drain_events(&mut self, ctx: &egui::Context, config: &Config) {
         while let Ok(ev) = self.rx.try_recv() {
-            self.handle_event(ev);
+            self.handle_event(ev, ctx, config);
         }
     }
 
-    fn handle_event(&mut self, ev: ToUi) {
+    fn handle_event(&mut self, ev: ToUi, ctx: &egui::Context, config: &Config) {
         match ev {
-            ToUi::Status(s) => self.status = s,
+            ToUi::Status(s) => {
+                if !s.starts_with("Error") {
+                    self.connected = false;
+                }
+                self.status = s;
+            }
+            ToUi::Fatal(reason) => self.fatal = Some(reason),
             ToUi::Ready { me, guilds, dms } => {
-                self.status = format!("Connected as {}", me.name);
+                self.status = "Connected".into();
+                self.connected = true;
                 self.me = Some(me);
                 self.guilds = guilds;
                 self.dms = Guild::dms(dms);
@@ -207,12 +386,11 @@ impl State {
             } => {
                 self.messages.insert(channel_id, messages);
             }
+            ToUi::FilesPicked(paths) => self.add_files(paths),
             ToUi::NewMessage(msg) => {
-                // They sent it, so they've stopped typing.
                 if let Some(typers) = self.typing.get_mut(&msg.channel_id) {
                     typers.retain(|t| t.user_id != msg.author.id);
                 }
-                // Bump DMs to the top of the list.
                 if let Some(c) = self
                     .dms
                     .channels
@@ -222,12 +400,16 @@ impl State {
                     c.last_message_id = msg.id.parse().unwrap_or(c.last_message_id);
                     self.dms.sort_channels();
                 }
-                // Only keep live messages for channels we've opened; the rest
-                // load fresh from history when opened.
+                // Only keep live messages for channels we have cached.
                 if let Some(list) = self.messages.get_mut(&msg.channel_id)
                     && !list.iter().any(|m| m.id == msg.id)
                 {
                     list.push(msg);
+                    let cap = config.max_messages_per_channel.max(10);
+                    if list.len() > cap {
+                        let removed: Vec<Message> = list.drain(..list.len() - cap).collect();
+                        forget_message_images(ctx, &removed);
+                    }
                 }
             }
             ToUi::MessageUpdated(patch) => {
@@ -252,7 +434,9 @@ impl State {
                 user_id,
                 name,
             } => {
-                if self.me.as_ref().is_some_and(|me| me.id == user_id) {
+                if !config.modules.typing_indicators
+                    || self.me.as_ref().is_some_and(|me| me.id == user_id)
+                {
                     return;
                 }
                 let name = name.unwrap_or_else(|| self.name_for(&channel_id, &user_id));
@@ -267,8 +451,6 @@ impl State {
         }
     }
 
-    /// Best-effort display name for a user in a channel (used for typing in
-    /// DMs, where Discord doesn't send the name).
     fn name_for(&self, channel_id: &str, user_id: &str) -> String {
         if let Some(u) = self
             .dms
@@ -293,6 +475,23 @@ impl State {
         !self.typing.is_empty()
     }
 
+    fn add_files(&mut self, paths: Vec<PathBuf>) {
+        if self.selected_channel.is_none() {
+            self.status = "Open a channel before adding files".into();
+            return;
+        }
+        for p in paths {
+            if p.is_file() && !self.pending_files.contains(&p) {
+                self.pending_files.push(p);
+            } else if !p.exists() {
+                // Demo mode "files" don't exist on disk; keep them anyway.
+                if !self.pending_files.contains(&p) {
+                    self.pending_files.push(p);
+                }
+            }
+        }
+    }
+
     // ----- selection -----------------------------------------------------
 
     fn current_guild(&self) -> Option<&Guild> {
@@ -311,7 +510,7 @@ impl State {
         }
     }
 
-    fn select_channel(&mut self, channel_id: String) {
+    fn select_channel(&mut self, channel_id: String, ctx: &egui::Context, config: &Config) {
         if !self.messages.contains_key(&channel_id) {
             let _ = self.tx.send(ToBackend::LoadHistory {
                 channel_id: channel_id.clone(),
@@ -319,6 +518,18 @@ impl State {
         }
         if self.selected_channel.as_ref() != Some(&channel_id) {
             self.compose = Compose::New;
+            self.pending_files.clear();
+        }
+
+        // Most-recent-first list; free the oldest channels past the limit.
+        self.recent_channels.retain(|c| c != &channel_id);
+        self.recent_channels.push_front(channel_id.clone());
+        while self.recent_channels.len() > config.cached_channels.max(1) {
+            if let Some(old) = self.recent_channels.pop_back()
+                && let Some(msgs) = self.messages.remove(&old)
+            {
+                forget_message_images(ctx, &msgs);
+            }
         }
         self.selected_channel = Some(channel_id);
     }
@@ -330,23 +541,27 @@ impl State {
 
     // ----- panes ---------------------------------------------------------
 
-    pub fn pane_ui(&mut self, ui: &mut egui::Ui, pane: Pane) {
+    pub fn pane_ui(&mut self, ui: &mut egui::Ui, pane: Pane, config: &Config, pal: &Palette) {
         match pane {
-            Pane::Servers => self.servers_pane(ui),
-            Pane::Channels => self.channels_pane(ui),
-            Pane::Messages => self.messages_pane(ui),
-            Pane::Composer => self.composer_pane(ui),
+            Pane::Servers => self.servers_pane(ui, config, pal),
+            Pane::Profile => self.profile_pane(ui, config, pal),
+            Pane::Channels => self.channels_pane(ui, config, pal),
+            Pane::Messages => self.messages_pane(ui, config, pal),
+            Pane::Composer => self.composer_pane(ui, config, pal),
+            Pane::Members => self.members_pane(ui, config, pal),
         }
     }
 
-    fn servers_pane(&mut self, ui: &mut egui::Ui) {
+    fn servers_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let mut clicked = None;
         egui::ScrollArea::vertical()
             .id_salt("servers")
             .auto_shrink(false)
             .show(ui, |ui| {
                 let dm_selected = self.selected_guild.as_deref() == Some(DM_GUILD_ID);
-                if server_button(ui, dm_selected, None, "💬", "Direct Messages").clicked() {
+                if server_button(ui, dm_selected, None, "💬", "Direct Messages", config, pal)
+                    .clicked()
+                {
                     clicked = Some(DM_GUILD_ID.to_string());
                 }
                 ui.separator();
@@ -358,8 +573,16 @@ impl State {
                         .filter_map(|w| w.chars().next())
                         .take(2)
                         .collect();
-                    if server_button(ui, selected, g.icon_url.as_deref(), &initials, &g.name)
-                        .clicked()
+                    if server_button(
+                        ui,
+                        selected,
+                        g.icon_url.as_deref(),
+                        &initials,
+                        &g.name,
+                        config,
+                        pal,
+                    )
+                    .clicked()
                     {
                         clicked = Some(g.id.clone());
                     }
@@ -370,12 +593,50 @@ impl State {
         }
     }
 
-    fn channels_pane(&mut self, ui: &mut egui::Ui) {
+    /// Bottom-left user panel: avatar with status dot, name, settings gear.
+    fn profile_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
+        ui.horizontal_centered(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let gear = ui
+                    .add(egui::Button::new(RichText::new("⚙").size(18.0)).frame(false))
+                    .on_hover_text("User Settings");
+                if gear.clicked() {
+                    self.open_settings = true;
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    let (name, uid, url) = match &self.me {
+                        Some(me) => (me.name.as_str(), me.id.as_str(), me.avatar_url.as_str()),
+                        None => ("…", "", ""),
+                    };
+                    let rect = avatar(ui, uid, name, url, 32.0, config, pal);
+                    // Status dot
+                    let dot = rect.right_bottom() - vec2(4.0, 4.0);
+                    let col = if self.connected {
+                        pal.online
+                    } else {
+                        pal.muted
+                    };
+                    ui.painter().circle_filled(dot, 6.0, pal.servers);
+                    ui.painter().circle_filled(dot, 4.0, col);
+
+                    if ui.available_width() > 40.0 {
+                        ui.vertical(|ui| {
+                            ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
+                            let status = if self.connected { "Online" } else { "Offline" };
+                            ui.label(RichText::new(status).small().color(pal.muted));
+                        });
+                    }
+                });
+            });
+        });
+    }
+
+    fn channels_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let Some(guild) = self.current_guild() else {
-            ui.weak("No server selected");
+            ui.label(RichText::new("No server selected").color(pal.muted));
             return;
         };
-        ui.label(RichText::new(&guild.name).strong().size(15.0));
+        ui.add(egui::Label::new(RichText::new(&guild.name).strong().size(15.0)).truncate());
         ui.separator();
 
         let mut clicked = None;
@@ -386,24 +647,38 @@ impl State {
             .show(ui, |ui| {
                 let groups = guild.channel_groups();
                 if groups.is_empty() {
-                    ui.weak(if guild.is_dms() {
-                        "No DMs"
-                    } else {
-                        "No text channels"
-                    });
+                    ui.label(
+                        RichText::new(if guild.is_dms() {
+                            "No DMs"
+                        } else {
+                            "No text channels"
+                        })
+                        .color(pal.muted),
+                    );
                 }
                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
                     for group in groups {
                         if let Some(cat) = group.category {
-                            ui.add_space(6.0);
-                            ui.label(RichText::new(cat.name.to_uppercase()).small().weak());
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(cat.name.to_uppercase())
+                                    .small()
+                                    .strong()
+                                    .color(pal.muted),
+                            );
                         }
                         for c in group.channels {
                             first.get_or_insert_with(|| c.id.clone());
                             let selected = self.selected_channel.as_deref() == Some(c.id.as_str());
-                            let resp =
-                                ui.add(egui::Button::selectable(selected, c.label()).truncate());
-                            if resp.clicked() {
+                            let text = if selected {
+                                RichText::new(c.label()).color(pal.text)
+                            } else {
+                                RichText::new(c.label()).color(pal.muted)
+                            };
+                            if ui
+                                .add(egui::Button::selectable(selected, text).truncate())
+                                .clicked()
+                            {
                                 clicked = Some(c.id.clone());
                             }
                         }
@@ -411,20 +686,22 @@ impl State {
                 });
             });
 
-        // Auto-open the first channel when switching servers.
         let auto = if self.selected_channel.is_none() {
             first
         } else {
             None
         };
         if let Some(id) = clicked.or(auto) {
-            self.select_channel(id);
+            let ctx = ui.ctx().clone();
+            self.select_channel(id, &ctx, config);
         }
     }
 
-    fn messages_pane(&mut self, ui: &mut egui::Ui) {
+    fn messages_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let Some(channel_id) = self.selected_channel.clone() else {
-            ui.centered_and_justified(|ui| ui.weak("Pick a channel"));
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new("Pick a channel").color(pal.muted))
+            });
             return;
         };
         if let Some(title) = self.channel_title() {
@@ -436,7 +713,9 @@ impl State {
             return;
         };
         if messages.is_empty() {
-            ui.centered_and_justified(|ui| ui.weak("No messages yet"));
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new("No messages yet").color(pal.muted))
+            });
             return;
         }
 
@@ -450,10 +729,10 @@ impl State {
             .show(ui, |ui| {
                 let mut prev: Option<&Message> = None;
                 for m in messages {
-                    // Collapse consecutive messages from the same person.
                     let grouped =
                         m.reply.is_none() && prev.is_some_and(|p| p.author.id == m.author.id);
-                    if let Some(a) = message_row(ui, m, grouped, m.author.id == my_id) {
+                    if let Some(a) = message_row(ui, m, grouped, m.author.id == my_id, config, pal)
+                    {
                         action = Some(a);
                     }
                     prev = Some(m);
@@ -477,74 +756,222 @@ impl State {
         }
     }
 
-    fn composer_pane(&mut self, ui: &mut egui::Ui) {
+    fn composer_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let Some(channel_id) = self.selected_channel.clone() else {
-            ui.weak("Pick a channel to start chatting");
+            ui.label(RichText::new("Pick a channel to start chatting").color(pal.muted));
             return;
         };
 
-        // Who's typing
-        if let Some(typers) = self.typing.get(&channel_id).filter(|t| !t.is_empty()) {
-            let names: Vec<&str> = typers.iter().map(|t| t.name.as_str()).collect();
-            let text = match names.as_slice() {
-                [one] => format!("{one} is typing…"),
-                [a, b] => format!("{a} and {b} are typing…"),
-                _ => "Several people are typing…".into(),
-            };
-            ui.label(RichText::new(text).small().italics().weak());
-        }
-
-        // Reply / edit banner
         let mut cancel = false;
-        match &self.compose {
-            Compose::New => {}
-            Compose::Reply { author, .. } => {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("Replying to {author}")).small());
-                    cancel = ui.small_button("✕").clicked();
-                });
-            }
-            Compose::Edit { .. } => {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Editing message — Esc to cancel").small());
-                    cancel = ui.small_button("✕").clicked();
-                });
-            }
-        }
-
         let mut send = false;
         let mut changed = false;
-        ui.horizontal(|ui| {
-            let send_width = 60.0;
-            let edit = egui::TextEdit::singleline(&mut self.draft)
-                .hint_text("Message")
-                .desired_width(ui.available_width() - send_width);
-            let resp = ui.add(edit);
-            changed = resp.changed();
+        let mut remove = None;
 
-            if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                cancel = true;
+        // Built bottom-up (like Discord) so the input row always stays visible
+        // and extra rows (files, reply banner) grow upwards.
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+            // Who's typing (under the box)
+            let typing = config
+                .modules
+                .typing_indicators
+                .then(|| self.typing.get(&channel_id))
+                .flatten()
+                .filter(|t| !t.is_empty());
+            let typing_text =
+                match typing.map(|t| t.iter().map(|t| t.name.as_str()).collect::<Vec<_>>()) {
+                    Some(names) => match names.as_slice() {
+                        [one] => format!("{one} is typing…"),
+                        [a, b] => format!("{a} and {b} are typing…"),
+                        _ => "Several people are typing…".into(),
+                    },
+                    None => String::new(),
+                };
+            ui.label(
+                RichText::new(typing_text)
+                    .small()
+                    .italics()
+                    .color(pal.muted),
+            );
+
+            // [+] [ message …               ] [➤]
+            egui::Frame::new()
+                .fill(pal.input)
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(8, 6))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        let plus = ui
+                            .add(egui::Button::new(RichText::new("➕").size(16.0)).frame(false))
+                            .on_hover_text("Upload files (or drag them onto the window)");
+                        if plus.clicked() {
+                            let _ = self.tx.send(ToBackend::PickFiles);
+                        }
+
+                        let hint = match self.channel_title() {
+                            Some(t) => format!("Message {t}"),
+                            None => "Message".into(),
+                        };
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.draft)
+                                .hint_text(hint)
+                                .frame(egui::Frame::NONE)
+                                .desired_width(ui.available_width() - 40.0),
+                        );
+                        changed = resp.changed();
+                        if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            cancel = true;
+                        }
+                        let enter =
+                            resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let can_send =
+                            !self.draft.trim().is_empty() || !self.pending_files.is_empty();
+                        let send_btn = ui
+                            .add_enabled(
+                                can_send,
+                                egui::Button::new(RichText::new("➤").color(Color32::WHITE))
+                                    .fill(pal.accent)
+                                    .corner_radius(6),
+                            )
+                            .on_hover_text("Send");
+                        if enter || send_btn.clicked() {
+                            send = true;
+                            resp.request_focus();
+                        }
+                    });
+                });
+
+            // Files waiting to upload
+            if !self.pending_files.is_empty() {
+                ui.with_layout(
+                    egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
+                    |ui| {
+                        let mut total = 0;
+                        for (i, p) in self.pending_files.iter().enumerate() {
+                            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                            total += size;
+                            let name = p
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            egui::Frame::new()
+                                .fill(pal.input)
+                                .corner_radius(6)
+                                .inner_margin(egui::Margin::symmetric(6, 2))
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new(format!("📄 {name}")).small());
+                                    ui.label(
+                                        RichText::new(human_size(size)).small().color(pal.muted),
+                                    );
+                                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                                        remove = Some(i);
+                                    }
+                                });
+                        }
+                        if total > UPLOAD_LIMIT {
+                            ui.label(
+                                RichText::new("Over 10 MB, Discord may reject this")
+                                    .small()
+                                    .color(pal.danger),
+                            );
+                        }
+                    },
+                );
             }
-            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let clicked = ui.button("Send").clicked();
-            if enter || clicked {
-                send = true;
-                resp.request_focus();
+
+            // Reply / edit banner
+            let banner = match &self.compose {
+                Compose::New => None,
+                Compose::Reply { author, .. } => Some(format!("Replying to {author}")),
+                Compose::Edit { .. } => Some("Editing message · Esc to cancel".to_string()),
+            };
+            if let Some(text) = banner {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(text).small().color(pal.muted));
+                    cancel |= ui.small_button("✕").clicked();
+                });
             }
         });
 
+        if let Some(i) = remove {
+            self.pending_files.remove(i);
+        }
         if cancel {
             if matches!(self.compose, Compose::Edit { .. }) {
                 self.draft.clear();
             }
             self.compose = Compose::New;
         }
-        if changed && !self.draft.is_empty() {
+        if changed && !self.draft.is_empty() && config.modules.typing_indicators {
             self.maybe_send_typing(&channel_id);
         }
         if send {
             self.submit(channel_id);
         }
+    }
+
+    /// People in the current DM, or recently active in the current channel.
+    fn members_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
+        if !config.modules.member_list {
+            ui.label(
+                RichText::new("Member list is off (Settings → Modules)")
+                    .small()
+                    .color(pal.muted),
+            );
+            return;
+        }
+        let Some(channel_id) = self.selected_channel.clone() else {
+            return;
+        };
+
+        let (title, people): (&str, Vec<User>) = match self.dms.channel(&channel_id) {
+            Some(dm) => {
+                let mut people = dm.recipients.clone();
+                people.extend(self.me.clone());
+                ("MEMBERS", people)
+            }
+            None => {
+                let mut seen: Vec<User> = Vec::new();
+                if let Some(msgs) = self.messages.get(&channel_id) {
+                    for m in msgs.iter().rev() {
+                        if !seen.iter().any(|u| u.id == m.author.id) {
+                            seen.push(m.author.clone());
+                        }
+                    }
+                }
+                ("RECENTLY ACTIVE", seen)
+            }
+        };
+
+        ui.label(
+            RichText::new(format!("{title} — {}", people.len()))
+                .small()
+                .strong()
+                .color(pal.muted),
+        );
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical()
+            .id_salt("members")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                for u in &people {
+                    ui.horizontal(|ui| {
+                        avatar(ui, &u.id, &u.name, &u.avatar_url, 28.0, config, pal);
+                        ui.add(
+                            egui::Label::new(RichText::new(&u.name).color(pal.muted)).truncate(),
+                        );
+                        if u.bot {
+                            ui.label(
+                                RichText::new(" BOT ")
+                                    .small()
+                                    .color(Color32::WHITE)
+                                    .background_color(pal.accent),
+                            );
+                        }
+                    });
+                    ui.add_space(2.0);
+                }
+            });
     }
 
     /// Tell Discord we're typing, at most every 8 seconds per channel.
@@ -563,24 +990,27 @@ impl State {
 
     fn submit(&mut self, channel_id: String) {
         let content = self.draft.trim().to_string();
-        if content.is_empty() {
+        let files = std::mem::take(&mut self.pending_files);
+        if content.is_empty() && files.is_empty() {
             return;
         }
         let req = match std::mem::replace(&mut self.compose, Compose::New) {
+            Compose::Edit { message_id } => ToBackend::Edit {
+                channel_id,
+                message_id,
+                content,
+            },
             Compose::New => ToBackend::Send {
                 channel_id,
                 content,
                 reply_to: None,
+                files,
             },
             Compose::Reply { message_id, .. } => ToBackend::Send {
                 channel_id,
                 content,
                 reply_to: Some(message_id),
-            },
-            Compose::Edit { message_id } => ToBackend::Edit {
-                channel_id,
-                message_id,
-                content,
+                files,
             },
         };
         let _ = self.tx.send(req);
@@ -588,24 +1018,53 @@ impl State {
         self.last_typing_sent = None;
     }
 
-    fn modals(&mut self, ui: &mut egui::Ui) {
+    /// Delete confirmation and the "drop files here" overlay.
+    fn overlays(&mut self, ui: &mut egui::Ui, pal: &Palette) {
+        // Drag-and-drop hint
+        let hovering_files = ui.input(|i| !i.raw.hovered_files.is_empty());
+        if hovering_files {
+            let rect = ui.ctx().content_rect();
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::unique("drop_overlay"),
+            ));
+            painter.rect_filled(rect, 0, Color32::from_black_alpha(170));
+            let text = match self.channel_title() {
+                Some(t) => format!("Drop to upload to {t}"),
+                None => "Open a channel first".into(),
+            };
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                text,
+                egui::FontId::proportional(24.0),
+                pal.text,
+            );
+        }
+
         let Some((channel_id, message_id)) = self.confirm_delete.clone() else {
             return;
         };
         let mut close = false;
         egui::Modal::new(egui::Id::unique("confirm_delete")).show(ui.ctx(), |ui| {
-            ui.heading("Delete message?");
-            ui.label("This can't be undone.");
+            ui.heading("Delete Message");
+            ui.label("Are you sure you want to delete this message?");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Delete").clicked() {
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new("Delete").color(Color32::WHITE))
+                            .fill(pal.danger),
+                    )
+                    .clicked()
+                {
                     let _ = self.tx.send(ToBackend::Delete {
                         channel_id: channel_id.clone(),
                         message_id: message_id.clone(),
                     });
-                    close = true;
-                }
-                if ui.button("Cancel").clicked() {
                     close = true;
                 }
             });
@@ -616,9 +1075,61 @@ impl State {
     }
 }
 
-// ---------------------------------------------------------------------------
+/// Free the GPU/CPU copies of attachment images for messages we no longer keep.
+fn forget_message_images(ctx: &egui::Context, messages: &[Message]) {
+    let (w, h) = IMAGE_MAX;
+    for m in messages {
+        for a in m.attachments.iter().filter(|a| a.is_image()) {
+            ctx.forget_image(&a.thumbnail_url(w as u32, h as u32));
+        }
+    }
+}
+
+// ===========================================================================
 // Widgets
-// ---------------------------------------------------------------------------
+// ===========================================================================
+
+/// Round avatar. With the Images module off, a coloured circle with the
+/// first letter instead (no download, no texture).
+fn avatar(
+    ui: &mut egui::Ui,
+    user_id: &str,
+    name: &str,
+    url: &str,
+    size: f32,
+    config: &Config,
+    pal: &Palette,
+) -> egui::Rect {
+    if config.modules.images && !url.is_empty() {
+        ui.add(
+            egui::Image::from_uri(url)
+                .fit_to_exact_size(vec2(size, size))
+                .corner_radius(size / 2.0),
+        )
+        .rect
+    } else {
+        let (rect, _) = ui.allocate_exact_size(vec2(size, size), egui::Sense::hover());
+        let hue = user_id
+            .bytes()
+            .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+        let col = egui::ecolor::Hsva::new((hue % 360) as f32 / 360.0, 0.45, 0.6, 1.0);
+        ui.painter().circle_filled(rect.center(), size / 2.0, col);
+        let letter = name
+            .chars()
+            .next()
+            .unwrap_or('?')
+            .to_uppercase()
+            .to_string();
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            letter,
+            egui::FontId::proportional(size * 0.45),
+            pal.text,
+        );
+        rect
+    }
+}
 
 /// A server entry: icon (or initials) plus name.
 fn server_button(
@@ -627,44 +1138,71 @@ fn server_button(
     icon: Option<&str>,
     fallback: &str,
     name: &str,
+    config: &Config,
+    pal: &Palette,
 ) -> egui::Response {
     let resp = ui
         .horizontal(|ui| {
-            let size = vec2(28.0, 28.0);
-            match icon {
+            let size = vec2(32.0, 32.0);
+            match icon.filter(|_| config.modules.images) {
                 Some(url) => {
                     ui.add(
                         egui::Image::from_uri(url)
                             .fit_to_exact_size(size)
-                            .corner_radius(14),
+                            .corner_radius(16),
                     );
                 }
                 None => {
-                    ui.add_sized(size, egui::Label::new(RichText::new(fallback).strong()));
+                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                    let fill = if selected { pal.accent } else { pal.sidebar };
+                    ui.painter().circle_filled(rect.center(), 16.0, fill);
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        fallback,
+                        egui::FontId::proportional(13.0),
+                        pal.text,
+                    );
                 }
             }
-            ui.add(egui::Button::selectable(selected, name).truncate())
+            if ui.available_width() > 30.0 {
+                ui.add(egui::Button::selectable(selected, name).truncate())
+            } else {
+                ui.allocate_response(vec2(0.0, 0.0), egui::Sense::click())
+            }
         })
-        .inner;
+        .response;
+    let resp = ui.interact(resp.rect, resp.id.with("server"), egui::Sense::click());
     resp.on_hover_text(name)
 }
 
 /// Draw one message. Returns an action if the user picked one from its menu.
-fn message_row(ui: &mut egui::Ui, m: &Message, grouped: bool, mine: bool) -> Option<MessageAction> {
+fn message_row(
+    ui: &mut egui::Ui,
+    m: &Message,
+    grouped: bool,
+    mine: bool,
+    config: &Config,
+    pal: &Palette,
+) -> Option<MessageAction> {
     let mut action = None;
     if !grouped {
-        ui.add_space(6.0);
+        ui.add_space(8.0);
     }
 
     ui.horizontal_top(|ui| {
-        let avatar = vec2(32.0, 32.0);
+        let avatar_size = 36.0;
         if grouped {
-            ui.add_space(avatar.x + ui.spacing().item_spacing.x);
+            ui.add_space(avatar_size + ui.spacing().item_spacing.x);
         } else {
-            ui.add(
-                egui::Image::from_uri(&m.author.avatar_url)
-                    .fit_to_exact_size(avatar)
-                    .corner_radius(16),
+            avatar(
+                ui,
+                &m.author.id,
+                &m.author.name,
+                &m.author.avatar_url,
+                avatar_size,
+                config,
+                pal,
             );
         }
 
@@ -673,37 +1211,67 @@ fn message_row(ui: &mut egui::Ui, m: &Message, grouped: bool, mine: bool) -> Opt
                 ui.label(
                     RichText::new(format!("↪ {}: {}", reply.author, reply.content))
                         .small()
-                        .weak(),
+                        .color(pal.muted),
                 );
             }
             if !grouped {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&m.author.name).strong());
-                    ui.label(RichText::new(m.short_time()).small().weak());
+                    if m.author.bot {
+                        ui.label(
+                            RichText::new(" BOT ")
+                                .small()
+                                .color(Color32::WHITE)
+                                .background_color(pal.accent),
+                        );
+                    }
+                    ui.label(RichText::new(m.short_time()).small().color(pal.muted));
                 });
             }
 
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let mut text_responses = Vec::new();
                 if !m.content.is_empty() {
-                    // Right-click the text for the same menu as "⋯".
-                    let text = ui.add(egui::Label::new(&m.content).sense(egui::Sense::click()));
-                    egui::Popup::context_menu(&text).show(|ui| {
-                        message_menu(ui, m, mine, &mut action);
-                    });
+                    if config.modules.emoji_images {
+                        let segs = emoji::segments(&m.content);
+                        let size = if emoji::is_jumbo(&segs) { 44.0 } else { 20.0 };
+                        for seg in segs {
+                            match seg {
+                                Segment::Text(t) => text_responses
+                                    .push(ui.add(egui::Label::new(t).sense(egui::Sense::click()))),
+                                Segment::Emoji { url, alt } => {
+                                    ui.add(
+                                        egui::Image::from_uri(url)
+                                            .fit_to_exact_size(vec2(size, size)),
+                                    )
+                                    .on_hover_text(alt);
+                                }
+                            }
+                        }
+                    } else {
+                        text_responses
+                            .push(ui.add(egui::Label::new(&m.content).sense(egui::Sense::click())));
+                    }
                 }
+                ui.spacing_mut().item_spacing.x = 6.0;
                 if m.edited {
-                    ui.label(RichText::new("(edited)").small().weak());
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("(edited)").small().color(pal.muted));
                 }
+                ui.add_space(4.0);
                 let dots = ui
-                    .add(egui::Button::new(RichText::new("⋯").weak()).frame(false))
+                    .add(egui::Button::new(RichText::new("⋯").color(pal.muted)).frame(false))
                     .on_hover_text("More");
-                egui::Popup::menu(&dots).show(|ui| {
-                    message_menu(ui, m, mine, &mut action);
-                });
+                egui::Popup::menu(&dots).show(|ui| message_menu(ui, m, mine, &mut action));
+                // Right-click the text for the same menu.
+                for r in &text_responses {
+                    egui::Popup::context_menu(r).show(|ui| message_menu(ui, m, mine, &mut action));
+                }
             });
 
             for a in &m.attachments {
-                attachment_ui(ui, a);
+                attachment_ui(ui, a, config, pal);
             }
         });
     });
@@ -720,24 +1288,27 @@ fn message_menu(ui: &mut egui::Ui, m: &Message, mine: bool, action: &mut Option<
     if ui.button("📋 Copy text").clicked() {
         *action = Some(MessageAction::Copy(m.content.clone()));
     }
+    if ui.button("🆔 Copy message ID").clicked() {
+        *action = Some(MessageAction::Copy(m.id.clone()));
+    }
     if mine && ui.button("🗑 Delete").clicked() {
         *action = Some(MessageAction::Delete(m.id.clone()));
     }
 }
 
-fn attachment_ui(ui: &mut egui::Ui, a: &Attachment) {
-    if a.is_image() {
+fn attachment_ui(ui: &mut egui::Ui, a: &Attachment, config: &Config, pal: &Palette) {
+    if a.is_image() && config.modules.images {
         let (max_w, max_h) = IMAGE_MAX;
         let url = a.thumbnail_url(max_w as u32, max_h as u32);
         let mut image = egui::Image::from_uri(url)
-            .corner_radius(4)
+            .corner_radius(6)
             .sense(egui::Sense::click());
         image = match a.display_size(max_w, max_h) {
             Some((w, h)) => image.fit_to_exact_size(vec2(w, h)),
             None => image.max_size(vec2(max_w, max_h)),
         };
         let resp = ui.add(image).on_hover_text(format!(
-            "{} ({}) — click to open full size",
+            "{} ({}) · click to open full size",
             a.filename,
             a.human_size()
         ));
@@ -745,10 +1316,29 @@ fn attachment_ui(ui: &mut egui::Ui, a: &Attachment) {
             ui.ctx().open_url(egui::OpenUrl::new_tab(&a.url));
         }
     } else {
-        ui.horizontal(|ui| {
-            ui.label("📎");
-            ui.hyperlink_to(&a.filename, &a.url);
-            ui.label(RichText::new(a.human_size()).small().weak());
-        });
+        egui::Frame::new()
+            .fill(pal.sidebar)
+            .corner_radius(6)
+            .inner_margin(10)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("📄").size(20.0));
+                    ui.vertical(|ui| {
+                        ui.hyperlink_to(&a.filename, &a.url);
+                        ui.label(RichText::new(a.human_size()).small().color(pal.muted));
+                    });
+                });
+            });
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b >= 1_048_576.0 {
+        format!("{:.1} MB", b / 1_048_576.0)
+    } else if b >= 1024.0 {
+        format!("{:.0} KB", b / 1024.0)
+    } else {
+        format!("{b} B")
     }
 }

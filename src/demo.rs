@@ -18,6 +18,7 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
     };
 
     let me = user("1", "You", None);
+    send(ToUi::Status("Demo mode (offline)".into()));
     send(ToUi::Ready {
         me: User::from_json(&me),
         guilds: vec![Guild::from_json(&json!({
@@ -37,7 +38,6 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             "recipients": [user("2", "Sam", None)]
         }))],
     });
-    send(ToUi::Status("Demo mode (offline)".into()));
 
     let mut next_id = 1000u64;
     while let Some(req) = rx.recv().await {
@@ -49,17 +49,34 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             ToBackend::Send {
                 channel_id,
                 content,
+                files,
                 ..
             } => {
                 next_id += 1;
+                let attachments: Vec<Value> = files
+                    .iter()
+                    .map(|p| {
+                        json!({
+                            "url": "https://example.com/upload",
+                            "filename": p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+                            "size": std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+                        })
+                    })
+                    .collect();
                 send(ToUi::NewMessage(Message::from_json(&json!({
                     "id": next_id.to_string(),
                     "channel_id": channel_id,
                     "author": me,
                     "content": content,
+                    "attachments": attachments,
                     "timestamp": "2026-11-09T12:00:00.000000+00:00",
                 }))));
             }
+            // No real file dialog in demo mode: pretend two files were picked.
+            ToBackend::PickFiles => send(ToUi::FilesPicked(vec![
+                "holiday-photo.png".into(),
+                "notes.txt".into(),
+            ])),
             ToBackend::Edit {
                 channel_id,
                 message_id,
@@ -102,6 +119,12 @@ fn sample_messages(channel_id: &str) -> Vec<Message> {
     };
     vec![
         msg("1", &sam, "hey, is the new client working?", json!({})),
+        msg(
+            "11",
+            &alex,
+            "Unicode: Përshëndetje! Здравствуй 你好 こんにちは 안녕하세요 مرحبا नमस्ते Γειά 😀🎉👍❤️ ✓ ★ → ♫ <:pepe:123>",
+            json!({}),
+        ),
         msg("2", &sam, "the layout looks sick", json!({})),
         msg(
             "3",
@@ -115,6 +138,7 @@ fn sample_messages(channel_id: &str) -> Vec<Message> {
             "nice, does it do replies?",
             json!({ "referenced_message": { "author": me, "content": "yeah! you can drag the panels around now" } }),
         ),
+        msg("12", &sam, "🔥🔥🔥", json!({})),
         msg(
             "5",
             &me,

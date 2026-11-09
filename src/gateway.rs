@@ -106,7 +106,12 @@ pub async fn run_session(
                     WsMessage::Close(Some(close)) => {
                         let code: u16 = close.code.into();
                         if FATAL_CLOSE_CODES.contains(&code) {
-                            return Ok(SessionEnd::Fatal(format!("Gateway closed ({code}): {}", close.reason)));
+                            let why = match code {
+                                4004 => "Invalid token. Check it and log in again.".to_string(),
+                                4014 => "Discord refused the bot's intents. Turn on the Message Content intent in the Developer Portal.".to_string(),
+                                _ => format!("Discord closed the connection ({code}): {}", close.reason),
+                            };
+                            return Ok(SessionEnd::Fatal(why));
                         }
                         return Ok(SessionEnd::Retry);
                     }

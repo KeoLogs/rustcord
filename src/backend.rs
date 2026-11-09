@@ -64,7 +64,7 @@ async fn run(
             loop {
                 match gateway::run_session(&cfg, &tx, &repaint).await {
                     Ok(SessionEnd::Fatal(reason)) => {
-                        let _ = tx.send(ToUi::Status(reason));
+                        let _ = tx.send(ToUi::Fatal(reason));
                         repaint();
                         return;
                     }
@@ -99,10 +99,20 @@ async fn run(
                     channel_id,
                     content,
                     reply_to,
+                    files,
                 } => api
-                    .send_message(&channel_id, &content, reply_to.as_deref())
+                    .send_message(&channel_id, &content, reply_to.as_deref(), &files)
                     .await
                     .map(|_| None),
+                ToBackend::PickFiles => {
+                    let picked = rfd::AsyncFileDialog::new()
+                        .set_title("Upload files")
+                        .pick_files()
+                        .await
+                        .unwrap_or_default();
+                    let paths = picked.iter().map(|f| f.path().to_path_buf()).collect();
+                    Ok(Some(ToUi::FilesPicked(paths)))
+                }
                 ToBackend::Edit {
                     channel_id,
                     message_id,

@@ -5,6 +5,8 @@
 //! bot and user accounts (and change over time). Lenient parsing means a
 //! missing field gives an empty value instead of crashing the client.
 
+use std::path::PathBuf;
+
 use serde_json::Value;
 
 /// Discord channel types we care about.
@@ -41,7 +43,10 @@ pub struct User {
     pub id: String,
     /// Display name (global_name), falling back to username.
     pub name: String,
+    /// The unique @username.
+    pub username: String,
     pub avatar_url: String,
+    pub bot: bool,
 }
 
 impl User {
@@ -57,7 +62,9 @@ impl User {
         Self {
             id,
             name,
+            username: str_of(v, "username"),
             avatar_url,
+            bot: v.get("bot").and_then(Value::as_bool).unwrap_or(false),
         }
     }
 }
@@ -454,6 +461,8 @@ impl MessagePatch {
 #[derive(Debug)]
 pub enum ToUi {
     Status(String),
+    /// The session can't continue (e.g. invalid token). The UI logs out.
+    Fatal(String),
     Ready {
         me: User,
         guilds: Vec<Guild>,
@@ -469,6 +478,8 @@ pub enum ToUi {
         channel_id: String,
         messages: Vec<Message>,
     },
+    /// Files chosen in the "+" file picker.
+    FilesPicked(Vec<PathBuf>),
     NewMessage(Message),
     MessageUpdated(MessagePatch),
     MessageDeleted {
@@ -493,7 +504,11 @@ pub enum ToBackend {
         channel_id: String,
         content: String,
         reply_to: Option<String>,
+        /// Files to upload with the message.
+        files: Vec<PathBuf>,
     },
+    /// Open the system file picker (runs off the UI thread).
+    PickFiles,
     Edit {
         channel_id: String,
         message_id: String,

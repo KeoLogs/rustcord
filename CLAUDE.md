@@ -20,6 +20,21 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   `default_tree()`. Changing `Pane` can invalidate saved layouts (they fall
   back to the default if they fail to deserialize).
 - `src/demo.rs` fakes the backend when `RUSTCORD_DEMO=1`.
+- `src/config.rs` is the saved `Config` incl. `Modules` (on/off optional
+  features). A module that's off must do no work and load nothing. New
+  optional features should be modules (add to `Modules` + `MODULES`).
+- `src/settings.rs` is the settings page, `src/login.rs` the login screen,
+  `src/theme.rs` the Discord palette (use `Palette` colours, not hard-coded
+  ones), `src/emoji.rs` text/emoji segmentation (has unit tests).
+- `docs/PORTING.md` is the roadmap of features to port from Discord
+  Messenger (MIT, credit kept in README/About).
+
+## Memory
+
+Low RAM is a goal. Renderer is glow (not wgpu). Messages per channel and
+cached channels are capped (Config); evicted channels' images are freed with
+`ctx.forget_image`. Check `Settings → Performance` or `/proc/<pid>/status`
+VmRSS in demo mode before/after big changes.
 - `src/types.rs` holds Guild/Channel/Message plus the `ToUi` / `ToBackend` enums.
   Payloads are parsed leniently from `serde_json::Value` because bot and user
   payloads differ.
@@ -40,6 +55,7 @@ I/O in `app.rs`.
 ```sh
 cargo fmt
 cargo clippy -- -D warnings
+cargo test
 cargo build
 ```
 

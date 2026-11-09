@@ -1,5 +1,7 @@
 //! Minimal Discord REST client.
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
@@ -57,26 +59,54 @@ impl Api {
         Ok(messages)
     }
 
-    /// Send a message, optionally as a reply. The gateway echoes it back as
-    /// MESSAGE_CREATE, so we don't need the response.
+    /// Send a message, optionally as a reply and/or with files. The gateway
+    /// echoes it back as MESSAGE_CREATE, so we don't need the response.
     pub async fn send_message(
         &self,
         channel_id: &str,
         content: &str,
         reply_to: Option<&str>,
+        files: &[PathBuf],
     ) -> Result<()> {
         let mut body = json!({ "content": content });
         if let Some(id) = reply_to {
             body["message_reference"] = json!({ "message_id": id, "fail_if_not_exists": false });
         }
-        let resp = self
+        let request = self
             .http
             .post(format!("{API_BASE}/channels/{channel_id}/messages"))
-            .header("Authorization", &self.auth)
-            .json(&body)
-            .send()
-            .await
-            .context("send request failed")?;
+            .header("Authorization", &self.auth);
+
+        let request = if files.is_empty() {
+            request.json(&body)
+        } else {
+            // Multipart: JSON goes in `payload_json`, each file in `files[n]`.
+            let mut parts = Vec::new();
+            let mut meta = Vec::new();
+            for (i, path) in files.iter().enumerate() {
+                let bytes = tokio::fs::read(path)
+                    .await
+                    .with_context(|| format!("couldn't read {}", path.display()))?;
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("file{i}"));
+                meta.push(json!({ "id": i, "filename": name }));
+                let mime = mime_for(&name);
+                let part = reqwest::multipart::Part::bytes(bytes)
+                    .file_name(name)
+                    .mime_str(mime)?;
+                parts.push((format!("files[{i}]"), part));
+            }
+            body["attachments"] = json!(meta);
+            let mut form = reqwest::multipart::Form::new().text("payload_json", body.to_string());
+            for (name, part) in parts {
+                form = form.part(name, part);
+            }
+            request.multipart(form)
+        };
+
+        let resp = request.send().await.context("send request failed")?;
         Self::check(resp, "Sending message").await?;
         Ok(())
     }
@@ -127,5 +157,30 @@ impl Api {
             .context("typing request failed")?;
         Self::check(resp, "Typing indicator").await?;
         Ok(())
+    }
+}
+
+/// Content type from the file extension (Discord uses it to decide whether to
+/// show an image preview).
+fn mime_for(name: &str) -> &'static str {
+    let ext = name
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "wav" => "audio/wav",
+        "txt" | "log" | "md" | "rs" | "toml" | "json" => "text/plain",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
     }
 }
