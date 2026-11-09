@@ -6,6 +6,9 @@ mod backend;
 mod config;
 mod demo;
 mod emoji;
+// Forum channels and posts. Not wired into the UI yet.
+#[allow(dead_code)]
+mod forum;
 mod gateway;
 mod layout;
 mod login;
@@ -16,6 +19,9 @@ mod profile;
 mod read_state;
 mod settings;
 mod theme;
+// Threads: store, gateway events, channel-list rows. Not wired yet.
+#[allow(dead_code)]
+mod threads;
 mod timefmt;
 mod types;
 

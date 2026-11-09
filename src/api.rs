@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use crate::forum::ForumQuery;
+use crate::threads::{CHANNEL_PRIVATE_THREAD, CHANNEL_PUBLIC_THREAD, Thread, ThreadPage};
 use crate::types::Message;
 
 const API_BASE: &str = "https://discord.com/api/v10";
@@ -288,5 +290,190 @@ fn mime_for(name: &str) -> &'static str {
         "pdf" => "application/pdf",
         "zip" => "application/zip",
         _ => "application/octet-stream",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Threads and forums (see `threads.rs` / `forum.rs`). Join / leave / create
+// are only ever called because the user clicked something.
+// ---------------------------------------------------------------------------
+
+// Not called by the backend yet (threads / forums get wired in later).
+#[allow(dead_code)]
+impl Api {
+    async fn get_json(&self, url: &str, what: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(url)
+            .header("Authorization", &self.auth)
+            .send()
+            .await
+            .with_context(|| format!("{what} request failed"))?;
+        Ok(Self::check(resp, what).await?.json().await?)
+    }
+
+    async fn post_json(&self, url: &str, body: &Value, what: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .post(url)
+            .header("Authorization", &self.auth)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("{what} request failed"))?;
+        Ok(Self::check(resp, what).await?.json().await?)
+    }
+
+    /// All active threads in a server: `GET /guilds/{id}/threads/active`.
+    /// Documented for bots; Discord's own client doesn't use it, so user
+    /// accounts may get an error here (use `forum_threads` per channel).
+    pub async fn active_guild_threads(&self, guild_id: &str) -> Result<ThreadPage> {
+        let v = self
+            .get_json(
+                &format!("{API_BASE}/guilds/{guild_id}/threads/active"),
+                "Loading threads",
+            )
+            .await?;
+        Ok(ThreadPage::from_json(&v, Some(guild_id)))
+    }
+
+    /// One page of a forum's posts, the way Discord's client asks for them
+    /// (user accounts): `GET /channels/{forum}/threads/search?…`.
+    /// Undocumented endpoint; see the notes in `forum.rs`.
+    pub async fn forum_threads(&self, forum_id: &str, query: &ForumQuery) -> Result<ThreadPage> {
+        let v = self
+            .get_json(
+                &format!(
+                    "{API_BASE}/channels/{forum_id}/threads/search?{}",
+                    query.search_params()
+                ),
+                "Loading posts",
+            )
+            .await?;
+        Ok(ThreadPage::from_json(&v, None))
+    }
+
+    /// Public archived threads of a channel, newest archived first:
+    /// `GET /channels/{id}/threads/archived/public`. `before` is an ISO-8601
+    /// `archive_timestamp` (from `ThreadStore::oldest_archived_iso`).
+    pub async fn archived_public_threads(
+        &self,
+        channel_id: &str,
+        before: Option<&str>,
+        limit: u8,
+    ) -> Result<ThreadPage> {
+        let mut url = format!(
+            "{API_BASE}/channels/{channel_id}/threads/archived/public?limit={}",
+            limit.clamp(2, 100)
+        );
+        if let Some(b) = before {
+            // '+' in "+00:00" would be read as a space.
+            url.push_str("&before=");
+            url.push_str(&b.replace('+', "%2B"));
+        }
+        let v = self.get_json(&url, "Loading archived threads").await?;
+        Ok(ThreadPage::from_json(&v, None))
+    }
+
+    /// Join a thread: `PUT /channels/{thread}/thread-members/@me`.
+    pub async fn join_thread(&self, thread_id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .put(format!(
+                "{API_BASE}/channels/{thread_id}/thread-members/@me"
+            ))
+            .header("Authorization", &self.auth)
+            .header("Content-Length", "0")
+            .send()
+            .await
+            .context("join thread request failed")?;
+        Self::check(resp, "Joining thread").await?;
+        Ok(())
+    }
+
+    /// Leave a thread: `DELETE /channels/{thread}/thread-members/@me`.
+    pub async fn leave_thread(&self, thread_id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .delete(format!(
+                "{API_BASE}/channels/{thread_id}/thread-members/@me"
+            ))
+            .header("Authorization", &self.auth)
+            .send()
+            .await
+            .context("leave thread request failed")?;
+        Self::check(resp, "Leaving thread").await?;
+        Ok(())
+    }
+
+    /// Start a thread from a message:
+    /// `POST /channels/{channel}/messages/{message}/threads`.
+    pub async fn create_thread_from_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        name: &str,
+        auto_archive_minutes: u32,
+    ) -> Result<Thread> {
+        let v = self
+            .post_json(
+                &format!("{API_BASE}/channels/{channel_id}/messages/{message_id}/threads"),
+                &json!({ "name": name, "auto_archive_duration": auto_archive_minutes }),
+                "Creating thread",
+            )
+            .await?;
+        Ok(Thread::from_json(&v, None))
+    }
+
+    /// Start a thread without a message in a text / announcement channel:
+    /// `POST /channels/{channel}/threads` (type 11 public, 12 private).
+    pub async fn create_thread(
+        &self,
+        channel_id: &str,
+        name: &str,
+        private: bool,
+        auto_archive_minutes: u32,
+    ) -> Result<Thread> {
+        let kind = if private {
+            CHANNEL_PRIVATE_THREAD
+        } else {
+            CHANNEL_PUBLIC_THREAD
+        };
+        let v = self
+            .post_json(
+                &format!("{API_BASE}/channels/{channel_id}/threads"),
+                &json!({
+                    "name": name,
+                    "type": kind,
+                    "auto_archive_duration": auto_archive_minutes,
+                }),
+                "Creating thread",
+            )
+            .await?;
+        Ok(Thread::from_json(&v, None))
+    }
+
+    /// New forum / media post: `POST /channels/{forum}/threads` with the
+    /// first message. The answer is the thread (with the message under
+    /// `message` on current API versions).
+    pub async fn create_forum_post(
+        &self,
+        forum_id: &str,
+        name: &str,
+        content: &str,
+        applied_tags: &[String],
+    ) -> Result<Thread> {
+        let v = self
+            .post_json(
+                &format!("{API_BASE}/channels/{forum_id}/threads"),
+                &json!({
+                    "name": name,
+                    "applied_tags": applied_tags,
+                    "message": { "content": content },
+                }),
+                "Creating post",
+            )
+            .await?;
+        Ok(Thread::from_json(&v, None))
     }
 }
