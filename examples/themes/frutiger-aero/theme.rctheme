@@ -1,0 +1,84 @@
+# Frutiger Aero — a test theme for RustCord's theme system.
+# Glossy sky-blue to aqua gradients, translucent glass panels with white
+# highlight lines, teal/green accents and bubbly rounded corners.
+format = 1
+
+[meta]
+name = "Frutiger Aero"
+author = "RustCord test themes"
+version = "1.0"
+description = "Glossy glass panels over a sky-to-aqua gradient, with bubbles."
+base = "light"
+
+[colors]
+servers = "#7cc4e6"
+sidebar = "#eaf8fd"
+chat = "#f2fbff"
+input = "#ffffffd0"
+hover = "#ffffff70"
+selected = "#ffffffb0"
+text = "#0b2e45"
+muted = "#3b627a"
+strong = "#03203a"
+accent = "#0f9f96"
+online = "#3cc43a"
+idle = "#f2a516"
+dnd = "#e2412f"
+offline = "#7f98a8"
+danger = "#d63a2b"
+mention = "#e2412f"
+unread = "#03203a"
+msg_hover = "#ffffff55"
+divider = "#ffffffa0"
+rail_icon = "#ffffffc0"
+link = "#0b6fb8"
+
+[style]
+corner_radius = { widgets = 8, windows = 14, menus = 10 }
+window_shadow = { offset = [0, 8], blur = 28, spread = 0, color = "#0a3a5a50" }
+popup_shadow = { offset = [0, 4], blur = 18, color = "#0a3a5a40" }
+panel_shadow = { offset = [0, 3], blur = 12, color = "#0a3a5a38" }
+glass_opacity = 0.58
+backdrop = { top = "#2f9ee8", mid = "#7fd3f4", bottom = "#bff0d4" }
+accent_gradient = { top = "#7fe6c8", mid = "#26b9a4", bottom = "#0b8f86" }
+
+[style.panes.servers]
+gradient = { top = "#ffffff", bottom = "#d6f1fb" }
+glass = true
+corner_radius = 12
+inset = 5
+
+[style.panes.profile]
+gradient = { top = "#ffffff", bottom = "#d6f1fb" }
+glass = true
+corner_radius = 12
+inset = 5
+
+[style.panes.channels]
+gradient = { top = "#ffffff", bottom = "#e2f6fc" }
+glass = true
+corner_radius = 12
+inset = 5
+
+[style.panes.messages]
+gradient = { top = "#ffffff", bottom = "#eefbff" }
+glass = true
+corner_radius = 12
+inset = 5
+
+[style.panes.composer]
+gradient = { top = "#ffffff", bottom = "#e6f8fd" }
+glass = true
+corner_radius = 12
+inset = 5
+
+[style.panes.members]
+gradient = { top = "#ffffff", bottom = "#e2f6fc" }
+glass = true
+corner_radius = 12
+inset = 5
+
+[images]
+chat_background = "bubbles.png"
+opacity = 0.55
+fit = "cover"

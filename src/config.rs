@@ -13,6 +13,9 @@ pub const CONFIG_KEY: &str = "config_v1";
 #[serde(default)]
 pub struct Config {
     pub theme: ThemeChoice,
+    /// Id (folder name) of the applied custom theme, if any; it overrides
+    /// `theme` while the Custom themes module is on.
+    pub custom_theme: Option<String>,
     /// UI scale (1.0 = 100%).
     pub zoom: f32,
     pub modules: Modules,
@@ -67,6 +70,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: ThemeChoice::default(),
+            custom_theme: None,
             zoom: 1.0,
             modules: Modules::default(),
             remember_login: true,
@@ -161,6 +165,9 @@ pub struct Modules {
     pub embeds: bool,
     /// `@` / `#` / `:` suggestions in the message box.
     pub autocomplete: bool,
+    /// Themes imported from `.rctheme` files. Off = only the built-in
+    /// themes, and no theme files are read.
+    pub custom_themes: bool,
 }
 
 impl Default for Modules {
@@ -175,6 +182,7 @@ impl Default for Modules {
             status_bar: false,
             embeds: true,
             autocomplete: true,
+            custom_themes: true,
         }
     }
 }
@@ -232,6 +240,11 @@ pub const MODULES: &[ModuleInfo] = &[
         description: "Suggestions while typing @mentions, #channels and :emoji: in the message box.",
         get: |m| &mut m.autocomplete,
     },
+    ModuleInfo {
+        name: "Custom themes",
+        description: "Import and apply your own themes (Settings → Themes). Off = only the built-in Dark and Light themes, and no theme files are read.",
+        get: |m| &mut m.custom_themes,
+    },
 ];
 
 #[cfg(test)]
@@ -259,5 +272,14 @@ mod tests {
         // Old configs without the field stay on Web.
         let c: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(c.client_identity, ClientIdentity::Web);
+    }
+
+    #[test]
+    fn custom_theme_fields_default() {
+        // Configs saved before themes existed still load.
+        let c: Config = serde_json::from_str(r#"{"modules":{"images":false}}"#).unwrap();
+        assert_eq!(c.custom_theme, None);
+        assert!(c.modules.custom_themes);
+        assert!(!c.modules.images);
     }
 }

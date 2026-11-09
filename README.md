@@ -91,6 +91,11 @@ Usable day to day. It has:
   Discord's official app, which misrepresents the client to Discord and may
   slightly raise the chance of your account being flagged)
 
+- **custom themes** (Settings → Themes, "Custom themes" module): import a
+  `.rctheme` file, a theme folder or a `.zip`; colours, rounded corners,
+  shadows, gradients, glass panels, a chat background image. See
+  [Themes](#themes) for the format
+
 What's left: see [docs/PORTING.md](docs/PORTING.md) — reactions, search,
 threads / forums, voice (comes last).
 
@@ -131,6 +136,19 @@ On Linux you may need GUI dev packages first:
 
 **Never commit your token.** `.env` files are git-ignored.
 
+## Themes
+
+A theme is a folder with a `theme.rctheme` file (TOML, `format = 1`) and an
+optional background image. The format is documented at the top of
+[`src/theme_file.rs`](src/theme_file.rs). Installed themes live in
+RustCord's data folder under `themes/<id>/` (Settings → Themes → *Open
+themes folder*).
+
+`examples/themes/` holds two **test themes** — `2000s-messenger` and
+`frutiger-aero`. They are only for trying the theme system: they aren't
+installed by default, aren't compiled into the binary and aren't part of
+release builds. Import one with Settings → Themes → *Import folder…*.
+
 ## Layout of the code
 
 | File | What it does |
@@ -143,6 +161,9 @@ On Linux you may need GUI dev packages first:
 | `src/settings.rs` | Settings page |
 | `src/config.rs` | Saved settings and the module list |
 | `src/theme.rs` | Discord colours, bundled font (Noto Sans) and the `bold` font family |
+| `src/theme_file.rs` | The `.rctheme` format: parsing, validation, fallbacks to the base theme |
+| `src/themes.rs` | Theme folder (import / delete / list), the active theme, gradient / glass / background painting |
+| `src/themes_page.rs` | Settings → Themes page: theme cards with previews, import, delete |
 | `src/timefmt.rs` | Local-time message timestamps and date-divider labels |
 | `src/emoji.rs` | Splits text into text + emoji images |
 | `src/markdown.rs` | Discord markdown: parser, renderer, parse cache |
@@ -172,7 +193,7 @@ events over a channel and calls `request_repaint()`, and the UI sends
 
 - Group channels by category, DMs list
 - Markdown, embeds, images, custom emoji
-- Theming (colours, fonts, layout presets) loaded from a config file
+- Theme fonts and layout presets
 - Claude features: summarise a channel, explain a message, draft a reply
   (drafts are always sent by you, never automatically)
 - Plugin system

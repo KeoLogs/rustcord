@@ -1,0 +1,75 @@
+# 2000s Messenger — a test theme for RustCord's theme system.
+# Early-2000s instant messenger look: pale blue/white gradients, glossy blue
+# buttons, rounded panels with soft drop shadows, friendly status colours and
+# slightly smaller, Tahoma-like text sizes.
+format = 1
+
+[meta]
+name = "2000s Messenger"
+author = "RustCord test themes"
+version = "1.0"
+description = "Pale blue gradients, glossy buttons and rounded boxes, like an early-2000s IM."
+base = "light"
+
+[colors]
+servers = "#c9dcf2"
+sidebar = "#f3f8fe"
+chat = "#ffffff"
+input = "#ffffff"
+hover = "#e2edfa"
+selected = "#c8dcf5"
+text = "#1a2b3c"
+muted = "#5a6e85"
+strong = "#0a1e38"
+accent = "#2a6fcf"
+online = "#35b33f"
+idle = "#f0a020"
+dnd = "#d9342b"
+offline = "#97a3b0"
+danger = "#cc2f26"
+mention = "#d9342b"
+unread = "#0a1e38"
+msg_hover = "#f0f6fe"
+divider = "#b7cde8"
+rail_icon = "#ffffff"
+link = "#0645ad"
+
+[style]
+corner_radius = { widgets = 5, windows = 10, menus = 6 }
+window_shadow = { offset = [2, 4], blur = 16, spread = 0, color = "#1a3a6a40" }
+popup_shadow = { offset = [2, 3], blur = 10, color = "#1a3a6a38" }
+panel_shadow = { offset = [1, 2], blur = 8, color = "#1a3a6a30" }
+font_scale = 0.93
+widget_border = "#9db5d6"
+backdrop = { top = "#c9def6", mid = "#9fc1ea", bottom = "#6f9bd6" }
+accent_gradient = { top = "#8cc4fa", mid = "#3f8be6", bottom = "#1d5cba" }
+
+[style.panes.servers]
+gradient = { top = "#e6f0fc", bottom = "#a9c8ee" }
+corner_radius = 8
+inset = 3
+
+[style.panes.profile]
+gradient = { top = "#f4f9ff", bottom = "#d3e3f6" }
+corner_radius = 8
+inset = 3
+
+[style.panes.channels]
+gradient = { top = "#ffffff", bottom = "#e4eefa" }
+corner_radius = 8
+inset = 3
+
+[style.panes.messages]
+gradient = { top = "#ffffff", mid = "#ffffff", bottom = "#f1f6fd" }
+corner_radius = 8
+inset = 3
+
+[style.panes.composer]
+gradient = { top = "#f6faff", bottom = "#e2edfa" }
+corner_radius = 8
+inset = 3
+
+[style.panes.members]
+gradient = { top = "#ffffff", bottom = "#e4eefa" }
+corner_radius = 8
+inset = 3

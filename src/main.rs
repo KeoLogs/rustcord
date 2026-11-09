@@ -25,6 +25,13 @@ mod settings;
 mod settings_proto;
 mod status;
 mod theme;
+// Custom themes: not wired into the app yet.
+#[allow(dead_code)]
+mod theme_file;
+#[allow(dead_code)]
+mod themes;
+#[allow(dead_code)]
+mod themes_page;
 mod timefmt;
 mod types;
 
