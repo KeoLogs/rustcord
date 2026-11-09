@@ -14,6 +14,9 @@ mod notify;
 mod presence;
 mod profile;
 mod read_state;
+// Message search; not wired into the UI yet.
+#[allow(dead_code)]
+mod search;
 mod settings;
 mod theme;
 mod timefmt;

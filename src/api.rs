@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use crate::search::{SearchQuery, SearchResponse, SearchScope};
 use crate::types::Message;
 
 const API_BASE: &str = "https://discord.com/api/v10";
@@ -56,6 +57,80 @@ impl Api {
             .unwrap_or_default();
         // Discord returns newest first; the UI wants oldest first.
         messages.reverse();
+        Ok(messages)
+    }
+
+    /// One page (25) of message search results in a server or DM
+    /// (user accounts only). HTTP 202 (index not built yet) comes back as
+    /// `SearchResponse::Indexing`; see `search.rs` for the protocol.
+    #[allow(dead_code)] // until the search panel is wired in
+    pub async fn search(
+        &self,
+        scope: &SearchScope,
+        query: &SearchQuery,
+        offset: u32,
+    ) -> Result<SearchResponse> {
+        let url = crate::search::search_url(API_BASE, scope, query, offset);
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", &self.auth)
+            .send()
+            .await
+            .context("search request failed")?;
+        let status = resp.status().as_u16();
+        let body: Value = Self::check(resp, "Searching").await?.json().await?;
+        Ok(SearchResponse::from_json(status, &body))
+    }
+
+    /// `GET /guilds/{id}/messages/search`.
+    #[allow(dead_code)] // until the search panel is wired in
+    pub async fn search_guild(
+        &self,
+        guild_id: &str,
+        query: &SearchQuery,
+        offset: u32,
+    ) -> Result<SearchResponse> {
+        self.search(&SearchScope::Guild(guild_id.to_string()), query, offset)
+            .await
+    }
+
+    /// `GET /channels/{id}/messages/search` (DMs and group DMs).
+    #[allow(dead_code)] // until the search panel is wired in
+    pub async fn search_dm(
+        &self,
+        channel_id: &str,
+        query: &SearchQuery,
+        offset: u32,
+    ) -> Result<SearchResponse> {
+        self.search(&SearchScope::Dm(channel_id.to_string()), query, offset)
+            .await
+    }
+
+    /// Up to `limit` messages around `message_id`, oldest first (for
+    /// jumping to a search result).
+    #[allow(dead_code)] // until the search panel is wired in
+    pub async fn messages_around(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        limit: u8,
+    ) -> Result<Vec<Message>> {
+        let url =
+            format!("{API_BASE}/channels/{channel_id}/messages?around={message_id}&limit={limit}");
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", &self.auth)
+            .send()
+            .await
+            .context("history request failed")?;
+        let body: Value = Self::check(resp, "Loading messages").await?.json().await?;
+        let mut messages: Vec<Message> = body
+            .as_array()
+            .map(|arr| arr.iter().map(Message::from_json).collect())
+            .unwrap_or_default();
+        messages.sort_by_key(|m| m.id.parse::<u64>().unwrap_or(0));
         Ok(messages)
     }
 
