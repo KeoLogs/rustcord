@@ -14,7 +14,12 @@ Read CLAUDE.md first, then this.
   GIF picker, Unicode/symbol fonts, Discord + Discord Messenger comparison).
   Base: feat/messenger-complete. Check whether its PR exists before redoing it.
 - wip/voice (voice groundwork: docs/VOICE.md, src/voice/ protocol/state/widgets).
-- wip/release (release workflow, Windows icon/no console, docs/RELEASING.md).
+- wip/release DONE @173c144 (base feat/messenger-complete): .github/workflows/release.yml
+  (Run workflow with a version → builds Win zip + Inno setup.exe, Linux tar.gz, macOS
+  universal .app zip, SHA256SUMS, GitHub Release), build.yml actions bumped to node24
+  versions, build.rs + winresource (icon/version in exe), windows_subsystem, window
+  icon, assets/icon/, packaging/, docs/RELEASING.md. Untested on Win/macOS (CI only).
+  Suggest first run with a pre-release version e.g. 0.1.1-test.1.
 
 ## Finished modules waiting to be wired in (branches on origin)
 Built as self-contained new files; none touch app.rs/layout.rs/gateway.rs/types.rs.
