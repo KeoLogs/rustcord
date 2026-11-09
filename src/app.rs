@@ -14,7 +14,12 @@ use crate::autocomplete::{self, Autocomplete, Candidate, Trigger};
 use crate::config::{CONFIG_KEY, Config};
 use crate::embed;
 use crate::emoji_picker::{self, CustomEmojiGroup, EmojiRef, Picked, PickerCtx, RecentEmoji};
+use crate::friends::{
+    FriendsAction, FriendsCtx, FriendsPage, MessageRequestsPage, Outcome, RelationshipStore,
+    RequestAction, RequestStore, RequestsCtx,
+};
 use crate::gif_picker::{GifAction, GifPicker};
+use crate::home::{self, HomeAction, HomeCtx, HomeSelected, HomeState};
 use crate::layout::{self, LAYOUT_KEY, LayoutBehavior, Pane};
 use crate::links::{self, LinkCheck, LinkDecision, LinkWarning};
 use crate::login::{LoginAction, LoginForm};
@@ -257,6 +262,7 @@ impl eframe::App for RustCordApp {
         // Module flags for the gateway task, then module state on / off.
         crate::config::live::sync(&self.config.modules);
         state.set_reactions_module(self.config.modules.reactions);
+        state.set_friends_module(self.config.modules.friends);
         if !self.config.modules.search {
             state.search = None;
         }
@@ -520,6 +526,20 @@ struct ReactionState {
     asked: HashSet<(String, EmojiRef, bool)>,
 }
 
+// --- friends ---
+/// Friends module state (`None` in `State` while the module is off).
+#[derive(Default)]
+struct FriendsState {
+    rels: RelationshipStore,
+    requests: RequestStore,
+    /// Home header search text.
+    home: HomeState,
+    /// Friends / Message Requests page shown instead of the chat.
+    page: HomeSelected,
+    friends_page: FriendsPage,
+    requests_page: MessageRequestsPage,
+}
+
 // --- search ---
 /// The Ctrl+F search popup (`None` in `State` while closed or the module
 /// is off).
@@ -612,6 +632,8 @@ pub struct State {
     reactions: Option<ReactionState>,
     /// Search popup; `None` while closed or the module is off.
     search: Option<SearchState>,
+    /// Friends module state; `None` while the module is off.
+    friends: Option<FriendsState>,
     last_typing_sent: Option<(String, Instant)>,
     confirm_delete: Option<(String, String)>,
 
@@ -730,6 +752,7 @@ impl State {
             emoji_groups: None,
             reactions: None,
             search: None,
+            friends: None,
             last_typing_sent: None,
             confirm_delete: None,
             reads: ReadState::default(),
@@ -1197,6 +1220,54 @@ impl State {
                 }
                 self.emoji_groups = None;
             }
+            // --- friends ---
+            ToUi::Relationships(list) => {
+                if let Some(fs) = &mut self.friends {
+                    fs.rels.set_all(list);
+                }
+            }
+            ToUi::MessageRequests(list) => {
+                if let Some(fs) = &mut self.friends {
+                    fs.requests.set_all(list);
+                }
+            }
+            ToUi::RelationshipEvent(ev) => {
+                if let Some(fs) = &mut self.friends {
+                    fs.rels.apply(ev);
+                }
+            }
+            ToUi::MessageRequestUpdate { channel_id, info } => {
+                if let Some(fs) = &mut self.friends {
+                    fs.requests.apply(channel_id, info);
+                }
+            }
+            ToUi::FriendResult { action, result } => {
+                self.friend_result(action, result, ctx, config)
+            }
+            ToUi::RequestResult { action, result } => match result {
+                Ok(()) => {
+                    let id = match &action {
+                        RequestAction::Accept(id) | RequestAction::Ignore(id) => id.clone(),
+                        RequestAction::Open(_) => return,
+                    };
+                    if let Some(fs) = &mut self.friends {
+                        fs.requests.remove(&id);
+                    }
+                    if matches!(action, RequestAction::Ignore(_)) {
+                        self.dms.channels.retain(|c| c.id != id);
+                        if self.selected_channel.as_deref() == Some(id.as_str()) {
+                            self.selected_channel = None;
+                        }
+                    } else if let Some(c) = self.dms.channels.iter_mut().find(|c| c.id == id) {
+                        c.is_request = false;
+                    }
+                }
+                Err(e) => {
+                    if self.slow_down_secs().is_none() {
+                        self.toast = Some((e, Instant::now()));
+                    }
+                }
+            },
             // --- search ---
             ToUi::SearchResults {
                 seq,
@@ -1272,6 +1343,182 @@ impl State {
                     rs.reactors.insert((message_id, emoji, burst), names);
                 }
             }
+        }
+    }
+
+    // --- friends ---
+    /// Turn the module's state on / off (off frees everything it held).
+    fn set_friends_module(&mut self, on: bool) {
+        match (on, self.friends.is_some()) {
+            (true, false) => self.friends = Some(FriendsState::default()),
+            (false, true) => self.friends = None,
+            _ => {}
+        }
+    }
+
+    /// The Friends or Message Requests page is showing instead of the chat.
+    fn home_page_open(&self) -> bool {
+        self.selected_guild.as_deref() == Some(DM_GUILD_ID)
+            && self
+                .friends
+                .as_ref()
+                .is_some_and(|f| f.page != HomeSelected::None)
+    }
+
+    /// A DM that is a message request: never acked automatically.
+    fn is_request_channel(&self, channel_id: &str) -> bool {
+        self.dms.channel(channel_id).is_some_and(|c| c.is_request)
+            || self
+                .friends
+                .as_ref()
+                .is_some_and(|f| f.requests.is_request(channel_id))
+    }
+
+    fn set_home_page(&mut self, page: HomeSelected) {
+        if let Some(fs) = &mut self.friends {
+            fs.page = page;
+        }
+    }
+
+    fn home_action(&mut self, a: HomeAction, ctx: &egui::Context, config: &Config) {
+        match a {
+            HomeAction::Friends => self.set_home_page(HomeSelected::Friends),
+            HomeAction::Requests => self.set_home_page(HomeSelected::Requests),
+            HomeAction::Dm(user_id) => {
+                self.friends_action(FriendsAction::Message(user_id), ctx, config)
+            }
+        }
+    }
+
+    /// Open an existing DM locally (no API call).
+    fn open_dm_channel(&mut self, channel_id: String, ctx: &egui::Context, config: &Config) {
+        self.set_home_page(HomeSelected::None);
+        self.select_guild(DM_GUILD_ID.to_string());
+        self.select_channel(channel_id, ctx, config);
+    }
+
+    /// A Friends page / Home click. Only ever from the user; nothing while
+    /// rate limited; an existing DM opens without an API call.
+    fn friends_action(&mut self, a: FriendsAction, ctx: &egui::Context, config: &Config) {
+        if let FriendsAction::Message(uid) = &a
+            && let Some(cid) = self
+                .dms
+                .channels
+                .iter()
+                .find(|c| {
+                    c.kind == CHANNEL_DM && c.recipients.first().is_some_and(|u| &u.id == uid)
+                })
+                .map(|c| c.id.clone())
+        {
+            self.open_dm_channel(cid, ctx, config);
+            return;
+        }
+        if let Some(secs) = self.slow_down_secs() {
+            let msg = format!("Slow down, try again in {secs}s");
+            if let (FriendsAction::SendRequest(_), Some(fs)) = (&a, &mut self.friends) {
+                fs.friends_page.add_result(Err(msg));
+            }
+            return;
+        }
+        let _ = self.tx.send(ToBackend::Friends(a));
+    }
+
+    fn request_action(&mut self, a: RequestAction, ctx: &egui::Context, config: &Config) {
+        match a {
+            // Just view it: loads history, never acks (see ack_open_channel).
+            RequestAction::Open(id) => self.open_dm_channel(id, ctx, config),
+            _ if self.slow_down_secs().is_some() => {}
+            a => {
+                let _ = self.tx.send(ToBackend::MessageRequest(a));
+            }
+        }
+    }
+
+    fn friend_result(
+        &mut self,
+        action: FriendsAction,
+        result: Result<Outcome, String>,
+        ctx: &egui::Context,
+        config: &Config,
+    ) {
+        match result {
+            Ok(Outcome::DmOpened(v)) => {
+                let channel = crate::types::Channel::from_json(&v);
+                let id = channel.id.clone();
+                if id.is_empty() {
+                    return;
+                }
+                self.dms.upsert_channel(channel);
+                self.open_dm_channel(id, ctx, config);
+            }
+            Ok(Outcome::RequestSent(name)) => {
+                if let Some(fs) = &mut self.friends {
+                    fs.friends_page.add_result(Ok(name));
+                }
+            }
+            Ok(Outcome::Done) => {}
+            Err(e) => match (&action, &mut self.friends) {
+                (FriendsAction::SendRequest(_), Some(fs)) => fs.friends_page.add_result(Err(e)),
+                _ => {
+                    if self.slow_down_secs().is_none() {
+                        self.toast = Some((e, Instant::now()));
+                    }
+                }
+            },
+        }
+    }
+
+    /// The Friends / Message Requests page in place of the chat.
+    fn home_page(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
+        let Some(mut fs) = self.friends.take() else {
+            return;
+        };
+        let is_bot = self.me.as_ref().is_some_and(|u| u.bot);
+        let avatar = |ui: &egui::Ui, r: egui::Rect, u: &User| {
+            paint_avatar(ui, r, &u.id, &u.name, &u.avatar_url, config, pal);
+        };
+        let mut friends_action = None;
+        let mut request_action = None;
+        match fs.page {
+            HomeSelected::Friends => {
+                let presences = &self.presences;
+                let presence = |id: &str| presences.get(id).cloned();
+                let cx = FriendsCtx {
+                    pal,
+                    store: &fs.rels,
+                    is_bot,
+                    presence: &presence,
+                    avatar: &avatar,
+                };
+                friends_action = fs.friends_page.show(ui, &cx);
+            }
+            HomeSelected::Requests => {
+                let messages = &self.messages;
+                let preview = |cid: &str| {
+                    messages
+                        .get(cid)
+                        .and_then(|l| l.last())
+                        .map(|m| m.content.clone())
+                };
+                let cx = RequestsCtx {
+                    pal,
+                    store: &fs.requests,
+                    dms: &self.dms.channels,
+                    is_bot,
+                    preview: &preview,
+                    avatar: &avatar,
+                };
+                request_action = fs.requests_page.show(ui, &cx);
+            }
+            HomeSelected::None => {}
+        }
+        self.friends = Some(fs);
+        let ctx = ui.ctx().clone();
+        if let Some(a) = friends_action {
+            self.friends_action(a, &ctx, config);
+        }
+        if let Some(a) = request_action {
+            self.request_action(a, &ctx, config);
         }
     }
 
@@ -1867,8 +2114,11 @@ impl State {
     fn ack_open_channel(&mut self, ctx: &egui::Context, chat_visible: bool) {
         if chat_visible
             && window_focused(ctx)
+            && !self.home_page_open()
             && let Some(cid) = self.selected_channel.clone()
             && self.held_unread.as_ref() != Some(&cid)
+            // Message requests are never acked automatically.
+            && !self.is_request_channel(&cid)
             && let Some(mid) = self.reads.mark_read(&cid)
         {
             self.inbox.mark_channel_read(&cid);
@@ -2069,9 +2319,12 @@ impl State {
                 .is_unread(&channel_id)
                 .then(|| (channel_id.clone(), self.reads.last_acked(&channel_id)));
         }
-        // Opening a channel reads it (user action, so ack right away).
+        // Opening a channel reads it (user action, so ack right away),
+        // except message requests: viewing one never acks it.
         self.held_unread = None;
-        self.mark_channel_read(&channel_id);
+        if !self.is_request_channel(&channel_id) {
+            self.mark_channel_read(&channel_id);
+        }
 
         // Most-recent-first list; free the oldest channels past the limit.
         self.recent_channels.retain(|c| c != &channel_id);
@@ -2581,6 +2834,24 @@ impl State {
     }
 
     fn channels_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
+        // The Friends module state is lent out so the DM list can draw the
+        // Home header while the channels are borrowed.
+        let mut friends = self.friends.take();
+        let home = self.channels_list(ui, config, pal, friends.as_mut());
+        self.friends = friends;
+        if let Some(a) = home {
+            let ctx = ui.ctx().clone();
+            self.home_action(a, &ctx, config);
+        }
+    }
+
+    fn channels_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        config: &Config,
+        pal: &Palette,
+        mut friends: Option<&mut FriendsState>,
+    ) -> Option<HomeAction> {
         let Some(guild) = self.current_guild() else {
             let rect = header_bar(ui, pal);
             ui.painter().text(
@@ -2590,7 +2861,7 @@ impl State {
                 egui::FontId::proportional(14.5),
                 pal.muted,
             );
-            return;
+            return None;
         };
         // Header: server name (DMs: "Direct Messages"), with a border + soft
         // shadow under it, and « to collapse the panel (Discord Messenger).
@@ -2634,6 +2905,7 @@ impl State {
         let mut mark_read = None;
         let mut toggle_cat = None;
         let mut close_dm = None;
+        let mut home_action = None;
         let now = notify::now_iso();
         let guild_muted = self.mutes.guild_muted(&guild.id, &now);
         egui::ScrollArea::vertical()
@@ -2661,12 +2933,50 @@ impl State {
                             );
                         }
                         if guild.is_dms() {
-                            ui.add_space(8.0);
-                            ui.horizontal(|ui| {
-                                ui.add_space(8.0);
-                                ui.label(pal.section_label("Direct Messages"));
-                            });
-                            ui.add_space(4.0);
+                            match friends.as_mut() {
+                                // Friends module: search + Friends + Message
+                                // Requests above the DMs.
+                                Some(fs) => {
+                                    let avatar = |ui: &egui::Ui, r: egui::Rect, u: &User| {
+                                        paint_avatar(
+                                            ui,
+                                            r,
+                                            &u.id,
+                                            &u.name,
+                                            &u.avatar_url,
+                                            config,
+                                            pal,
+                                        );
+                                    };
+                                    let has_dm = |uid: &str| {
+                                        guild.channels.iter().any(|c| {
+                                            c.kind == CHANNEL_DM
+                                                && c.recipients.first().is_some_and(|u| u.id == uid)
+                                        })
+                                    };
+                                    let cx = HomeCtx {
+                                        pal,
+                                        selected: fs.page,
+                                        requests: fs.requests.count(),
+                                        pending_friends: fs.rels.incoming_count(),
+                                        friends: &fs.rels,
+                                        has_dm: &has_dm,
+                                        avatar: &avatar,
+                                    };
+                                    ui.add_space(2.0);
+                                    if let Some(a) = home::home_header(ui, &mut fs.home, &cx) {
+                                        home_action = Some(a);
+                                    }
+                                }
+                                None => {
+                                    ui.add_space(8.0);
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(8.0);
+                                        ui.label(pal.section_label("Direct Messages"));
+                                    });
+                                    ui.add_space(4.0);
+                                }
+                            }
                         }
                         for group in groups {
                             let mut collapsed = false;
@@ -2678,6 +2988,15 @@ impl State {
                                 }
                             }
                             for c in group.channels {
+                                // Friends module: requests live on their own
+                                // page; the Home search filters the DMs.
+                                if guild.is_dms()
+                                    && let Some(fs) = friends.as_ref()
+                                    && (fs.requests.is_request(&c.id)
+                                        || home::filter_dms(&fs.home.query, [c]).is_empty())
+                                {
+                                    continue;
+                                }
                                 let selected =
                                     self.selected_channel.as_deref() == Some(c.id.as_str());
                                 let muted = guild_muted || self.is_muted(&guild.id, c, &now);
@@ -2688,7 +3007,8 @@ impl State {
                                 if collapsed && !selected && !unread && mentions == 0 {
                                     continue;
                                 }
-                                if !c.is_voice() {
+                                // Never auto-open a message request.
+                                if !c.is_voice() && !c.is_request {
                                     first.get_or_insert_with(|| c.id.clone());
                                 }
                                 let status = (c.kind == CHANNEL_DM && config.modules.member_list)
@@ -2802,17 +3122,23 @@ impl State {
             if self.selected_channel.as_deref() == Some(id.as_str()) {
                 self.selected_channel = None;
             }
-            return;
+            return None;
         }
         let auto = if self.selected_channel.is_none() {
             first
         } else {
             None
         };
+        if clicked.is_some()
+            && let Some(fs) = friends
+        {
+            fs.page = HomeSelected::None;
+        }
         if let Some(id) = clicked.or(auto) {
             let ctx = ui.ctx().clone();
             self.select_channel(id, &ctx, config);
         }
+        home_action
     }
 
     /// Chat header: channel icon + bold name, topic, and the inbox / pins / members
@@ -2947,6 +3273,10 @@ impl State {
     }
 
     fn messages_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
+        if self.home_page_open() {
+            self.home_page(ui, config, pal);
+            return;
+        }
         self.chat_header(ui, config, pal);
         let Some(channel_id) = self.selected_channel.clone() else {
             ui.centered_and_justified(|ui| {
@@ -3442,6 +3772,9 @@ impl State {
     }
 
     fn composer_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
+        if self.home_page_open() {
+            return;
+        }
         let Some(channel_id) = self.selected_channel.clone() else {
             ui.add_space(12.0);
             ui.label(RichText::new("Pick a channel to start chatting").color(pal.muted));

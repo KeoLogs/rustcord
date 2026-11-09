@@ -161,6 +161,9 @@ pub struct Channel {
     pub topic: String,
     /// Permission overwrites (servers only).
     pub overwrites: Vec<crate::perms::Overwrite>,
+    /// A DM that is a message request (or spam request). Never acked
+    /// automatically.
+    pub is_request: bool,
 }
 
 /// A category header (if any) and the text and voice channels under it.
@@ -346,6 +349,7 @@ impl Channel {
             last_message_id: snowflake(v, "last_message_id").unwrap_or(0),
             topic: str_of(v, "topic").trim().to_string(),
             overwrites: crate::perms::Overwrite::parse_list(&v["permission_overwrites"]),
+            is_request: crate::friends::is_request(v),
         }
     }
 
@@ -857,6 +861,28 @@ pub enum ToUi {
         burst: bool,
         error: String,
     },
+    // --- friends ---
+    /// READY relationships.
+    Relationships(Vec<crate::friends::Relationship>),
+    /// READY DMs that are message requests.
+    MessageRequests(Vec<crate::friends::RequestInfo>),
+    /// RELATIONSHIP_ADD / UPDATE / REMOVE.
+    RelationshipEvent(crate::friends::RelationshipEvent),
+    /// CHANNEL_CREATE / UPDATE (request flags) or CHANNEL_DELETE (None).
+    MessageRequestUpdate {
+        channel_id: String,
+        info: Option<crate::friends::RequestInfo>,
+    },
+    /// Answer to `ToBackend::Friends`.
+    FriendResult {
+        action: crate::friends::FriendsAction,
+        result: Result<crate::friends::Outcome, String>,
+    },
+    /// Answer to `ToBackend::MessageRequest`.
+    RequestResult {
+        action: crate::friends::RequestAction,
+        result: Result<(), String>,
+    },
     // --- search ---
     /// A page of search results for request `seq`.
     SearchResults {
@@ -1023,6 +1049,11 @@ pub enum ToBackend {
         add: bool,
         burst: bool,
     },
+    // --- friends ---
+    /// A click on the Friends page / Home header. Only from the user.
+    Friends(crate::friends::FriendsAction),
+    /// Accept / Ignore on the Message Requests page. Only from the user.
+    MessageRequest(crate::friends::RequestAction),
     // --- search ---
     /// Run a search (user accounts). Answered with SearchResults /
     /// SearchIndexing / SearchFailed carrying the same `seq`.

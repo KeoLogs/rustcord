@@ -350,6 +350,34 @@ async fn run(
                     .set_note(&user_id, &note)
                     .await
                     .map(|_| Some(ToUi::Note { user_id, note })),
+                // --- friends ---
+                ToBackend::Friends(_) | ToBackend::MessageRequest(_) if is_bot => {
+                    Ok(Some(ToUi::Notice("Friends need a user account".into())))
+                }
+                ToBackend::Friends(action) => {
+                    let r = crate::friends::execute(&api, &action).await;
+                    if let Err(e) = &r
+                        && let Some(rl) = crate::ratelimit::rate_limited(e)
+                    {
+                        let _ = tx.send(ToUi::RateLimited(rl));
+                    }
+                    Ok(Some(ToUi::FriendResult {
+                        action,
+                        result: r.map_err(|e| crate::ratelimit::user_message(&e)),
+                    }))
+                }
+                ToBackend::MessageRequest(action) => {
+                    let r = crate::friends::execute_request(&api, &action).await;
+                    if let Err(e) = &r
+                        && let Some(rl) = crate::ratelimit::rate_limited(e)
+                    {
+                        let _ = tx.send(ToUi::RateLimited(rl));
+                    }
+                    Ok(Some(ToUi::RequestResult {
+                        action,
+                        result: r.map_err(|e| crate::ratelimit::user_message(&e)),
+                    }))
+                }
                 // --- search ---
                 ToBackend::Search { seq, .. } if is_bot => Ok(Some(ToUi::SearchFailed {
                     seq,

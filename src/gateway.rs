@@ -488,6 +488,36 @@ fn module_events(event: &str, d: &Value) -> Vec<ToUi> {
     use crate::config::live;
     let mut out = Vec::new();
 
+    // --- friends ---
+    if live::on(&live::FRIENDS) {
+        use crate::friends;
+        match event {
+            "READY" => {
+                out.push(ToUi::Relationships(friends::parse_ready(d)));
+                out.push(ToUi::MessageRequests(friends::parse_ready_requests(d)));
+            }
+            "RELATIONSHIP_ADD" | "RELATIONSHIP_UPDATE" | "RELATIONSHIP_REMOVE" => {
+                if let Some(ev) = friends::RelationshipEvent::parse(event, d) {
+                    out.push(ToUi::RelationshipEvent(ev));
+                }
+            }
+            "CHANNEL_CREATE" | "CHANNEL_UPDATE" => {
+                if let Some((channel_id, info)) = friends::request_update(d) {
+                    out.push(ToUi::MessageRequestUpdate { channel_id, info });
+                }
+            }
+            "CHANNEL_DELETE" => {
+                if let Some(id) = d["id"].as_str() {
+                    out.push(ToUi::MessageRequestUpdate {
+                        channel_id: id.to_string(),
+                        info: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
     // --- reactions ---
     if event.starts_with("MESSAGE_REACTION_")
         && live::on(&live::REACTIONS)

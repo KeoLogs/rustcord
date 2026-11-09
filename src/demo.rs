@@ -60,6 +60,8 @@ const ALEX: &str = "520000000000000003";
 const TEST_GUILD: &str = "100";
 /// Someone you've blocked (their messages are hidden behind "Show").
 const TROLL: &str = "950000000000000010";
+const MAYA: &str = "610000000000000004";
+const STRANGER: &str = "970000000000000011";
 
 /// Demo people in the Test Server.
 /// (id, name, role ids, status, activity as (type, text)).
@@ -295,6 +297,13 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                 "id": "401", "type": 1, "last_message_id": "95",
                 "recipients": [user(ALEX, "Alex", None)]
             })),
+            // A message request (Friends module): never auto-acked.
+            Channel::from_json(&json!({
+                "id": "402", "type": 1, "last_message_id": "3",
+                "is_message_request": true,
+                "is_message_request_timestamp": iso_minutes_ago(90),
+                "recipients": [user(STRANGER, "Stranger", None)]
+            })),
         ],
         read_state: ReadStateEntry::parse_ready(&json!({ "entries": [
             { "id": "200", "last_message_id": "10" },
@@ -316,6 +325,23 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
         blocked: vec![TROLL.into()],
         user_settings: None,
     });
+
+    // --- friends --- (READY relationships + message requests)
+    let ready_rels = json!({ "relationships": [
+        { "id": SAM, "type": 1, "user": user(SAM, "Sam", None) },
+        { "id": ALEX, "type": 1, "user": user(ALEX, "Alex", None) },
+        { "id": MAYA, "type": 3, "user": user(MAYA, "Maya", None) },
+        { "id": TROLL, "type": 2, "user": user(TROLL, "Troll", None) },
+    ], "private_channels": [
+        { "id": "402", "type": 1, "is_message_request": true,
+          "is_message_request_timestamp": iso_minutes_ago(90) },
+    ] });
+    send(ToUi::Relationships(crate::friends::parse_ready(
+        &ready_rels,
+    )));
+    send(ToUi::MessageRequests(crate::friends::parse_ready_requests(
+        &ready_rels,
+    )));
 
     // READY_SUPPLEMENTAL: presences for DM friends and the Test Server.
     send(ToUi::Presences(
@@ -582,6 +608,27 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             ToBackend::RequestMemberList { .. } => {}
             ToBackend::LoadProfile { user_id, guild_id } => {
                 send(ToUi::Profile(Box::new(fake_profile(&user_id, guild_id))))
+            }
+            // --- friends ---
+            ToBackend::Friends(action) => {
+                use crate::friends::{FriendsAction, Outcome};
+                eprintln!("demo: friends {action:?}");
+                let result = match &action {
+                    FriendsAction::Message(id) => Ok(Outcome::DmOpened(json!({
+                        "id": "403", "type": 1, "last_message_id": "1",
+                        "recipients": [user(id, "Friend", None)]
+                    }))),
+                    FriendsAction::SendRequest(name) => Ok(Outcome::RequestSent(name.clone())),
+                    _ => Ok(Outcome::Done),
+                };
+                send(ToUi::FriendResult { action, result });
+            }
+            ToBackend::MessageRequest(action) => {
+                eprintln!("demo: message request {action:?}");
+                send(ToUi::RequestResult {
+                    action,
+                    result: Ok(()),
+                });
             }
             // --- search --- (substring match over the sample channels)
             ToBackend::Search { seq, query, .. } => {

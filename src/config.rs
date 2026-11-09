@@ -206,6 +206,9 @@ pub struct Modules {
     /// Ctrl+F message search.
     #[serde(default = "on")]
     pub search: bool,
+    /// Friends / Message Requests pages and the Home header.
+    #[serde(default = "on")]
+    pub friends: bool,
 }
 
 impl Default for Modules {
@@ -223,6 +226,7 @@ impl Default for Modules {
             gif_picker: true,
             reactions: true,
             search: true,
+            friends: true,
         }
     }
 }
@@ -240,11 +244,13 @@ pub mod live {
 
     pub static REACTIONS: AtomicBool = AtomicBool::new(true);
     pub static SEARCH: AtomicBool = AtomicBool::new(true);
+    pub static FRIENDS: AtomicBool = AtomicBool::new(true);
     // (end of flags)
 
     pub fn sync(m: &super::Modules) {
         REACTIONS.store(m.reactions, Relaxed);
         SEARCH.store(m.search, Relaxed);
+        FRIENDS.store(m.friends, Relaxed);
     }
 
     pub fn on(flag: &AtomicBool) -> bool {
@@ -319,6 +325,11 @@ pub const MODULES: &[ModuleInfo] = &[
         name: "Search",
         description: "Ctrl+F message search (this channel, or the whole server / DM). Off = no search box, nothing loaded.",
         get: |m| &mut m.search,
+    },
+    ModuleInfo {
+        name: "Friends & message requests",
+        description: "Friends and Message Requests pages and the Home search header above your DMs (user accounts). Off = plain DM list, nothing loaded.",
+        get: |m| &mut m.friends,
     },
 ];
 

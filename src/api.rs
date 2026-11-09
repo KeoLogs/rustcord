@@ -535,6 +535,125 @@ impl Api {
         Ok(SearchResponse::from_json(status, &body))
     }
 
+    // --- friends ---
+    // Relationships (friends) and DMs. User accounts only; every call is
+    // made from an explicit user click (see `friends::execute`).
+
+    /// PUT users/@me/relationships/{id} with `{}`: accept an incoming friend
+    /// request, or send one to a user id.
+    pub async fn add_friend(&self, user_id: &str) -> Result<()> {
+        self.put_relationship(user_id, json!({}), "Adding friend")
+            .await
+    }
+
+    /// PUT users/@me/relationships/{id} with `{"type": 2}`: block a user.
+    pub async fn block_user(&self, user_id: &str) -> Result<()> {
+        self.put_relationship(user_id, json!({ "type": 2 }), "Blocking user")
+            .await
+    }
+
+    async fn put_relationship(&self, user_id: &str, body: Value, what: &str) -> Result<()> {
+        let resp = self
+            .send(
+                self.http
+                    .put(format!("{API_BASE}/users/@me/relationships/{user_id}"))
+                    .header("Authorization", &self.auth)
+                    .json(&body),
+            )
+            .await
+            .context("relationship request failed")?;
+        Self::check(resp, what).await?;
+        Ok(())
+    }
+
+    /// POST users/@me/relationships: send a friend request by @username.
+    pub async fn send_friend_request(&self, username: &str) -> Result<()> {
+        let resp = self
+            .send(
+                self.http
+                    .post(format!("{API_BASE}/users/@me/relationships"))
+                    .header("Authorization", &self.auth)
+                    .json(&json!({ "username": username, "discriminator": null })),
+            )
+            .await
+            .context("friend request failed")?;
+        Self::check(resp, "Sending friend request").await?;
+        Ok(())
+    }
+
+    /// DELETE users/@me/relationships/{id}: remove a friend, cancel an
+    /// outgoing request, ignore an incoming one, or unblock.
+    pub async fn remove_relationship(&self, user_id: &str) -> Result<()> {
+        let resp = self
+            .send(
+                self.http
+                    .delete(format!("{API_BASE}/users/@me/relationships/{user_id}"))
+                    .header("Authorization", &self.auth),
+            )
+            .await
+            .context("relationship request failed")?;
+        Self::check(resp, "Updating relationship").await?;
+        Ok(())
+    }
+
+    /// POST users/@me/channels: open (or create) a DM. Returns the channel
+    /// object; Discord also sends CHANNEL_CREATE if it's new.
+    pub async fn open_dm(&self, user_id: &str) -> Result<Value> {
+        let resp = self
+            .send(
+                self.http
+                    .post(format!("{API_BASE}/users/@me/channels"))
+                    .header("Authorization", &self.auth)
+                    .json(&json!({ "recipients": [user_id] })),
+            )
+            .await
+            .context("open DM request failed")?;
+        Ok(Self::check(resp, "Opening DM").await?.json().await?)
+    }
+
+    /// Accept a message request.
+    ///
+    /// Unofficial (user API): PUT channels/{id}/recipients/@me with
+    /// `{"consent_status": 2}` (2 = accepted), as documented by the
+    /// community user-API docs. Kept in one place in case Discord changes it.
+    pub async fn accept_message_request(&self, channel_id: &str) -> Result<()> {
+        let resp = self
+            .send(
+                self.http
+                    .put(format!("{API_BASE}/channels/{channel_id}/recipients/@me"))
+                    .header("Authorization", &self.auth)
+                    .json(&json!({ "consent_status": 2 })),
+            )
+            .await
+            .context("message request failed")?;
+        Self::check(resp, "Accepting message request").await?;
+        Ok(())
+    }
+
+    /// Ignore (reject) a message request.
+    ///
+    /// Unofficial: DELETE channels/{id}/recipients/@me. If Discord answers
+    /// 404/405 to that, fall back to closing the DM (DELETE channels/{id}),
+    /// which at least hides it.
+    pub async fn reject_message_request(&self, channel_id: &str) -> Result<()> {
+        let resp = self
+            .send(
+                self.http
+                    .delete(format!("{API_BASE}/channels/{channel_id}/recipients/@me"))
+                    .header("Authorization", &self.auth),
+            )
+            .await
+            .context("message request failed")?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND
+            || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        {
+            return self.close_dm(channel_id).await;
+        }
+        Self::check(resp, "Ignoring message request").await?;
+        Ok(())
+    }
+
     // --- reactions ---
 
     /// Add my (normal) reaction. Only ever called because the user clicked.
