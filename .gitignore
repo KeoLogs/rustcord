@@ -1,0 +1,12 @@
+/target
+
+# Never commit tokens
+.env
+.env.*
+*.token
+
+# Editor / OS junk
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
