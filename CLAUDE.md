@@ -10,6 +10,9 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   task and handles `ToBackend` requests from the UI.
 - `src/gateway.rs` is a hand-written gateway client (tokio-tungstenite):
   Hello -> Identify (or op 6 Resume) -> heartbeat loop, reconnect with backoff.
+  Transport compression is `compress=zlib-stream`: binary frames are fed to
+  one `Inflater` per connection (new one on every reconnect / resume); a
+  message is complete when the bytes end in `00 00 FF FF`.
   `Session` (session_id, resume_gateway_url, seq) lives in the backend across
   connections; op 9 / close codes 4007/4009 reset it.
 - `src/api.rs` is the REST client (reqwest).
@@ -27,7 +30,24 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   optional features should be modules (add to `Modules` + `MODULES`).
 - `src/settings.rs` is the settings page, `src/login.rs` the login screen,
   `src/theme.rs` the Discord palette (use `Palette` colours, not hard-coded
-  ones), `src/emoji.rs` text/emoji segmentation (has unit tests).
+  ones) and fonts, `src/emoji.rs` text/emoji segmentation (has unit tests).
+- Fonts: Noto Sans Regular + SemiBold are bundled (`assets/fonts/`, OFL) and
+  installed by `theme::install_fonts`; system fonts remain the fallback for
+  other scripts. egui's `strong()` only changes colour — for real bold use
+  `RichText::bold()` (`theme::Bold` trait) or `theme::bold_font(size)`.
+  Stick to the sizes already in use (each size/family adds glyphs to the
+  font atlas).
+- Times: `Message::time` is unix seconds; format with `src/timefmt.rs`
+  (local time zone via `chrono::Local`), never by slicing the ISO string.
+- UI look (Discord-like): `layout.rs` sets per-panel margins (channels and
+  messages draw their own full-width headers via `header_bar`). Server rail:
+  `rail_item` (icon-only below `RAIL_NAMES_WIDTH`). Messages: `message_row`
+  (hover background via a placeholder shape, the hover bar is an `Area`
+  whose rect is kept in egui memory), `reply_preview`, `date_divider`.
+  The 👥 header button hides the Members tile with egui_tiles visibility
+  (`layout::toggle_members`); hidden state is saved with the layout.
+  Careful: never call `ui`/`ctx` methods inside a `ctx.memory(|m| …)`
+  closure — it deadlocks the UI thread.
 - `src/read_state.rs`: per-channel unread/mention counts (`ReadState`).
   `src/notify.rs`: mutes (`Mutes`), `mentions_me`, `should_notify`, the
   mentions `Inbox`, and `show_desktop` (notify-rust; called from the backend
@@ -90,8 +110,12 @@ RUSTCORD_DEMO=1 LIBGL_ALWAYS_SOFTWARE=1 HOME=/tmp/rc-home \
   './target/debug/rustcord & sleep 12; xdotool mousemove 70 85 click 1; sleep 2; import -window root /tmp/shot.png'
 ```
 
-(`xdotool` drives clicks; drag slowly with small `mousemove` steps.) Images
-show as red warning icons offline; that's expected. Then tell Leo exactly
+(`xdotool` drives clicks; drag slowly with small `mousemove` steps. Before
+typing with `xdotool type`, focus the window first:
+`xdotool windowfocus $(xdotool search --name RustCord | head -1)`.) Use a
+release build for RAM numbers. Images show as red warning icons offline;
+that's expected. The demo has two people start typing in #general after 4 s
+and Sam mentions you after 6 s. Then tell Leo exactly
 what to check when he runs it locally against Discord.
 
 ## Hard rules

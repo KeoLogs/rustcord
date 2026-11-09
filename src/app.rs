@@ -18,7 +18,8 @@ use crate::presence::{Presences, Status};
 use crate::profile::{self, Popout, PopoutAction, ProfileCache};
 use crate::read_state::ReadState;
 use crate::settings::{SettingsAction, SettingsPage};
-use crate::theme::{Palette, ThemeChoice};
+use crate::theme::{self, Bold, Palette, ThemeChoice};
+use crate::timefmt;
 use crate::types::{Attachment, CHANNEL_DM, DM_GUILD_ID, Guild, Message, ToBackend, ToUi, User};
 
 const TYPING_TIMEOUT: Duration = Duration::from_secs(10);
@@ -46,6 +47,8 @@ pub struct RustCordApp {
     settings: Option<SettingsPage>,
     /// Theme + zoom currently applied, to re-apply only when they change.
     applied: Option<(ThemeChoice, f32)>,
+    /// Status bar module's RAM reading.
+    ram: RamSampler,
 }
 
 impl RustCordApp {
@@ -67,6 +70,7 @@ impl RustCordApp {
             editing_layout: false,
             settings: None,
             applied: None,
+            ram: RamSampler::default(),
         };
 
         // Log in straight away if we can: demo, DISCORD_TOKEN, or a saved token.
@@ -113,19 +117,28 @@ impl RustCordApp {
         }
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui, pal: &Palette, status: &str) {
+    /// Thin bar across the top, only while editing the layout or while not
+    /// connected (like Discord's "Connecting…" notice; the Status bar module
+    /// shows the connection state instead).
+    fn top_bar(&mut self, ui: &mut egui::Ui, pal: &Palette, status: &str, connected: bool) {
+        let notice = !connected && !self.config.modules.status_bar;
+        if !self.editing_layout && !notice {
+            return;
+        }
         egui::Panel::top("top_bar")
             .frame(
                 egui::Frame::new()
-                    .fill(pal.servers)
-                    .inner_margin(egui::Margin::symmetric(8, 4)),
+                    .fill(if self.editing_layout {
+                        pal.servers
+                    } else {
+                        pal.accent
+                    })
+                    .inner_margin(egui::Margin::symmetric(10, 4)),
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("RustCord").strong());
                     if self.editing_layout {
-                        ui.separator();
-                        ui.label(RichText::new("✏ Editing layout").strong().color(pal.accent));
+                        ui.label(RichText::new("✏ Editing layout").bold().color(pal.accent));
                         ui.label(
                             RichText::new(
                                 "hover a panel, hold and drag to move · drag the gaps to resize",
@@ -142,11 +155,40 @@ impl RustCordApp {
                             self.editing_layout = false;
                         }
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(status).small().color(pal.muted));
-                    });
+                    if notice {
+                        ui.with_layout(
+                            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                            |ui| {
+                                ui.label(
+                                    RichText::new(status)
+                                        .size(13.0)
+                                        .bold()
+                                        .color(Color32::WHITE),
+                                );
+                            },
+                        );
+                    }
                 });
             });
+    }
+}
+
+/// RAM use for the status bar, read at most every 2 seconds.
+#[derive(Default)]
+struct RamSampler {
+    last: Option<(Instant, u64)>,
+}
+
+impl RamSampler {
+    fn sample(&mut self) -> Option<u64> {
+        let stale = self
+            .last
+            .is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(2));
+        if stale {
+            self.last =
+                memory_stats::memory_stats().map(|m| (Instant::now(), m.physical_mem as u64));
+        }
+        self.last.map(|(_, b)| b)
     }
 }
 
@@ -205,9 +247,10 @@ impl eframe::App for RustCordApp {
         }
 
         // ---- Main screen
-        let (status, fatal, wants_settings) = match &mut self.screen {
+        let (status, connected, fatal, wants_settings) = match &mut self.screen {
             Screen::Main(state) => (
                 state.status.clone(),
+                state.connected,
                 state.fatal.take(),
                 std::mem::take(&mut state.open_settings),
             ),
@@ -245,11 +288,16 @@ impl eframe::App for RustCordApp {
         if !self.config.modules.layout_editor {
             self.editing_layout = false;
         }
-        self.top_bar(ui, &pal, &status);
+        self.top_bar(ui, &pal, &status, connected);
 
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
+        if self.config.modules.status_bar {
+            let ram = self.ram.sample();
+            state.status_bar(ui, &self.config, &pal, ram);
+        }
+        state.members_visible = layout::members_visible(&self.tree);
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let mut behavior = LayoutBehavior {
                 state,
@@ -260,6 +308,9 @@ impl eframe::App for RustCordApp {
             self.tree.ui(&mut behavior, ui);
         });
         layout::end_frame(&self.tree, &ctx);
+        if std::mem::take(&mut state.toggle_members) {
+            layout::toggle_members(&mut self.tree);
+        }
 
         state.overlays(ui, &self.config, &pal);
     }
@@ -375,6 +426,15 @@ pub struct State {
     profiles: ProfileCache,
     /// Open profile card.
     popout: Option<Popout>,
+
+    /// Collapsed channel categories (this session only).
+    collapsed: HashSet<String>,
+    /// Is the Members panel shown (set by the app from the layout each frame).
+    members_visible: bool,
+    /// The 👥 header button was clicked; the app toggles the panel.
+    toggle_members: bool,
+    /// Reply / Edit was picked: focus the message box next frame.
+    focus_composer: bool,
 }
 
 impl State {
@@ -415,6 +475,10 @@ impl State {
             bot_list_requested: None,
             profiles: ProfileCache::default(),
             popout: None,
+            collapsed: HashSet::new(),
+            members_visible: true,
+            toggle_members: false,
+            focus_composer: false,
         }
     }
 
@@ -771,22 +835,12 @@ impl State {
         }
     }
 
-    /// Server nickname, role colour and status for a message author.
-    fn author_style<'a>(
-        &'a self,
-        guild: Option<&'a Guild>,
-        u: &'a User,
-        config: &Config,
-    ) -> AuthorStyle<'a> {
+    /// Server nickname and role colour for a message author.
+    fn author_style<'a>(&'a self, guild: Option<&'a Guild>, u: &'a User) -> AuthorStyle<'a> {
         let cached = guild.and_then(|g| self.member_cache.get(&g.id, &u.id));
         AuthorStyle {
             name: cached.and_then(|c| c.nick.as_deref()).unwrap_or(&u.name),
             color: cached.and_then(|c| members::role_color(&guild?.roles, &c.roles)),
-            status: config
-                .modules
-                .member_list
-                .then(|| self.presences.status(&u.id))
-                .flatten(),
         }
     }
 
@@ -1217,6 +1271,9 @@ impl State {
         }
     }
 
+    /// Discord's server rail: round icons, a white pill on the left for
+    /// unread / hovered / selected, Home (DMs) at the top. Wider than
+    /// `RAIL_NAMES_WIDTH` (the user dragged it), it shows names too.
     fn servers_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let mut clicked = None;
         let mut mark_read = None;
@@ -1224,15 +1281,16 @@ impl State {
         egui::ScrollArea::vertical()
             .id_salt("servers")
             .auto_shrink(false)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
                 let dm_selected = self.selected_guild.as_deref() == Some(DM_GUILD_ID);
                 let badge = self.guild_badge(&self.dms, &now);
-                let resp = server_button(
+                let resp = rail_item(
                     ui,
-                    dm_selected,
-                    None,
-                    "💬",
+                    RailIcon::Home,
                     "Direct Messages",
+                    dm_selected,
                     badge,
                     config,
                     pal,
@@ -1245,26 +1303,33 @@ impl State {
                         mark_read = Some(DM_GUILD_ID.to_string());
                     }
                 });
-                ui.separator();
+                // Separator under Home, centred under the icons.
+                let (sep, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 2.0), egui::Sense::hover());
+                let x = if sep.width() >= RAIL_NAMES_WIDTH {
+                    sep.left() + 12.0 + 24.0
+                } else {
+                    sep.center().x
+                };
+                ui.painter().rect_filled(
+                    egui::Rect::from_center_size(egui::pos2(x, sep.center().y), vec2(32.0, 2.0)),
+                    1,
+                    pal.divider,
+                );
                 for g in &self.guilds {
                     let selected = self.selected_guild.as_deref() == Some(g.id.as_str());
                     let initials: String = g
                         .name
                         .split_whitespace()
                         .filter_map(|w| w.chars().next())
-                        .take(2)
+                        .take(3)
                         .collect();
                     let badge = self.guild_badge(g, &now);
-                    let resp = server_button(
-                        ui,
-                        selected,
-                        g.icon_url.as_deref(),
-                        &initials,
-                        &g.name,
-                        badge,
-                        config,
-                        pal,
-                    );
+                    let icon = match &g.icon_url {
+                        Some(url) if config.modules.images => RailIcon::Image(url),
+                        _ => RailIcon::Initials(&initials),
+                    };
+                    let resp = rail_item(ui, icon, &g.name, selected, badge, config, pal);
                     if resp.clicked() {
                         clicked = Some(g.id.clone());
                     }
@@ -1290,55 +1355,96 @@ impl State {
         }
     }
 
-    /// Bottom-left user panel: avatar with status dot, name, settings gear.
+    /// Bottom-left user panel: avatar with status dot, bold name, muted
+    /// status, ⚙ settings. In the narrow default rail it stacks the avatar
+    /// over the gear.
     fn profile_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
-        ui.horizontal_centered(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let gear = ui
-                    .add(egui::Button::new(RichText::new("⚙").size(18.0)).frame(false))
-                    .on_hover_text("User Settings");
-                if gear.clicked() {
-                    self.open_settings = true;
-                }
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    let (name, uid, url) = match &self.me {
-                        Some(me) => (me.name.as_str(), me.id.as_str(), me.avatar_url.as_str()),
-                        None => ("…", "", ""),
-                    };
-                    let rect = avatar(ui, uid, name, url, 32.0, config, pal);
-                    // Status dot
-                    let dot = rect.right_bottom() - vec2(4.0, 4.0);
-                    let col = if self.connected {
-                        pal.online
-                    } else {
-                        pal.muted
-                    };
-                    ui.painter().circle_filled(dot, 6.0, pal.servers);
-                    ui.painter().circle_filled(dot, 4.0, col);
-
-                    if ui.available_width() > 40.0 {
+        let (name, uid, url) = match &self.me {
+            Some(me) => (me.name.clone(), me.id.clone(), me.avatar_url.clone()),
+            None => ("…".into(), String::new(), String::new()),
+        };
+        let status = if self.connected { "Online" } else { "Offline" };
+        let dot = if self.connected {
+            pal.online
+        } else {
+            pal.offline
+        };
+        let draw_avatar = |ui: &mut egui::Ui| {
+            let rect = avatar(ui, &uid, &name, &url, 32.0, config, pal);
+            let c = rect.right_bottom() - vec2(4.0, 4.0);
+            ui.painter().circle_filled(c, 6.0, pal.servers);
+            ui.painter().circle_filled(c, 4.0, dot);
+            ui.interact(rect, ui.scope_id().with("me_avatar"), egui::Sense::hover())
+                .on_hover_text(format!("{name} · {status}"));
+        };
+        let mut open = false;
+        if ui.available_width() < 120.0 {
+            ui.vertical_centered(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                draw_avatar(ui);
+                open = icon_button(ui, "⚙", "User Settings", false, true, pal).clicked();
+            });
+        } else {
+            ui.horizontal_centered(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    open = icon_button(ui, "⚙", "User Settings", false, true, pal).clicked();
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        draw_avatar(ui);
+                        ui.add_space(2.0);
                         ui.vertical(|ui| {
-                            ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
-                            let status = if self.connected { "Online" } else { "Offline" };
-                            ui.label(RichText::new(status).small().color(pal.muted));
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&name).bold().size(14.5).color(pal.strong),
+                                )
+                                .truncate()
+                                .selectable(false),
+                            );
+                            ui.add(
+                                egui::Label::new(RichText::new(status).size(12.0).color(pal.muted))
+                                    .selectable(false),
+                            );
                         });
-                    }
+                    });
                 });
             });
-        });
+        }
+        if open {
+            self.open_settings = true;
+        }
     }
 
     fn channels_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let Some(guild) = self.current_guild() else {
-            ui.label(RichText::new("No server selected").color(pal.muted));
+            let rect = header_bar(ui, pal);
+            ui.painter().text(
+                rect.left_center() + vec2(16.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                "No server selected",
+                egui::FontId::proportional(14.5),
+                pal.muted,
+            );
             return;
         };
-        ui.add(egui::Label::new(RichText::new(&guild.name).strong().size(15.0)).truncate());
-        ui.separator();
+        // Header: server name, with a border + soft shadow under it.
+        let rect = header_bar(ui, pal);
+        let galley = truncated(
+            ui,
+            &guild.name,
+            theme::bold_font(15.0),
+            pal.strong,
+            rect.width() - 32.0,
+        );
+        ui.painter().galley(
+            egui::pos2(rect.left() + 16.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            pal.strong,
+        );
 
         let mut clicked = None;
         let mut first = None;
         let mut mark_read = None;
+        let mut toggle_cat = None;
         let now = notify::now_iso();
         let guild_muted = self.mutes.guild_muted(&guild.id, &now);
         egui::ScrollArea::vertical()
@@ -1346,94 +1452,97 @@ impl State {
             .auto_shrink(false)
             .show(ui, |ui| {
                 let groups = guild.channel_groups();
-                if groups.is_empty() {
-                    ui.label(
-                        RichText::new(if guild.is_dms() {
-                            "No DMs"
-                        } else {
-                            "No text channels"
-                        })
-                        .color(pal.muted),
-                    );
-                }
-                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
-                    for group in groups {
-                        if let Some(cat) = group.category {
-                            ui.add_space(8.0);
+                egui::Frame::new()
+                    .inner_margin(egui::Margin {
+                        left: 8,
+                        right: 8,
+                        top: 8,
+                        bottom: 8,
+                    })
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        if groups.is_empty() {
                             ui.label(
-                                RichText::new(cat.name.to_uppercase())
-                                    .small()
-                                    .strong()
-                                    .color(pal.muted),
+                                RichText::new(if guild.is_dms() {
+                                    "No DMs"
+                                } else {
+                                    "No text channels"
+                                })
+                                .color(pal.muted),
                             );
                         }
-                        for c in group.channels {
-                            first.get_or_insert_with(|| c.id.clone());
-                            let selected = self.selected_channel.as_deref() == Some(c.id.as_str());
-                            let muted = guild_muted || self.is_muted(&guild.id, c, &now);
-                            let unread = !muted && self.reads.is_unread(&c.id);
-                            let mentions = if muted { 0 } else { self.reads.mentions(&c.id) };
-                            let mut text = RichText::new(c.label());
-                            text = if selected {
-                                text.color(pal.text)
-                            } else if muted {
-                                text.color(pal.muted_text())
-                            } else if unread || mentions > 0 {
-                                text.color(pal.unread).strong()
-                            } else {
-                                text.color(pal.muted)
-                            };
-                            let resp = ui.add(egui::Button::selectable(selected, text).truncate());
-                            if unread && !selected {
-                                unread_pill(ui, resp.rect, 8.0, pal);
-                            }
-                            if mentions > 0 {
-                                mention_badge(
-                                    ui,
-                                    egui::pos2(resp.rect.right() - 6.0, resp.rect.center().y),
-                                    egui::Align2::RIGHT_CENTER,
-                                    mentions,
-                                    pal.sidebar,
-                                    pal,
-                                );
-                            } else if c.kind == CHANNEL_DM
-                                && config.modules.member_list
-                                && let Some(st) = c
-                                    .recipients
-                                    .first()
-                                    .and_then(|u| self.presences.status(&u.id))
-                            {
-                                // Their status, where Discord shows it on the avatar.
-                                let at = egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y);
-                                let bg = if selected { pal.selected } else { pal.sidebar };
-                                ui.painter().circle_filled(at, 4.5, st.color(pal));
-                                if st == Status::Offline {
-                                    ui.painter().circle_filled(at, 2.0, bg);
-                                }
-                                resp.clone().on_hover_text(st.label());
-                            }
-                            if resp.clicked() {
-                                clicked = Some(c.id.clone());
-                            }
-                            egui::Popup::context_menu(&resp).show(|ui| {
-                                if ui
-                                    .add_enabled(
-                                        unread || mentions > 0,
-                                        egui::Button::new("✔ Mark as read"),
-                                    )
-                                    .clicked()
-                                {
-                                    mark_read = Some(c.id.clone());
-                                }
-                                if muted {
-                                    ui.label(RichText::new("🔕 Muted").small().color(pal.muted));
-                                }
-                            });
+                        if guild.is_dms() {
+                            ui.add_space(8.0);
+                            ui.label(pal.section_label("Direct Messages"));
+                            ui.add_space(2.0);
                         }
-                    }
-                });
+                        for group in groups {
+                            let mut collapsed = false;
+                            if let Some(cat) = group.category {
+                                collapsed = self.collapsed.contains(&cat.id);
+                                ui.add_space(12.0);
+                                if category_header(ui, &cat.name, collapsed, pal).clicked() {
+                                    toggle_cat = Some(cat.id.clone());
+                                }
+                            }
+                            for c in group.channels {
+                                let selected =
+                                    self.selected_channel.as_deref() == Some(c.id.as_str());
+                                let muted = guild_muted || self.is_muted(&guild.id, c, &now);
+                                let unread = !c.is_voice() && !muted && self.reads.is_unread(&c.id);
+                                let mentions = if muted { 0 } else { self.reads.mentions(&c.id) };
+                                // Collapsed categories still show the open
+                                // channel and unread ones, like Discord.
+                                if collapsed && !selected && !unread && mentions == 0 {
+                                    continue;
+                                }
+                                if !c.is_voice() {
+                                    first.get_or_insert_with(|| c.id.clone());
+                                }
+                                let status = (c.kind == CHANNEL_DM && config.modules.member_list)
+                                    .then(|| c.recipients.first())
+                                    .flatten()
+                                    .and_then(|u| self.presences.status(&u.id));
+                                let row = ChannelRow {
+                                    selected,
+                                    muted,
+                                    unread,
+                                    mentions,
+                                    status,
+                                };
+                                let resp = channel_row(ui, c, &row, config, pal);
+                                if resp.clicked() && !c.is_voice() {
+                                    clicked = Some(c.id.clone());
+                                }
+                                if c.is_voice() {
+                                    continue;
+                                }
+                                egui::Popup::context_menu(&resp).show(|ui| {
+                                    if ui
+                                        .add_enabled(
+                                            unread || mentions > 0,
+                                            egui::Button::new("✔ Mark as read"),
+                                        )
+                                        .clicked()
+                                    {
+                                        mark_read = Some(c.id.clone());
+                                    }
+                                    if muted {
+                                        ui.label(
+                                            RichText::new("🔕 Muted").small().color(pal.muted),
+                                        );
+                                    }
+                                });
+                            }
+                        }
+                    });
             });
 
+        if let Some(id) = toggle_cat
+            && !self.collapsed.remove(&id)
+        {
+            self.collapsed.insert(id);
+        }
         if let Some(id) = mark_read {
             self.mark_channel_read(&id);
         }
@@ -1448,22 +1557,77 @@ impl State {
         }
     }
 
-    fn messages_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
-        // Header: channel name, 🔔 inbox on the right.
-        let title = self.channel_title();
-        if title.is_some() || config.modules.notifications {
-            ui.horizontal(|ui| {
-                if let Some(title) = &title {
-                    ui.label(RichText::new(title).strong().size(15.0));
-                }
-                if config.modules.notifications {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.inbox_button(ui, config, pal);
-                    });
-                }
-            });
-            ui.separator();
+    /// Chat header: channel icon + bold name, topic, and the 🔔 / 📌 / 👥
+    /// buttons on the right.
+    fn chat_header(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
+        let rect = header_bar(ui, pal);
+        let channel = self
+            .selected_channel
+            .as_deref()
+            .and_then(|id| self.current_guild()?.channel(id))
+            .map(|c| (c.icon(), c.name.clone(), c.topic.clone(), c.is_dm()));
+        let mut inner = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect.shrink2(vec2(12.0, 0.0)))
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        let ui = &mut inner;
+        ui.spacing_mut().item_spacing.x = 4.0;
+        // Right-hand buttons (right to left).
+        if config.modules.member_list
+            && icon_button(
+                ui,
+                "👥",
+                if self.members_visible {
+                    "Hide Member List"
+                } else {
+                    "Show Member List"
+                },
+                self.members_visible,
+                true,
+                pal,
+            )
+            .clicked()
+        {
+            self.toggle_members = true;
         }
+        icon_button(ui, "📌", "Pins — coming next", false, false, pal);
+        if config.modules.notifications {
+            self.inbox_button(ui, config, pal);
+        }
+        ui.add_space(8.0);
+        let Some((icon, name, topic, dm)) = channel else {
+            return;
+        };
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(icon)
+                    .size(if icon == "#" { 20.0 } else { 18.0 })
+                    .color(pal.muted),
+            );
+            ui.add(
+                egui::Label::new(RichText::new(&name).bold().size(15.0).color(pal.strong))
+                    .truncate()
+                    .selectable(false),
+            );
+            if !topic.is_empty() && !dm && ui.available_width() > 60.0 {
+                let (sep, _) = ui.allocate_exact_size(vec2(1.0, 24.0), egui::Sense::hover());
+                ui.painter().rect_filled(sep, 0, pal.divider);
+                let first_line = topic.lines().next().unwrap_or_default();
+                ui.add(
+                    egui::Label::new(RichText::new(first_line).size(13.0).color(pal.muted))
+                        .truncate()
+                        .selectable(false),
+                )
+                .on_hover_text(&topic);
+            }
+        });
+    }
+
+    fn messages_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
+        self.chat_header(ui, config, pal);
         let Some(channel_id) = self.selected_channel.clone() else {
             ui.centered_and_justified(|ui| {
                 ui.label(RichText::new("Pick a channel").color(pal.muted))
@@ -1500,10 +1664,22 @@ impl State {
             .auto_shrink(false)
             .stick_to_bottom(true)
             .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.add_space(8.0);
                 let mut prev: Option<&Message> = None;
                 for m in messages {
-                    let mut grouped =
-                        m.reply.is_none() && prev.is_some_and(|p| p.author.id == m.author.id);
+                    let day = timefmt::local_day(m.time);
+                    let new_day =
+                        day.is_some() && prev.and_then(|p| timefmt::local_day(p.time)) != day;
+                    // Discord groups messages by the same person sent within 7 minutes.
+                    let mut grouped = m.reply.is_none()
+                        && !new_day
+                        && prev.is_some_and(|p| {
+                            p.author.id == m.author.id && (m.time - p.time).abs() < 7 * 60
+                        });
+                    if let (true, Some(day)) = (new_day, day) {
+                        date_divider(ui, &timefmt::day_label(day), pal);
+                    }
                     if let Some(acked) = new_after
                         && m.id.parse::<u64>().is_ok_and(|id| id > acked)
                         && m.author.id != my_id
@@ -1512,14 +1688,21 @@ impl State {
                         new_after = None;
                         grouped = false;
                     }
-                    let author = self.author_style(guild, &m.author, config);
-                    if let Some(a) =
-                        message_row(ui, m, &author, grouped, m.author.id == my_id, config, pal)
-                    {
+                    let author = self.author_style(guild, &m.author);
+                    let mentions_me = !my_id.is_empty()
+                        && m.author.id != my_id
+                        && (m.mention_everyone || m.mentions.iter().any(|id| id == my_id));
+                    let ctx = RowCtx {
+                        grouped,
+                        mine: m.author.id == my_id,
+                        mentions_me,
+                    };
+                    if let Some(a) = message_row(ui, m, &author, &ctx, config, pal) {
                         action = Some(a);
                     }
                     prev = Some(m);
                 }
+                ui.add_space(20.0);
             });
 
         match action {
@@ -1527,11 +1710,13 @@ impl State {
                 self.compose = Compose::Reply {
                     message_id: id,
                     author,
-                }
+                };
+                self.focus_composer = true;
             }
             Some(MessageAction::Edit(id, content)) => {
                 self.draft = content;
                 self.compose = Compose::Edit { message_id: id };
+                self.focus_composer = true;
             }
             Some(MessageAction::Delete(id)) => self.confirm_delete = Some((channel_id, id)),
             Some(MessageAction::Copy(text)) => ui.ctx().copy_text(text),
@@ -1552,15 +1737,12 @@ impl State {
     /// inbox popup. Clicking a mention jumps to its channel.
     fn inbox_button(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let unread = self.inbox.unread();
-        ui.add_space(10.0);
-        let bell = ui
-            .add(egui::Button::new(RichText::new("🔔").size(16.0)).frame(false))
-            .on_hover_text("Inbox: recent mentions");
+        let bell = icon_button(ui, "🔔", "Inbox: recent mentions", false, true, pal);
         if unread > 0 {
             mention_badge(
                 ui,
-                bell.rect.right_top() + vec2(10.0, -2.0),
-                egui::Align2::RIGHT_TOP,
+                bell.rect.right_bottom() - vec2(1.0, 4.0),
+                egui::Align2::RIGHT_BOTTOM,
                 unread as u32,
                 pal.chat,
                 pal,
@@ -1621,6 +1803,7 @@ impl State {
 
     fn composer_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let Some(channel_id) = self.selected_channel.clone() else {
+            ui.add_space(12.0);
             ui.label(RichText::new("Pick a channel to start chatting").color(pal.muted));
             return;
         };
@@ -1633,82 +1816,136 @@ impl State {
         // Built bottom-up (like Discord) so the input row always stays visible
         // and extra rows (files, reply banner) grow upwards.
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             // Who's typing (under the box)
-            let typing = config
+            let typers: Vec<&str> = config
                 .modules
                 .typing_indicators
                 .then(|| self.typing.get(&channel_id))
                 .flatten()
-                .filter(|t| !t.is_empty());
-            let typing_text =
-                match typing.map(|t| t.iter().map(|t| t.name.as_str()).collect::<Vec<_>>()) {
-                    Some(names) => match names.as_slice() {
-                        [one] => format!("{one} is typing…"),
-                        [a, b] => format!("{a} and {b} are typing…"),
-                        _ => "Several people are typing…".into(),
-                    },
-                    None => String::new(),
-                };
-            ui.label(
-                RichText::new(typing_text)
-                    .small()
-                    .italics()
-                    .color(pal.muted),
-            );
+                .map(|t| t.iter().map(|t| t.name.as_str()).collect())
+                .unwrap_or_default();
+            typing_row(ui, &typers, pal);
 
-            // [+] [ message …               ] [➤]
-            egui::Frame::new()
+            // (+) [ message …               ] ➤
+            let reply_banner = !matches!(self.compose, Compose::New);
+            let mut box_frame = egui::Frame::new()
                 .fill(pal.input)
                 .corner_radius(8)
-                .inner_margin(egui::Margin::symmetric(8, 6))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        let plus = ui
-                            .add(egui::Button::new(RichText::new("➕").size(16.0)).frame(false))
-                            .on_hover_text("Upload files (or drag them onto the window)");
-                        if plus.clicked() {
-                            let _ = self.tx.send(ToBackend::PickFiles);
-                        }
-
-                        let hint = match self.channel_title() {
-                            Some(t) => format!("Message {t}"),
-                            None => "Message".into(),
-                        };
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(&mut self.draft)
-                                .hint_text(hint)
-                                .frame(egui::Frame::NONE)
-                                .desired_width(ui.available_width() - 40.0),
-                        );
-                        changed = resp.changed();
-                        if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                            cancel = true;
-                        }
-                        let enter =
-                            resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let can_send =
-                            !self.draft.trim().is_empty() || !self.pending_files.is_empty();
-                        let send_btn = ui
-                            .add_enabled(
-                                can_send,
-                                egui::Button::new(RichText::new("➤").color(Color32::WHITE))
-                                    .fill(pal.accent)
-                                    .corner_radius(6),
-                            )
-                            .on_hover_text("Send");
-                        if enter || send_btn.clicked() {
-                            send = true;
-                            resp.request_focus();
-                        }
-                    });
+                .inner_margin(egui::Margin {
+                    left: 12,
+                    right: 12,
+                    top: 10,
+                    bottom: 10,
                 });
+            if reply_banner {
+                box_frame = box_frame.corner_radius(egui::CornerRadius {
+                    nw: 0,
+                    ne: 0,
+                    sw: 8,
+                    se: 8,
+                });
+            }
+            box_frame.show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    if plus_button(ui, pal).clicked() {
+                        let _ = self.tx.send(ToBackend::PickFiles);
+                    }
+                    ui.add_space(8.0);
+                    let can_send = !self.draft.trim().is_empty() || !self.pending_files.is_empty();
+                    let hint = match self
+                        .find_channel(&channel_id)
+                        .map(|(_, c)| (c.is_dm(), c.name.clone()))
+                    {
+                        Some((true, name)) => format!("Message @{name}"),
+                        Some((false, name)) => format!("Message #{name}"),
+                        None => "Message".into(),
+                    };
+                    let send_w = if can_send {
+                        24.0 + ui.spacing().item_spacing.x
+                    } else {
+                        0.0
+                    };
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.draft)
+                            .hint_text(RichText::new(hint).color(pal.muted))
+                            .font(egui::FontId::proportional(15.0))
+                            .frame(egui::Frame::NONE)
+                            .margin(egui::Margin::ZERO)
+                            .desired_width(ui.available_width() - send_w),
+                    );
+                    if std::mem::take(&mut self.focus_composer) {
+                        resp.request_focus();
+                    }
+                    changed = resp.changed();
+                    if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        cancel = true;
+                    }
+                    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    // Discord has no send button; a subtle one shows only
+                    // when there's something to send.
+                    let send_btn = can_send && send_button(ui, pal).clicked();
+                    if enter || send_btn {
+                        send = true;
+                        resp.request_focus();
+                    }
+                });
+            });
+
+            // Reply / edit banner, attached to the top of the box.
+            let banner = match &self.compose {
+                Compose::New => None,
+                Compose::Reply { author, .. } => Some(("Replying to ", author.clone())),
+                Compose::Edit { .. } => Some(("Editing message", String::new())),
+            };
+            if let Some((what, who)) = banner {
+                egui::Frame::new()
+                    .fill(pal.sidebar)
+                    .corner_radius(egui::CornerRadius {
+                        nw: 8,
+                        ne: 8,
+                        sw: 0,
+                        se: 0,
+                    })
+                    .inner_margin(egui::Margin::symmetric(12, 6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.label(RichText::new(what).size(13.0).color(pal.muted));
+                            if !who.is_empty() {
+                                ui.label(RichText::new(who).size(13.0).bold().color(pal.text));
+                            } else {
+                                ui.label(
+                                    RichText::new(" · Esc to cancel")
+                                        .size(13.0)
+                                        .color(pal.muted),
+                                );
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let x = ui
+                                        .add(
+                                            egui::Button::new(RichText::new("✕").color(pal.muted))
+                                                .frame(false),
+                                        )
+                                        .on_hover_text("Cancel (Esc)");
+                                    cancel |= x.clicked();
+                                },
+                            );
+                        });
+                    });
+            }
 
             // Files waiting to upload
             if !self.pending_files.is_empty() {
+                ui.add_space(6.0);
                 ui.with_layout(
                     egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
                     |ui| {
+                        ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
                         let mut total = 0;
                         for (i, p) in self.pending_files.iter().enumerate() {
                             let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
@@ -1720,7 +1957,7 @@ impl State {
                             egui::Frame::new()
                                 .fill(pal.input)
                                 .corner_radius(6)
-                                .inner_margin(egui::Margin::symmetric(6, 2))
+                                .inner_margin(egui::Margin::symmetric(8, 4))
                                 .show(ui, |ui| {
                                     ui.label(RichText::new(format!("📄 {name}")).small());
                                     ui.label(
@@ -1740,19 +1977,6 @@ impl State {
                         }
                     },
                 );
-            }
-
-            // Reply / edit banner
-            let banner = match &self.compose {
-                Compose::New => None,
-                Compose::Reply { author, .. } => Some(format!("Replying to {author}")),
-                Compose::Edit { .. } => Some("Editing message · Esc to cancel".to_string()),
-            };
-            if let Some(text) = banner {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(text).small().color(pal.muted));
-                    cancel |= ui.small_button("✕").clicked();
-                });
             }
         });
 
@@ -1888,14 +2112,17 @@ impl State {
         };
         let total = list.map_or(fallback.len(), |l| l.total_rows().min(100_000));
         if let Some(l) = list.filter(|l| l.member_count > 0) {
-            ui.label(
-                RichText::new(format!(
-                    "{} members · {} online",
-                    l.member_count, l.online_count
-                ))
-                .small()
-                .color(pal.muted),
-            );
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} members · {} online",
+                        l.member_count, l.online_count
+                    ))
+                    .size(11.5)
+                    .color(pal.muted),
+                );
+            });
         }
         let (clicked, visible) = members::list_ui(
             ui,
@@ -1973,6 +2200,60 @@ impl State {
         let _ = self.tx.send(req);
         self.draft.clear();
         self.last_typing_sent = None;
+    }
+
+    /// Status bar module: a thin bar at the bottom like Discord Messenger's
+    /// (connection, where you are, who's typing, RAM).
+    fn status_bar(&self, ui: &mut egui::Ui, config: &Config, pal: &Palette, ram: Option<u64>) {
+        egui::Panel::bottom("status_bar")
+            .exact_size(22.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(pal.servers)
+                    .inner_margin(egui::Margin::symmetric(10, 0)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let small = |t: &str| RichText::new(t).size(11.5).color(pal.muted);
+                    let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
+                    let dot = if self.connected { pal.online } else { pal.idle };
+                    ui.painter().circle_filled(r.center(), 4.0, dot);
+                    ui.label(small(&self.status));
+                    if let Some(cid) = &self.selected_channel
+                        && let Some((g, c)) = self.find_channel(cid)
+                    {
+                        ui.separator();
+                        let place = if g.is_dms() {
+                            format!("{} {}", c.icon(), c.name)
+                        } else {
+                            format!("{} {} · {}", c.icon(), c.name, g.name)
+                        };
+                        ui.add(egui::Label::new(small(&place)).truncate());
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(bytes) = ram {
+                            ui.label(small(&format!("RAM {:.0} MB", bytes as f64 / 1_048_576.0)));
+                            ui.ctx().request_repaint_after(Duration::from_secs(2));
+                        }
+                        let typing = config
+                            .modules
+                            .typing_indicators
+                            .then_some(self.selected_channel.as_ref())
+                            .flatten()
+                            .and_then(|c| self.typing.get(c))
+                            .filter(|t| !t.is_empty());
+                        if let Some(t) = typing {
+                            ui.separator();
+                            let text = match t.as_slice() {
+                                [one] => format!("{} is typing…", one.name),
+                                _ => format!("{} people are typing…", t.len()),
+                            };
+                            ui.label(small(&text));
+                        }
+                    });
+                });
+            });
     }
 
     /// Profile card, delete confirmation and the "drop files here" overlay.
@@ -2103,15 +2384,31 @@ pub(crate) fn avatar(
     config: &Config,
     pal: &Palette,
 ) -> egui::Rect {
+    let (rect, _) = ui.allocate_exact_size(vec2(size, size), egui::Sense::hover());
+    paint_avatar(ui, rect, user_id, name, url, config, pal);
+    rect
+}
+
+/// `avatar`, painted into a given rect (no layout).
+pub(crate) fn paint_avatar(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    user_id: &str,
+    name: &str,
+    url: &str,
+    config: &Config,
+    pal: &Palette,
+) {
+    let size = rect.width();
     if config.modules.images && !url.is_empty() {
-        ui.add(
-            egui::Image::from_uri(url)
-                .fit_to_exact_size(vec2(size, size))
-                .corner_radius(size / 2.0),
-        )
-        .rect
+        // Placeholder disc while loading (or if the download fails).
+        ui.painter()
+            .circle_filled(rect.center(), size / 2.0, pal.hover);
+        egui::Image::from_uri(url)
+            .corner_radius(size / 2.0)
+            .show_loading_spinner(false)
+            .paint_at(ui, rect);
     } else {
-        let (rect, _) = ui.allocate_exact_size(vec2(size, size), egui::Sense::hover());
         let hue = user_id
             .bytes()
             .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
@@ -2127,11 +2424,320 @@ pub(crate) fn avatar(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             letter,
-            egui::FontId::proportional(size * 0.45),
-            pal.text,
+            theme::bold_font(size * 0.42),
+            Color32::WHITE,
         );
-        rect
     }
+}
+
+/// A 48 px header strip across the top of a panel with a 1 px border and a
+/// soft shadow under it (Discord's channel-list and chat headers). Returns
+/// the header's rect.
+fn header_bar(ui: &mut egui::Ui, pal: &Palette) -> egui::Rect {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), egui::Sense::hover());
+    let y = rect.bottom();
+    let painter = ui.painter();
+    painter.hline(rect.x_range(), y - 0.5, egui::Stroke::new(1.0, pal.servers));
+    let shadow = if pal.dark { 40 } else { 14 };
+    for i in 0..3 {
+        let a = (shadow / (i + 1)) as u8;
+        painter.hline(
+            rect.x_range(),
+            y + 0.5 + i as f32,
+            egui::Stroke::new(1.0, Color32::from_black_alpha(a)),
+        );
+    }
+    rect
+}
+
+/// "▾ TEXT CHANNELS" — click to collapse / expand.
+fn category_header(
+    ui: &mut egui::Ui,
+    name: &str,
+    collapsed: bool,
+    pal: &Palette,
+) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(vec2(ui.available_width(), 22.0), egui::Sense::click());
+    let col = if resp.hovered() { pal.text } else { pal.muted };
+    let chevron = if collapsed { "▸" } else { "▾" };
+    ui.painter().text(
+        rect.left_center() + vec2(2.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        chevron,
+        egui::FontId::proportional(11.0),
+        col,
+    );
+    let galley = truncated(
+        ui,
+        &name.to_uppercase(),
+        theme::bold_font(11.5),
+        col,
+        rect.width() - 20.0,
+    );
+    ui.painter().galley(
+        egui::pos2(rect.left() + 14.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        col,
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// What a channel row needs to know besides the channel.
+struct ChannelRow {
+    selected: bool,
+    muted: bool,
+    unread: bool,
+    mentions: u32,
+    /// DM partner's status (shown on their avatar).
+    status: Option<Status>,
+}
+
+/// One channel in the list: "# name" (32 px) or, for DMs, avatar + name
+/// (42 px); hover / selected backgrounds, white unread text and pill,
+/// mention badge. Voice channels are listed greyed out.
+fn channel_row(
+    ui: &mut egui::Ui,
+    c: &crate::types::Channel,
+    row: &ChannelRow,
+    config: &Config,
+    pal: &Palette,
+) -> egui::Response {
+    let dm = c.is_dm();
+    let h = if dm { 42.0 } else { 32.0 };
+    let sense = if c.is_voice() {
+        egui::Sense::hover()
+    } else {
+        egui::Sense::click()
+    };
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), sense);
+    let hovered = resp.hovered() && !c.is_voice();
+    if row.selected {
+        ui.painter().rect_filled(rect, 4, pal.selected);
+    } else if hovered {
+        ui.painter().rect_filled(rect, 4, pal.hover);
+    }
+    let color = if c.is_voice() {
+        pal.muted_text()
+    } else if row.selected {
+        pal.strong
+    } else if row.muted {
+        pal.muted_text()
+    } else if row.unread || row.mentions > 0 {
+        pal.unread
+    } else if hovered {
+        pal.text
+    } else {
+        pal.muted
+    };
+    let bold = (row.unread || row.mentions > 0) && !row.muted;
+    let font = if bold || row.selected {
+        theme::bold_font(15.0)
+    } else {
+        egui::FontId::proportional(15.0)
+    };
+
+    let mut x = rect.left() + 8.0;
+    if dm {
+        let a =
+            egui::Rect::from_center_size(egui::pos2(x + 16.0, rect.center().y), vec2(32.0, 32.0));
+        match c.recipients.first().filter(|_| c.kind == CHANNEL_DM) {
+            Some(u) => paint_avatar(ui, a, &u.id, &u.name, &u.avatar_url, config, pal),
+            None => {
+                ui.painter().circle_filled(a.center(), 16.0, pal.accent);
+                ui.painter().text(
+                    a.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "👥",
+                    egui::FontId::proportional(15.0),
+                    Color32::WHITE,
+                );
+            }
+        }
+        if let Some(st) = row.status {
+            let ring = if row.selected {
+                pal.selected
+            } else if hovered {
+                pal.hover
+            } else {
+                pal.sidebar
+            };
+            members::status_dot(ui, a, st, ring, pal);
+        }
+        x += 32.0 + 12.0;
+    } else {
+        ui.painter().text(
+            egui::pos2(x + 10.0, rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            c.icon(),
+            egui::FontId::proportional(if c.icon() == "#" { 20.0 } else { 15.0 }),
+            if row.selected || hovered || bold {
+                color
+            } else {
+                pal.muted.gamma_multiply(0.85)
+            },
+        );
+        x += 28.0;
+    }
+    let right_pad = if row.mentions > 0 { 34.0 } else { 8.0 };
+    let galley = truncated(ui, &c.name, font, color, rect.right() - right_pad - x);
+    ui.painter().galley(
+        egui::pos2(x, rect.center().y - galley.size().y / 2.0),
+        galley,
+        color,
+    );
+    if row.unread && !row.selected {
+        unread_pill(ui, rect, 8.0, pal);
+    }
+    if row.mentions > 0 {
+        mention_badge(
+            ui,
+            egui::pos2(rect.right() - 8.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            row.mentions,
+            if row.selected {
+                pal.selected
+            } else {
+                pal.sidebar
+            },
+            pal,
+        );
+    }
+    if c.is_voice() {
+        return resp.on_hover_text("Voice channels are coming later");
+    }
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    match row.status.filter(|_| dm) {
+        Some(st) => resp.on_hover_text(st.label()),
+        None => resp,
+    }
+}
+
+/// Discord's ⊕ upload button: a filled circle with a plus cut out.
+fn plus_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 24.0), egui::Sense::click());
+    let col = if resp.hovered() {
+        pal.strong
+    } else {
+        pal.muted
+    };
+    let c = rect.center();
+    ui.painter().circle_filled(c, 11.0, col);
+    let stroke = egui::Stroke::new(2.0, pal.input);
+    ui.painter().hline(c.x - 5.0..=c.x + 5.0, c.y, stroke);
+    ui.painter().vline(c.x, c.y - 5.0..=c.y + 5.0, stroke);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Upload files (or drag them onto the window)")
+}
+
+/// The subtle ➤ at the right of the message box (only when there's
+/// something to send).
+fn send_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 20.0), egui::Sense::click());
+    let col = if resp.hovered() {
+        pal.accent
+    } else {
+        pal.muted
+    };
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "➤",
+        egui::FontId::proportional(18.0),
+        col,
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Send (Enter)")
+}
+
+/// "● ● ●  Sam is typing…" under the message box, with Discord's
+/// bouncing dots. Always takes its height so the box doesn't jump.
+fn typing_row(ui: &mut egui::Ui, names: &[&str], pal: &Palette) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), egui::Sense::hover());
+    if names.is_empty() {
+        return;
+    }
+    let t = ui.input(|i| i.time) as f32;
+    let y = rect.center().y;
+    for i in 0..3 {
+        let phase = (t * 6.0 - i as f32 * 0.9).sin() * 0.5 + 0.5;
+        let c = egui::pos2(rect.left() + 4.0 + i as f32 * 7.0, y - phase * 1.5);
+        ui.painter()
+            .circle_filled(c, 2.5, pal.text.gamma_multiply(0.35 + 0.65 * phase));
+    }
+    // Animate while visible (only when someone is typing).
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(50));
+
+    let bold = |n: &str| (n.to_string(), true);
+    let plain = |n: &str| (n.to_string(), false);
+    let parts: Vec<(String, bool)> = match names {
+        [one] => vec![bold(one), plain(" is typing…")],
+        [a, b] => vec![bold(a), plain(" and "), bold(b), plain(" are typing…")],
+        [a, b, c] => vec![
+            bold(a),
+            plain(", "),
+            bold(b),
+            plain(" and "),
+            bold(c),
+            plain(" are typing…"),
+        ],
+        _ => vec![plain("Several people are typing…")],
+    };
+    let mut job = egui::text::LayoutJob::default();
+    for (text, is_bold) in parts {
+        let font = if is_bold {
+            theme::bold_font(12.0)
+        } else {
+            egui::FontId::proportional(12.0)
+        };
+        let col = if is_bold { pal.text } else { pal.muted };
+        job.append(&text, 0.0, egui::TextFormat::simple(font, col));
+    }
+    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 30.0);
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(
+        egui::pos2(rect.left() + 26.0, y - galley.size().y / 2.0),
+        galley,
+        pal.muted,
+    );
+}
+
+/// A square icon button like Discord's header / user-panel icons: muted
+/// glyph, brighter with a soft background on hover, white when active.
+fn icon_button(
+    ui: &mut egui::Ui,
+    glyph: &str,
+    tooltip: &str,
+    active: bool,
+    enabled: bool,
+    pal: &Palette,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), egui::Sense::click());
+    let hovered = resp.hovered() && enabled;
+    if hovered {
+        ui.painter().rect_filled(rect.shrink(2.0), 4, pal.hover);
+    }
+    let col = if !enabled {
+        pal.muted_text()
+    } else if active || hovered {
+        pal.strong
+    } else {
+        pal.muted
+    };
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(18.0),
+        col,
+    );
+    let resp = if enabled {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp
+    };
+    resp.on_hover_text(tooltip)
 }
 
 /// Unread / mention / muted state of a server icon.
@@ -2184,8 +2790,9 @@ fn mention_badge(
 
 /// Red "NEW" line above the first unread message.
 fn new_divider(ui: &mut egui::Ui, pal: &Palette) {
-    ui.add_space(6.0);
+    ui.add_space(10.0);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 12.0), egui::Sense::hover());
+    let rect = rect.shrink2(vec2(MSG_PAD, 0.0));
     let y = rect.center().y;
     ui.painter().hline(
         rect.left()..=rect.right() - 36.0,
@@ -2201,7 +2808,7 @@ fn new_divider(ui: &mut egui::Ui, pal: &Palette) {
         tag.center(),
         egui::Align2::CENTER_CENTER,
         "NEW",
-        egui::FontId::proportional(9.5),
+        theme::bold_font(9.5),
         Color32::WHITE,
     );
 }
@@ -2251,220 +2858,553 @@ fn inbox_row(ui: &mut egui::Ui, item: &InboxItem, pal: &Palette) -> egui::Respon
     resp.on_hover_text("Jump to message")
 }
 
-/// A server entry: icon (or initials) plus name, with an unread pill, a red
-/// mention badge, and greyed out when muted.
-#[allow(clippy::too_many_arguments)]
-fn server_button(
+/// The rail shows server names when dragged at least this wide.
+const RAIL_NAMES_WIDTH: f32 = 160.0;
+
+enum RailIcon<'a> {
+    Home,
+    Image(&'a str),
+    Initials(&'a str),
+}
+
+/// One server in the rail: a 48 px icon that morphs from a circle into a
+/// rounded square when hovered or selected, the white pill on the left
+/// (small = unread, medium = hover, tall = selected), a red mention badge,
+/// and greyed out when muted.
+fn rail_item(
     ui: &mut egui::Ui,
-    selected: bool,
-    icon: Option<&str>,
-    fallback: &str,
+    icon: RailIcon<'_>,
     name: &str,
+    selected: bool,
     badge: Badge,
     config: &Config,
     pal: &Palette,
 ) -> egui::Response {
-    let mut icon_rect = egui::Rect::NOTHING;
-    let resp = ui
-        .horizontal(|ui| {
-            let size = vec2(32.0, 32.0);
-            match icon.filter(|_| config.modules.images) {
-                Some(url) => {
-                    let tint = if badge.muted {
-                        Color32::from_gray(110)
-                    } else {
-                        Color32::WHITE
-                    };
-                    icon_rect = ui
-                        .add(
-                            egui::Image::from_uri(url)
-                                .fit_to_exact_size(size)
-                                .corner_radius(16)
-                                .tint(tint),
-                        )
-                        .rect;
-                }
-                None => {
-                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                    icon_rect = rect;
-                    let fill = if selected { pal.accent } else { pal.sidebar };
-                    ui.painter().circle_filled(rect.center(), 16.0, fill);
-                    let col = if badge.muted && !selected {
-                        pal.muted_text()
-                    } else {
-                        pal.text
-                    };
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        fallback,
-                        egui::FontId::proportional(13.0),
-                        col,
-                    );
-                }
-            }
-            if ui.available_width() > 30.0 {
-                let mut text = RichText::new(name);
-                if badge.muted && !selected {
-                    text = text.color(pal.muted_text());
-                } else if badge.unread && !selected {
-                    text = text.color(pal.unread).strong();
-                }
-                ui.add(egui::Button::selectable(selected, text).truncate())
+    const SIZE: f32 = 48.0;
+    let width = ui.available_width();
+    let wide = width >= RAIL_NAMES_WIDTH;
+    let (row, resp) = ui.allocate_exact_size(vec2(width, SIZE), egui::Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let hovered = resp.hovered();
+    let ctx = ui.ctx().clone();
+
+    // Circle (radius 24) → rounded square (radius 16).
+    let t = ctx.animate_bool_with_time(resp.id.with("shape"), selected || hovered, 0.12);
+    let radius = egui::lerp(SIZE / 2.0..=16.0, t);
+    let x = if wide {
+        row.left() + 12.0
+    } else {
+        row.center().x - SIZE / 2.0
+    };
+    let rect = egui::Rect::from_min_size(egui::pos2(x, row.top()), vec2(SIZE, SIZE));
+    let active = selected || hovered;
+
+    match icon {
+        RailIcon::Image(url) => {
+            let tint = if badge.muted && !active {
+                Color32::from_gray(110)
             } else {
-                ui.allocate_response(vec2(0.0, 0.0), egui::Sense::click())
-            }
-        })
-        .response;
-    if selected {
-        unread_pill(ui, icon_rect, 28.0, pal);
-    } else if badge.unread {
-        unread_pill(ui, icon_rect, 8.0, pal);
+                Color32::WHITE
+            };
+            ui.painter().rect_filled(rect, radius, pal.rail_icon);
+            egui::Image::from_uri(url)
+                .corner_radius(radius)
+                .tint(tint)
+                .show_loading_spinner(false)
+                .paint_at(ui, rect);
+        }
+        RailIcon::Home | RailIcon::Initials(_) => {
+            let fill = if active { pal.accent } else { pal.rail_icon };
+            ui.painter().rect_filled(rect, radius, fill);
+            let (text, font) = match icon {
+                RailIcon::Initials(i) => {
+                    let size = if i.chars().count() > 2 { 14.0 } else { 16.0 };
+                    (i, theme::bold_font(size))
+                }
+                _ => ("💬", egui::FontId::proportional(20.0)),
+            };
+            let col = if active {
+                Color32::WHITE
+            } else if badge.muted {
+                pal.muted_text()
+            } else {
+                pal.text
+            };
+            ui.painter()
+                .text(rect.center(), egui::Align2::CENTER_CENTER, text, font, col);
+        }
     }
+
+    // The pill sits on the panel's left edge; only its right half shows.
+    let target = if selected {
+        40.0
+    } else if hovered {
+        20.0
+    } else if badge.unread && !badge.muted {
+        8.0
+    } else {
+        0.0
+    };
+    let h = ctx.animate_value_with_time(resp.id.with("pill"), target, 0.12);
+    if h > 0.5 {
+        let left = ui.clip_rect().left();
+        let pill = egui::Rect::from_center_size(egui::pos2(left, rect.center().y), vec2(8.0, h));
+        ui.painter().rect_filled(pill, 4, pal.unread);
+    }
+
     if badge.mentions > 0 {
         mention_badge(
             ui,
-            icon_rect.right_bottom() + vec2(4.0, 2.0),
+            rect.right_bottom() + vec2(2.0, 2.0),
             egui::Align2::RIGHT_BOTTOM,
             badge.mentions,
             pal.servers,
             pal,
         );
     }
-    let resp = ui.interact(resp.rect, resp.id.with("server"), egui::Sense::click());
+
+    if wide {
+        let color = if selected {
+            pal.strong
+        } else if badge.muted {
+            pal.muted_text()
+        } else if badge.unread || hovered {
+            pal.unread
+        } else {
+            pal.muted
+        };
+        let font = if badge.unread || selected {
+            theme::bold_font(15.0)
+        } else {
+            egui::FontId::proportional(15.0)
+        };
+        let max_w = row.right() - rect.right() - 20.0;
+        let galley = truncated(ui, name, font, color, max_w);
+        ui.painter().galley(
+            egui::pos2(rect.right() + 12.0, row.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+    }
+    let _ = config;
     let hover = if badge.muted {
         format!("{name} (muted)")
     } else {
         name.to_string()
     };
-    resp.on_hover_text(hover)
+    if wide {
+        resp
+    } else {
+        resp.on_hover_text(hover)
+    }
 }
 
-/// How to show a message author: server nickname, top role colour, status.
+/// Lay out one line of text, cut off with "…" past `max_width`.
+fn truncated(
+    ui: &egui::Ui,
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+    max_width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width.max(10.0));
+    ui.painter().layout_job(job)
+}
+
+/// How to show a message author: server nickname, top role colour.
 struct AuthorStyle<'a> {
     name: &'a str,
     color: Option<Color32>,
-    status: Option<Status>,
 }
 
-/// Draw one message. Returns an action if the user picked one from its menu.
+/// Per-message flags for `message_row`.
+struct RowCtx {
+    /// Follow-up from the same author: no avatar / name line.
+    grouped: bool,
+    mine: bool,
+    /// Mentions me (or @everyone): Discord's yellow highlight.
+    mentions_me: bool,
+}
+
+/// Message layout, in px (Discord's): 16 px left padding, 40 px avatar,
+/// content starts at 72 px; groups start 17 px apart.
+const MSG_PAD: f32 = 16.0;
+const MSG_AVATAR: f32 = 40.0;
+const MSG_GUTTER: f32 = 72.0;
+const GROUP_GAP: f32 = 17.0;
+
+/// Draw one message. Returns an action if the user picked one (hover bar,
+/// right-click menu, avatar / name click).
 fn message_row(
     ui: &mut egui::Ui,
     m: &Message,
     author: &AuthorStyle<'_>,
-    grouped: bool,
-    mine: bool,
+    rc: &RowCtx,
     config: &Config,
     pal: &Palette,
 ) -> Option<MessageAction> {
     let mut action = None;
-    if !grouped {
-        ui.add_space(8.0);
+    if !rc.grouped {
+        ui.add_space(GROUP_GAP - 2.0);
+    }
+    let more_id = egui::Id::unique(("msg_more", &m.id));
+    let menu_open = egui::Popup::is_id_open(ui.ctx(), more_id.with("popup"));
+    // Last frame's hover bar rect: keep the bar while the pointer is on it.
+    let bar_id = egui::Id::unique("msg_hover_bar");
+    let last_bar = ui
+        .ctx()
+        .memory(|mem| mem.data.get_temp::<(egui::Id, egui::Rect)>(bar_id));
+    // (The bar is on its own layer, so check the raw pointer position.)
+    let pointer = ui.input(|i| i.pointer.hover_pos());
+    let on_bar = last_bar.is_some_and(|(owner, r)| {
+        owner == more_id && pointer.is_some_and(|p| r.expand(2.0).contains(p))
+    });
+
+    let row = ui.scope_builder(
+        egui::UiBuilder::new()
+            .id_salt(("msg", &m.id))
+            .sense(egui::Sense::click()),
+        |ui| {
+            let bg = ui.painter().add(egui::Shape::Noop);
+            let full = ui.available_rect_before_wrap();
+            let mut gutter = egui::Rect::NOTHING;
+            let inner = egui::Frame::new()
+                .inner_margin(egui::Margin {
+                    left: MSG_PAD as i8,
+                    right: 48,
+                    top: 2,
+                    bottom: 2,
+                })
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    if let Some(reply) = &m.reply {
+                        reply_preview(ui, reply, config, pal);
+                    }
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        if rc.grouped {
+                            let (r, _) = ui.allocate_exact_size(
+                                vec2(MSG_GUTTER - MSG_PAD, 20.0),
+                                egui::Sense::hover(),
+                            );
+                            gutter = r;
+                        } else {
+                            ui.add_space(0.0);
+                            let rect = avatar(
+                                ui,
+                                &m.author.id,
+                                author.name,
+                                &m.author.avatar_url,
+                                MSG_AVATAR,
+                                config,
+                                pal,
+                            );
+                            let resp = ui
+                                .interact(
+                                    rect,
+                                    ui.scope_id().with(("msg_avatar", &m.id)),
+                                    egui::Sense::click(),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if resp.clicked() {
+                                action = Some(MessageAction::Profile(m.author.clone(), rect));
+                            }
+                            ui.add_space(MSG_GUTTER - MSG_PAD - MSG_AVATAR);
+                        }
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(6.0, 2.0);
+                            if !rc.grouped {
+                                ui.horizontal(|ui| {
+                                    let name = RichText::new(author.name)
+                                        .bold()
+                                        .size(15.0)
+                                        .color(author.color.unwrap_or(pal.strong));
+                                    let resp = ui
+                                        .add(
+                                            egui::Label::new(name)
+                                                .sense(egui::Sense::click())
+                                                .selectable(false),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    if resp.clicked() {
+                                        action = Some(MessageAction::Profile(
+                                            m.author.clone(),
+                                            resp.rect,
+                                        ));
+                                    }
+                                    if m.author.bot {
+                                        members::bot_tag(ui, pal);
+                                    }
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(timefmt::full(m.time))
+                                                .size(12.0)
+                                                .color(pal.muted),
+                                        )
+                                        .selectable(false),
+                                    )
+                                    .on_hover_text(timefmt::long(m.time));
+                                });
+                            }
+                            let texts = message_body(ui, m, pal, config);
+                            for r in &texts {
+                                egui::Popup::context_menu(r)
+                                    .show(|ui| message_menu(ui, m, rc.mine, &mut action));
+                            }
+                            for a in &m.attachments {
+                                attachment_ui(ui, a, config, pal);
+                            }
+                        });
+                    });
+                })
+                .response
+                .rect;
+            (full.with_max_y(inner.bottom()), gutter, bg)
+        },
+    );
+    let (rect, gutter, bg) = row.inner;
+    let resp = row.response;
+    let hovered = ui.rect_contains_pointer(rect) || on_bar || menu_open;
+
+    // Backgrounds: mention highlight, then hover.
+    let mut shapes = Vec::new();
+    if rc.mentions_me {
+        shapes.push(egui::Shape::rect_filled(
+            rect,
+            0,
+            pal.idle.gamma_multiply(0.10),
+        ));
+        shapes.push(egui::Shape::rect_filled(
+            egui::Rect::from_min_size(rect.min, vec2(2.0, rect.height())),
+            0,
+            pal.idle,
+        ));
+    }
+    if hovered {
+        let c = if rc.mentions_me {
+            pal.idle.gamma_multiply(0.06)
+        } else {
+            pal.msg_hover
+        };
+        shapes.push(egui::Shape::rect_filled(rect, 0, c));
+    }
+    ui.painter().set(bg, egui::Shape::Vec(shapes));
+
+    // Grouped follow-ups: the time in the gutter on hover.
+    if hovered && rc.grouped && gutter.is_positive() {
+        ui.painter().text(
+            egui::pos2(rect.left() + MSG_PAD + MSG_AVATAR / 2.0, gutter.center().y),
+            egui::Align2::CENTER_CENTER,
+            m.short_time(),
+            egui::FontId::proportional(10.5),
+            pal.muted,
+        );
     }
 
-    ui.horizontal_top(|ui| {
-        let avatar_size = 36.0;
-        if grouped {
-            ui.add_space(avatar_size + ui.spacing().item_spacing.x);
-        } else {
-            let rect = avatar(
-                ui,
-                &m.author.id,
-                author.name,
-                &m.author.avatar_url,
-                avatar_size,
-                config,
-                pal,
-            );
-            if let Some(s) = author.status.filter(|s| *s != Status::Offline) {
-                members::status_dot(ui, rect, s, pal.chat, pal);
-            }
-            let resp = ui
-                .interact(
-                    rect,
-                    ui.scope_id().with(("msg_avatar", &m.id)),
-                    egui::Sense::click(),
-                )
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-            if resp.clicked() {
-                action = Some(MessageAction::Profile(m.author.clone(), rect));
+    egui::Popup::context_menu(&resp).show(|ui| message_menu(ui, m, rc.mine, &mut action));
+
+    if hovered {
+        hover_bar(ui, m, rc.mine, rect, more_id, bar_id, &mut action, pal);
+    }
+    action
+}
+
+/// Text, emoji and "(edited)". Returns the text labels (for right-click).
+fn message_body(
+    ui: &mut egui::Ui,
+    m: &Message,
+    pal: &Palette,
+    config: &Config,
+) -> Vec<egui::Response> {
+    let mut text_responses = Vec::new();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        if !m.content.is_empty() {
+            if config.modules.emoji_images {
+                let segs = emoji::segments(&m.content);
+                let size = if emoji::is_jumbo(&segs) { 44.0 } else { 20.0 };
+                for seg in segs {
+                    match seg {
+                        Segment::Text(t) => text_responses
+                            .push(ui.add(egui::Label::new(RichText::new(t).color(pal.text)))),
+                        Segment::Emoji { url, alt } => {
+                            ui.add(egui::Image::from_uri(url).fit_to_exact_size(vec2(size, size)))
+                                .on_hover_text(alt);
+                        }
+                    }
+                }
+            } else {
+                text_responses
+                    .push(ui.add(egui::Label::new(RichText::new(&m.content).color(pal.text))));
             }
         }
-
-        ui.vertical(|ui| {
-            if let Some(reply) = &m.reply {
-                ui.label(
-                    RichText::new(format!("↪ {}: {}", reply.author, reply.content))
-                        .small()
-                        .color(pal.muted),
-                );
-            }
-            if !grouped {
-                ui.horizontal(|ui| {
-                    let mut name = RichText::new(author.name).strong();
-                    if let Some(c) = author.color {
-                        name = name.color(c);
-                    }
-                    let resp = ui
-                        .add(egui::Label::new(name).sense(egui::Sense::click()))
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if resp.clicked() {
-                        action = Some(MessageAction::Profile(m.author.clone(), resp.rect));
-                    }
-                    if m.author.bot {
-                        members::bot_tag(ui, pal);
-                    }
-                    ui.label(RichText::new(m.short_time()).small().color(pal.muted));
-                });
-            }
-
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                let mut text_responses = Vec::new();
-                if !m.content.is_empty() {
-                    if config.modules.emoji_images {
-                        let segs = emoji::segments(&m.content);
-                        let size = if emoji::is_jumbo(&segs) { 44.0 } else { 20.0 };
-                        for seg in segs {
-                            match seg {
-                                Segment::Text(t) => text_responses
-                                    .push(ui.add(egui::Label::new(t).sense(egui::Sense::click()))),
-                                Segment::Emoji { url, alt } => {
-                                    ui.add(
-                                        egui::Image::from_uri(url)
-                                            .fit_to_exact_size(vec2(size, size)),
-                                    )
-                                    .on_hover_text(alt);
-                                }
-                            }
-                        }
-                    } else {
-                        text_responses
-                            .push(ui.add(egui::Label::new(&m.content).sense(egui::Sense::click())));
-                    }
-                }
-                ui.spacing_mut().item_spacing.x = 6.0;
-                if m.edited {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new("(edited)").small().color(pal.muted));
-                }
-                ui.add_space(4.0);
-                let dots = ui
-                    .add(egui::Button::new(RichText::new("⋯").color(pal.muted)).frame(false))
-                    .on_hover_text("More");
-                egui::Popup::menu(&dots).show(|ui| message_menu(ui, m, mine, &mut action));
-                // Right-click the text for the same menu.
-                for r in &text_responses {
-                    egui::Popup::context_menu(r).show(|ui| message_menu(ui, m, mine, &mut action));
-                }
-            });
-
-            for a in &m.attachments {
-                attachment_ui(ui, a, config, pal);
-            }
-        });
+        if m.edited {
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(RichText::new("(edited)").size(10.5).color(pal.muted))
+                    .selectable(false),
+            );
+        }
     });
-    action
+    text_responses
+}
+
+/// Discord's reply line above a message: a curved connector from the
+/// avatar column, the replied-to author's small avatar and bold name, and
+/// a muted one-line snippet.
+fn reply_preview(
+    ui: &mut egui::Ui,
+    reply: &crate::types::ReplyPreview,
+    config: &Config,
+    pal: &Palette,
+) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), egui::Sense::hover());
+    let y = rect.center().y;
+    // Connector: from above the avatar's centre, up and round to the right.
+    let x0 = rect.left() + MSG_AVATAR / 2.0;
+    let x1 = rect.left() + MSG_GUTTER - MSG_PAD - 6.0;
+    let r = 6.0;
+    let mut pts = vec![egui::pos2(x0, rect.bottom() + 4.0)];
+    for i in 0..=6 {
+        let a = std::f32::consts::FRAC_PI_2 * i as f32 / 6.0;
+        pts.push(egui::pos2(x0 + r - r * a.cos(), y + r - r * a.sin()));
+    }
+    pts.push(egui::pos2(x1, y));
+    let line = if pal.dark {
+        Color32::from_gray(0x4e)
+    } else {
+        Color32::from_gray(0xc4)
+    };
+    ui.painter()
+        .add(egui::Shape::line(pts, egui::Stroke::new(2.0, line)));
+
+    let mut x = rect.left() + MSG_GUTTER - MSG_PAD;
+    let av = egui::Rect::from_center_size(egui::pos2(x + 8.0, y), vec2(16.0, 16.0));
+    paint_avatar(
+        ui,
+        av,
+        &reply.author_id,
+        &reply.author,
+        &reply.avatar_url,
+        config,
+        pal,
+    );
+    x += 20.0;
+    let name = truncated(ui, &reply.author, theme::bold_font(13.0), pal.text, 160.0);
+    let w = name.size().x;
+    ui.painter()
+        .galley(egui::pos2(x, y - name.size().y / 2.0), name, pal.text);
+    x += w + 6.0;
+    let snippet = truncated(
+        ui,
+        &reply.content,
+        egui::FontId::proportional(13.0),
+        pal.muted,
+        rect.right() - x,
+    );
+    ui.painter().galley(
+        egui::pos2(x, y - snippet.size().y / 2.0),
+        snippet,
+        pal.muted,
+    );
+}
+
+/// The floating Reply / Edit / More bar at the top-right of a hovered
+/// message.
+#[allow(clippy::too_many_arguments)]
+fn hover_bar(
+    ui: &mut egui::Ui,
+    m: &Message,
+    mine: bool,
+    row: egui::Rect,
+    more_id: egui::Id,
+    bar_id: egui::Id,
+    action: &mut Option<MessageAction>,
+    pal: &Palette,
+) {
+    let buttons = if mine { 3.0 } else { 2.0 };
+    let size = vec2(buttons * 32.0 + 4.0, 36.0);
+    let clip = ui.clip_rect();
+    let y = (row.top() - 16.0).max(clip.top() + 2.0);
+    let pos = egui::pos2(row.right() - 16.0 - size.x, y);
+    if !clip.intersects(egui::Rect::from_min_size(pos, size)) {
+        return;
+    }
+    let area = egui::Area::new(bar_id)
+        .order(egui::Order::Middle)
+        .fade_in(false)
+        .fixed_pos(pos)
+        .constrain(false)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(pal.chat)
+                .stroke(egui::Stroke::new(1.0, pal.divider))
+                .corner_radius(6)
+                .inner_margin(2)
+                .shadow(egui::Shadow {
+                    offset: [0, 2],
+                    blur: 6,
+                    spread: 0,
+                    color: Color32::from_black_alpha(if pal.dark { 60 } else { 20 }),
+                })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        if icon_button(ui, "↪", "Reply", false, true, pal).clicked() {
+                            *action =
+                                Some(MessageAction::Reply(m.id.clone(), m.author.name.clone()));
+                        }
+                        if mine && icon_button(ui, "✏", "Edit", false, true, pal).clicked() {
+                            *action = Some(MessageAction::Edit(m.id.clone(), m.content.clone()));
+                        }
+                        let (r, _) = ui.allocate_exact_size(vec2(32.0, 32.0), egui::Sense::hover());
+                        let more = ui.interact(r, more_id, egui::Sense::click());
+                        let open = egui::Popup::is_id_open(ui.ctx(), more_id.with("popup"));
+                        if more.hovered() || open {
+                            ui.painter().rect_filled(r.shrink(2.0), 4, pal.hover);
+                        }
+                        ui.painter().text(
+                            r.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "⋯",
+                            egui::FontId::proportional(18.0),
+                            if more.hovered() || open {
+                                pal.strong
+                            } else {
+                                pal.muted
+                            },
+                        );
+                        let more = more.on_hover_text("More");
+                        egui::Popup::menu(&more)
+                            .align(egui::RectAlign::BOTTOM_END)
+                            .show(|ui| message_menu(ui, m, mine, action));
+                    });
+                });
+        });
+    let rect = area.response.rect;
+    ui.ctx()
+        .memory_mut(|mem| mem.data.insert_temp(bar_id, (more_id, rect)));
+}
+
+/// Line with the date in the middle, between messages of different days.
+fn date_divider(ui: &mut egui::Ui, label: &str, pal: &Palette) {
+    ui.add_space(GROUP_GAP + 4.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 14.0), egui::Sense::hover());
+    let line = rect.shrink2(vec2(MSG_PAD, 0.0));
+    ui.painter().hline(
+        line.x_range(),
+        rect.center().y,
+        egui::Stroke::new(1.0, pal.divider),
+    );
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), theme::bold_font(11.5), pal.muted);
+    let text = egui::Rect::from_center_size(rect.center(), galley.size() + vec2(8.0, 0.0));
+    ui.painter().rect_filled(text, 0, pal.chat);
+    ui.painter()
+        .galley(text.min + vec2(4.0, 0.0), galley, pal.muted);
+    ui.add_space(4.0);
 }
 
 fn message_menu(ui: &mut egui::Ui, m: &Message, mine: bool, action: &mut Option<MessageAction>) {

@@ -16,6 +16,7 @@ mod profile;
 mod read_state;
 mod settings;
 mod theme;
+mod timefmt;
 mod types;
 
 fn main() -> eframe::Result {
@@ -49,6 +50,9 @@ fn main() -> eframe::Result {
             // Images (avatars, server icons, attachments, emoji) load
             // straight from Discord's CDN / Twemoji.
             egui_extras::install_image_loaders(&cc.egui_ctx);
+            // Noto Sans (bundled) as the UI font; system fonts stay the
+            // fallback for scripts it doesn't cover.
+            theme::install_fonts(&cc.egui_ctx);
             Ok(Box::new(app::RustCordApp::new(cc, env_token, demo)))
         }),
     )

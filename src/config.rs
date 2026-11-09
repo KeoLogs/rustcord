@@ -77,6 +77,8 @@ pub struct Modules {
     pub member_list: bool,
     /// Desktop notifications, taskbar flash and the 🔔 mentions inbox.
     pub notifications: bool,
+    /// Thin bar at the bottom: connection state, channel, typing, RAM.
+    pub status_bar: bool,
 }
 
 impl Default for Modules {
@@ -88,6 +90,7 @@ impl Default for Modules {
             typing_indicators: true,
             member_list: true,
             notifications: true,
+            status_bar: false,
         }
     }
 }
@@ -129,5 +132,10 @@ pub const MODULES: &[ModuleInfo] = &[
         name: "Notifications",
         description: "Desktop notifications and taskbar flashing for mentions and DMs, plus the 🔔 mentions inbox. Unread markers work either way.",
         get: |m| &mut m.notifications,
+    },
+    ModuleInfo {
+        name: "Status bar",
+        description: "A thin bar at the bottom of the window (like Discord Messenger's) with the connection state, the open channel, who's typing and RAM use.",
+        get: |m| &mut m.status_bar,
     },
 ];

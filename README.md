@@ -14,7 +14,20 @@ Usable day to day. It has:
 
 - **Login screen** (token, user or bot), optional "remember me"
 - **Discord-style UI**: servers + profile bar on the left, channels, chat with
-  message box, member list on the right; Discord dark/light theme
+  message box, member list on the right; Discord dark/light theme with the
+  bundled **Noto Sans** font (close to Discord's gg sans)
+  - server rail: round icons that turn into rounded squares on hover, the
+    white pill (unread / hover / selected), tooltips; drag it wider to show
+    server names
+  - channel list: collapsible categories (▾ / ▸), hover and selected rows,
+    DMs with avatars and status; voice / stage channels listed (greyed out,
+    joining comes later)
+  - chat header with the channel topic, 🔔 inbox, 📌 pins (coming next) and
+    👥 to hide / show the member list
+  - messages: local-time timestamps ("Today at 19:05"), date lines between
+    days, hover highlight, a floating Reply / Edit / ⋯ bar, Discord-style
+    reply previews, mentions of you highlighted
+  - message box with ⊕ upload button and an animated "is typing…" row
 - servers (with icons), DMs and group DMs, channels grouped by category
 - live messages, edits and deletes; send, reply, edit, delete, copy
 - images, file attachments and **uploads** (➕ button or drag files onto the window)
@@ -45,7 +58,11 @@ Usable day to day. It has:
 - **Layout editor** (Settings → Layout → Edit layout): panels glow on hover,
   hold and drag to move (they grow as you pick them up), drag gaps to resize.
   Saved between runs.
-- **Modules**: switch optional parts off to save memory (Settings → Modules)
+- **Modules**: switch optional parts off to save memory (Settings → Modules),
+  or on: e.g. the **Status bar** (connection, channel, typing, RAM; off by
+  default)
+- gateway **transport compression** (`zlib-stream`): a big account's READY is
+  several times smaller on the wire
 
 Next up: see [docs/PORTING.md](docs/PORTING.md) — markdown, embeds, pins,
 settings sync. Voice comes last.
@@ -98,7 +115,8 @@ On Linux you may need GUI dev packages first:
 | `src/login.rs` | Login screen |
 | `src/settings.rs` | Settings page |
 | `src/config.rs` | Saved settings and the module list |
-| `src/theme.rs` | Discord colours |
+| `src/theme.rs` | Discord colours, bundled font (Noto Sans) and the `bold` font family |
+| `src/timefmt.rs` | Local-time message timestamps and date-divider labels |
 | `src/emoji.rs` | Splits text into text + emoji images |
 | `src/read_state.rs` | Unread / mention counts per channel |
 | `src/notify.rs` | Mutes, mention detection, notification rules, inbox, desktop popups |
@@ -106,7 +124,7 @@ On Linux you may need GUI dev packages first:
 | `src/presence.rs` | Online status and activities |
 | `src/profile.rs` | Profiles, notes and the profile popout card |
 | `src/backend.rs` | Tokio runtime thread; runs the gateway and handles UI requests |
-| `src/gateway.rs` | WebSocket connection to Discord's gateway (identify / resume) |
+| `src/gateway.rs` | WebSocket connection to Discord's gateway (identify / resume, zlib-stream) |
 | `src/api.rs` | REST calls: history, send / edit / delete, typing, acks, profiles, notes |
 | `src/types.rs` | Guild / Channel / Message types and UI↔backend messages |
 
@@ -127,7 +145,9 @@ events over a channel and calls `request_repaint()`, and the UI sends
 
 Feature reference: [Discord Messenger](https://github.com/DiscordMessenger/dm)
 by iProgramInCpp (MIT). Emoji graphics: [Twemoji](https://github.com/jdecked/twemoji)
-(CC-BY 4.0).
+(CC-BY 4.0). Font: [Noto Sans](https://github.com/notofonts/latin-greek-cyrillic)
+by the Noto Project Authors, under the SIL Open Font License 1.1
+(`assets/fonts/OFL.txt`).
 
 ## Licence
 

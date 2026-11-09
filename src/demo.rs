@@ -234,10 +234,18 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                 "channels": [
                     ch("200", "welcome", 0, None),
                     { "id": "300", "name": "TEXT CHANNELS", "type": 4, "position": 1 },
-                    ch("201", "general", 0, Some("300")),
+                    { "id": "201", "name": "general", "type": 0, "position": 0, "parent_id": "300",
+                      "last_message_id": last_id("201").to_string(),
+                      "topic": "Chat about anything. Be nice, no spoilers without tags." },
                     ch("202", "memes", 1, Some("300")),
                     { "id": "301", "name": "Dev", "type": 4, "position": 2 },
-                    ch("203", "rust", 0, Some("301")),
+                    { "id": "203", "name": "rust", "type": 0, "position": 0, "parent_id": "301",
+                      "last_message_id": last_id("203").to_string(),
+                      "topic": "RustCord development · egui 0.37 · PRs welcome" },
+                    { "id": "302", "name": "Voice Channels", "type": 4, "position": 3 },
+                    { "id": "230", "name": "General", "type": 2, "position": 0, "parent_id": "302" },
+                    { "id": "231", "name": "Gaming", "type": 2, "position": 1, "parent_id": "302" },
+                    { "id": "232", "name": "Town Hall", "type": 13, "position": 2, "parent_id": "302" },
                 ]
             })),
             Guild::from_json(&json!({
@@ -305,7 +313,7 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
     };
     let start = tokio::time::Instant::now();
     // Scripted events: (seconds after start, step).
-    let script = [6u64, 15, 25];
+    let script = [4u64, 6, 15, 25];
     let mut step = 0;
 
     loop {
@@ -320,17 +328,27 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             },
             _ = tokio::time::sleep_until(wait) => {
                 match step {
+                    // Two people start typing in #general.
                     0 => {
+                        for (id, name) in [(ALEX, "Alex"), ("610000000000000004", "Maya")] {
+                            send(ToUi::Typing {
+                                channel_id: "201".into(),
+                                user_id: id.into(),
+                                name: Some(name.into()),
+                            });
+                        }
+                    }
+                    1 => {
                         next_id += 1;
                         emit(json!({
                             "id": next_id.to_string(), "channel_id": "201", "guild_id": "100",
                             "author": user(SAM, "Sam", None),
                             "content": "@You can you review the notifications PR when you get a sec?",
                             "mentions": [me],
-                            "timestamp": "2026-11-09T12:05:00.000000+00:00",
+                            "timestamp": iso_minutes_ago(0),
                         }), &mut created);
                     }
-                    1 => {
+                    2 => {
                         let olly = "390000000000000007";
                         send(ToUi::Presences(vec![(
                             olly.to_string(),
@@ -340,7 +358,7 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                             send(ToUi::MemberList(u));
                         }
                     }
-                    2 => send(ToUi::MessageAck(ReadStateEntry {
+                    3 => send(ToUi::MessageAck(ReadStateEntry {
                         channel_id: "210".into(),
                         last_acked: last_id("210"),
                         mention_count: 0,
@@ -390,7 +408,7 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                         "author": me,
                         "content": content,
                         "attachments": attachments,
-                        "timestamp": "2026-11-09T12:00:00.000000+00:00",
+                        "timestamp": iso_minutes_ago(0),
                     }),
                     &mut created,
                 );
@@ -407,7 +425,7 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             } => send(ToUi::MessageUpdated(crate::types::MessagePatch::from_json(
                 &json!({
                     "id": message_id, "channel_id": channel_id,
-                    "content": content, "edited_timestamp": "2026-11-09T12:00:00Z",
+                    "content": content, "edited_timestamp": iso_minutes_ago(0),
                 }),
             ))),
             ToBackend::Delete {
@@ -477,6 +495,11 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
     }
 }
 
+/// An ISO-8601 timestamp `minutes` before now (Discord's format).
+fn iso_minutes_ago(minutes: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339()
+}
+
 fn user(id: &str, name: &str, avatar: Option<&str>) -> Value {
     json!({ "id": id, "username": name.to_lowercase(), "global_name": name, "avatar": avatar })
 }
@@ -493,7 +516,12 @@ fn sample_messages(channel_id: &str) -> Vec<Message> {
         n += 1;
         let mut v = json!({
             "id": id.to_string(), "channel_id": channel_id, "author": author, "content": content,
-            "timestamp": format!("2026-11-09T09:{:02}:00.000000+00:00", 10 + n),
+            // Two days ago, yesterday, then today, so the date lines show.
+            "timestamp": iso_minutes_ago(match n {
+                1 | 2 => 2 * 24 * 60 + 40 - n as i64,
+                3 | 4 => 24 * 60 + 30 - n as i64,
+                _ => 60 - 3 * n as i64,
+            }),
         });
         if let (Some(obj), Some(extra)) = (v.as_object_mut(), extra.as_object()) {
             obj.extend(extra.clone());
@@ -516,7 +544,7 @@ fn sample_messages(channel_id: &str) -> Vec<Message> {
         msg(
             &me,
             "and edits",
-            json!({ "edited_timestamp": "2026-11-09T09:20:00Z" }),
+            json!({ "edited_timestamp": iso_minutes_ago(30) }),
         ),
         msg(&sam, "the layout looks sick 🔥", json!({})),
         msg(

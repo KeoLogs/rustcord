@@ -637,9 +637,23 @@ pub fn status_dot(ui: &egui::Ui, avatar: egui::Rect, status: Status, ring: Color
     let c = avatar.right_bottom() - vec2(r * 0.8, r * 0.8);
     ui.painter().circle_filled(c, r + 2.0, ring);
     ui.painter().circle_filled(c, r, status.color(pal));
-    if status == Status::Offline {
-        // Discord's offline dot is a ring.
-        ui.painter().circle_filled(c, r * 0.45, ring);
+    // Discord's shapes: offline is a ring, idle a crescent, DND a dash.
+    match status {
+        Status::Offline => {
+            ui.painter().circle_filled(c, r * 0.45, ring);
+        }
+        Status::Idle => {
+            ui.painter()
+                .circle_filled(c - vec2(r * 0.5, r * 0.5), r * 0.62, ring);
+        }
+        Status::Dnd => {
+            ui.painter().rect_filled(
+                egui::Rect::from_center_size(c, vec2(r * 1.25, (r * 0.42).max(1.5))),
+                r * 0.2,
+                ring,
+            );
+        }
+        Status::Online => {}
     }
 }
 
@@ -680,10 +694,10 @@ pub fn list_ui(
                 match (view.rows)(i) {
                     Some(Row::Group { id, count }) => {
                         ui.painter().text(
-                            egui::pos2(rect.left() + 4.0, rect.bottom() - 6.0),
+                            egui::pos2(rect.left() + 8.0, rect.bottom() - 6.0),
                             egui::Align2::LEFT_BOTTOM,
                             group_label(id, *count, view.roles),
-                            egui::TextStyle::Small.resolve(ui.style()),
+                            crate::theme::bold_font(11.5),
                             pal.muted,
                         );
                     }
@@ -729,18 +743,21 @@ fn member_row(
         .cloned()
         .unwrap_or_default();
     let offline = presence.status == Status::Offline;
-    if resp.hovered() {
+    let ring = if resp.hovered() {
         ui.painter()
             .rect_filled(rect.shrink2(vec2(0.0, 1.0)), 4, pal.hover);
-    }
-    let size = if compact { 22.0 } else { 32.0 };
+        pal.hover
+    } else {
+        pal.sidebar
+    };
+    let size = if compact { 24.0 } else { 32.0 };
     let mut child = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(rect.shrink2(vec2(6.0, 0.0)))
+            .max_rect(rect.shrink2(vec2(8.0, 0.0)))
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    if offline {
-        child.set_opacity(0.4);
+    if offline && !resp.hovered() {
+        child.set_opacity(0.5);
     }
     let av = crate::app::avatar(
         &mut child,
@@ -752,9 +769,9 @@ fn member_row(
         pal,
     );
     if !offline {
-        status_dot(&child, av, presence.status, pal.sidebar, pal);
+        status_dot(&child, av, presence.status, ring, pal);
     }
-    child.add_space(4.0);
+    child.add_space(6.0);
     let name_color = role_color(view.roles, &m.roles).unwrap_or(pal.muted);
     let name_color = if resp.hovered() && name_color == pal.muted {
         pal.text
@@ -772,7 +789,7 @@ fn member_row(
         };
         ui.add_space(top.max(0.0));
         ui.horizontal(|ui| {
-            let name = RichText::new(m.display_name()).color(name_color);
+            let name = RichText::new(m.display_name()).size(14.5).color(name_color);
             ui.add(egui::Label::new(name).truncate().selectable(false));
             if m.user.bot {
                 bot_tag(ui, pal);

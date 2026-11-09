@@ -49,11 +49,21 @@ Not done from Batch A: changing mute / notification levels from RustCord (needs
 Not done from Batch B: mutual servers/friends in the popout, per-server
 avatars/banners, op 37 (newer bulk subscribe), member search.
 
+**Polish pass** (UI look and feel, gateway compression):
+- Chat header with channel icon, name and topic, 🔔 / 📌 / 👥 buttons; a
+  collapsible channel list ("«"-style ideas from DM's `windows/ChannelView`),
+  reply preview with a connector line (`windows/MessageList.cpp`), and an
+  optional status bar module (DM's `windows/StatusBar.cpp`)
+- Gateway `compress=zlib-stream` transport compression (not in Discord
+  Messenger; written from Discord's gateway docs)
+- Local-time timestamps ("Today at …") and date dividers
+
 ## Batch C — message richness
 - Markdown (`core/text/FormattedText.cpp`) + DisableFormatting toggle
 - Embeds (`windows/MessageList.cpp`) + ShowEmbedContent / ShowEmbedImages
 - Link warning + TrustedDomains (`MessageList::ConfirmOpenLink` 1927, LS:215)
 - Pins: `GET channels/{id}/pins`, `PUT/DELETE channels/{c}/messages/pins/{m}` (`windows/PinList.cpp`)
+  — the 📌 header button is already there, disabled until this lands
 - Mention/emoji autocomplete (`windows/AutoComplete.cpp`, `core/utils/Emoji.cpp`)
 - Context menu extras: mark unread, copy link, save image
 - Use12HourTime, ShowBlockedMessages, ReplyMentionDefault

@@ -4,7 +4,7 @@
 use eframe::egui::{self, RichText, vec2};
 
 use crate::config::{Config, MODULES};
-use crate::theme::{Palette, ThemeChoice};
+use crate::theme::{Bold, Palette, ThemeChoice};
 use crate::types::User;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -67,36 +67,51 @@ impl SettingsPage {
         }
 
         egui::Panel::left("settings_nav")
-            .exact_size(220.0)
+            .exact_size(232.0)
             .resizable(false)
-            .frame(egui::Frame::new().fill(pal.sidebar).inner_margin(16))
+            .show_separator_line(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(pal.sidebar)
+                    .inner_margin(egui::Margin {
+                        left: 20,
+                        right: 12,
+                        top: 60,
+                        bottom: 16,
+                    }),
+            )
             .show(ui, |ui| {
-                ui.add_space(30.0);
-                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
                     for (header, items) in SECTIONS {
-                        ui.label(RichText::new(*header).small().strong().color(pal.muted));
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(10.0);
+                            ui.label(pal.section_label(header));
+                        });
+                        ui.add_space(2.0);
                         for (section, label) in *items {
                             let selected = self.section == *section;
-                            if ui
-                                .add(
-                                    egui::Button::selectable(selected, *label)
-                                        .min_size(egui::vec2(0.0, 26.0)),
-                                )
-                                .clicked()
-                            {
+                            if nav_item(ui, label, selected, pal.text, pal).clicked() {
                                 self.section = *section;
                             }
                         }
                         ui.add_space(8.0);
-                        ui.separator();
+                        let (r, _) = ui.allocate_exact_size(
+                            vec2(ui.available_width(), 1.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().hline(
+                            r.shrink2(vec2(10.0, 0.0)).x_range(),
+                            r.center().y,
+                            egui::Stroke::new(1.0, pal.divider),
+                        );
+                        ui.add_space(8.0);
+                    }
+                    if nav_item(ui, "Log Out", false, pal.danger, pal).clicked() {
+                        action = Some(SettingsAction::LogOut);
                     }
                 });
-                if ui
-                    .add(egui::Button::new(RichText::new("Log Out").color(pal.danger)).frame(false))
-                    .clicked()
-                {
-                    action = Some(SettingsAction::LogOut);
-                }
             });
 
         egui::CentralPanel::default()
@@ -106,16 +121,14 @@ impl SettingsPage {
                     .inner_margin(egui::Margin {
                         left: 40,
                         right: 40,
-                        top: 30,
+                        top: 60,
                         bottom: 20,
                     }),
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                        let close = ui
-                            .add(egui::Button::new(RichText::new("✕").size(18.0)).corner_radius(20))
-                            .on_hover_text("Close (Esc)");
+                        let close = close_button(ui, pal);
                         if close.clicked() {
                             action = Some(SettingsAction::Close);
                         }
@@ -124,11 +137,12 @@ impl SettingsPage {
                         });
                     });
                 });
-                ui.add_space(12.0);
+                ui.add_space(20.0);
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .show(ui, |ui| {
                         ui.set_max_width(680.0);
+                        ui.spacing_mut().item_spacing.y = 6.0;
                         if let Some(a) = self.section_ui(ui, config, me, pal) {
                             action = Some(a);
                         }
@@ -164,44 +178,43 @@ impl SettingsPage {
                 );
                 ui.add_space(12.0);
                 label(ui, pal, "MEMBER LIST");
-                ui.checkbox(&mut config.compact_member_list, "Compact member list");
-                hint(
+                switch_row(
                     ui,
-                    pal,
+                    &mut config.compact_member_list,
+                    "Compact member list",
                     "Smaller rows without the custom status / activity line.",
+                    pal,
                 );
-                ui.add_space(6.0);
-                ui.checkbox(
+                switch_row(
+                    ui,
                     &mut config.bot_member_intents,
                     "Bots: load the full member list",
-                );
-                hint(
-                    ui,
-                    pal,
                     "Bot accounts only. Asks Discord for the Server Members and Presence \
                      intents, which you must first switch on for your bot in the Developer \
                      Portal (Bot → Privileged Gateway Intents). Takes effect next time you \
                      log in. Without it, bots show who's recently active.",
+                    pal,
                 );
             }
             Section::Notifications => notifications(ui, config, pal),
             Section::Privacy => {
-                ui.checkbox(&mut config.remember_login, "Remember me on this PC");
-                hint(
+                switch_row(
                     ui,
-                    pal,
+                    &mut config.remember_login,
+                    "Remember me on this PC",
                     "Keeps your token in RustCord's settings file so you stay logged in. \
                      Turn off to log in each time.",
+                    pal,
                 );
                 if !config.remember_login {
                     config.saved_token = None;
                 }
-                ui.add_space(10.0);
-                ui.checkbox(&mut config.warn_before_links, "Warn before opening links");
-                hint(
+                switch_row(
                     ui,
-                    pal,
+                    &mut config.warn_before_links,
+                    "Warn before opening links",
                     "Asks before opening links from messages in your browser.",
+                    pal,
                 );
             }
             Section::Modules => {
@@ -221,7 +234,9 @@ impl SettingsPage {
                             ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
-                                    ui.label(RichText::new(m.name).strong());
+                                    // Leave room for the switch on the right.
+                                    ui.set_max_width(ui.available_width() - 60.0);
+                                    ui.label(RichText::new(m.name).bold().color(pal.strong));
                                     ui.label(RichText::new(m.description).small().color(pal.muted));
                                 });
                                 ui.with_layout(
@@ -270,7 +285,7 @@ impl SettingsPage {
                             "RustCord is using {:.0} MB of RAM",
                             usage.physical_mem as f64 / 1_048_576.0
                         ))
-                        .strong(),
+                        .bold(),
                     );
                     ui.ctx()
                         .request_repaint_after(std::time::Duration::from_secs(1));
@@ -303,7 +318,12 @@ impl SettingsPage {
                 );
             }
             Section::About => {
-                ui.label(RichText::new(format!("RustCord {}", env!("CARGO_PKG_VERSION"))).strong());
+                ui.label(
+                    RichText::new(format!("RustCord {}", env!("CARGO_PKG_VERSION")))
+                        .bold()
+                        .size(16.0)
+                        .color(pal.strong),
+                );
                 ui.label("A lightweight, customisable Discord client written in Rust.");
                 ui.hyperlink_to(
                     "GitHub: KeoLogs/rustcord",
@@ -314,7 +334,8 @@ impl SettingsPage {
                     ui,
                     pal,
                     "Licensed under GPL-3.0. Feature ideas from Discord Messenger by \
-                     iProgramInCpp (MIT). Emoji graphics by Twemoji (CC-BY 4.0).",
+                     iProgramInCpp (MIT). Emoji graphics by Twemoji (CC-BY 4.0). Font: \
+                     Noto Sans by the Noto Project Authors (SIL Open Font License 1.1).",
                 );
                 hint(
                     ui,
@@ -355,7 +376,7 @@ fn account(ui: &mut egui::Ui, me: Option<&User>, pal: &Palette) {
                         .corner_radius(36),
                 );
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(&me.name).size(20.0).strong());
+                    ui.label(RichText::new(&me.name).size(20.0).bold().color(pal.strong));
                     if !me.username.is_empty() {
                         ui.label(RichText::new(format!("@{}", me.username)).color(pal.muted));
                     }
@@ -372,7 +393,7 @@ fn account(ui: &mut egui::Ui, me: Option<&User>, pal: &Palette) {
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("USER ID").small().strong().color(pal.muted));
+                ui.label(pal.section_label("User ID"));
                 ui.label(&me.id);
                 if ui.small_button("Copy").clicked() {
                     ui.ctx().copy_text(me.id.clone());
@@ -409,7 +430,7 @@ fn notifications(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
                     ui.vertical(|ui| {
                         // Leave room for the switch on the right.
                         ui.set_max_width(ui.available_width() - 60.0);
-                        ui.label(RichText::new(title).strong());
+                        ui.label(RichText::new(title).bold().color(pal.strong));
                         ui.label(RichText::new(desc).small().color(pal.muted));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -445,11 +466,96 @@ fn notifications(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
 }
 
 fn label(ui: &mut egui::Ui, pal: &Palette, text: &str) {
-    ui.label(RichText::new(text).small().strong().color(pal.muted));
+    ui.add_space(4.0);
+    ui.label(pal.section_label(text));
+}
+
+/// Discord's settings row: title and switch on one line, a muted
+/// description under it, then a divider.
+fn switch_row(ui: &mut egui::Ui, on: &mut bool, title: &str, desc: &str, pal: &Palette) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).size(15.0).color(pal.strong));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            toggle(ui, on, pal)
+        });
+    });
+    ui.scope(|ui| {
+        ui.set_max_width(ui.available_width() - 60.0);
+        hint(ui, pal, desc);
+    });
+    ui.add_space(10.0);
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().hline(
+        r.x_range(),
+        r.center().y,
+        egui::Stroke::new(1.0, pal.divider),
+    );
+    ui.add_space(10.0);
+}
+
+/// A settings sidebar entry: hover / selected backgrounds like Discord's.
+fn nav_item(
+    ui: &mut egui::Ui,
+    text: &str,
+    selected: bool,
+    color: egui::Color32,
+    pal: &Palette,
+) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(vec2(ui.available_width(), 32.0), egui::Sense::click());
+    if selected {
+        ui.painter().rect_filled(rect, 4, pal.selected);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, 4, pal.hover);
+    }
+    let col = if selected || resp.hovered() {
+        if color == pal.text { pal.strong } else { color }
+    } else if color == pal.text {
+        pal.muted
+    } else {
+        color
+    };
+    ui.painter().text(
+        rect.left_center() + vec2(10.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        text,
+        egui::FontId::proportional(15.0),
+        col,
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Discord's round ✕ with "ESC" under it.
+fn close_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 54.0), egui::Sense::click());
+    let c = egui::pos2(rect.center().x, rect.top() + 18.0);
+    let col = if resp.hovered() {
+        pal.strong
+    } else {
+        pal.muted
+    };
+    ui.painter()
+        .circle_stroke(c, 17.0, egui::Stroke::new(2.0, col));
+    ui.painter().text(
+        c,
+        egui::Align2::CENTER_CENTER,
+        "✕",
+        egui::FontId::proportional(16.0),
+        col,
+    );
+    ui.painter().text(
+        egui::pos2(c.x, rect.bottom() - 6.0),
+        egui::Align2::CENTER_CENTER,
+        "ESC",
+        crate::theme::bold_font(11.5),
+        pal.muted,
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Close (Esc)")
 }
 
 fn hint(ui: &mut egui::Ui, pal: &Palette, text: &str) {
-    ui.label(RichText::new(text).small().color(pal.muted));
+    ui.label(RichText::new(text).size(13.0).color(pal.muted));
 }
 
 /// iOS/Discord-style on/off switch.

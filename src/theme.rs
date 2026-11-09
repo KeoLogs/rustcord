@@ -1,7 +1,18 @@
-//! Discord-style colours. Each panel gets its own background like Discord
-//! (darkest server list, slightly lighter channel list, lightest chat).
+//! Discord-style colours and fonts. Each panel gets its own background like
+//! Discord (darkest server list, slightly lighter channel list, lightest chat).
+//!
+//! Fonts: Noto Sans (SIL OFL 1.1, `assets/fonts/`) is bundled as the main
+//! font, close to Discord's gg sans. Names and headers use its SemiBold
+//! weight through the `bold` font family (`RichText::new(..).bold()` via the
+//! `Bold` trait). Scripts Noto Sans lacks (CJK, Arabic, Devanagari…) still
+//! fall back to system fonts.
 
-use eframe::egui::{self, Color32, CornerRadius, Stroke, Visuals};
+use std::sync::Arc;
+
+use eframe::egui::{
+    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, RichText, Stroke,
+    TextStyle, Visuals,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::Pane;
@@ -42,6 +53,10 @@ impl ThemeChoice {
                 danger: hex(0xda373c),
                 mention: hex(0xf23f43),
                 unread: hex(0xf2f3f5),
+                strong: hex(0xf2f3f5),
+                msg_hover: hex(0x2e3035),
+                divider: hex(0x3f4147),
+                rail_icon: hex(0x313338),
                 dark: true,
             },
             ThemeChoice::DiscordLight => Palette {
@@ -61,6 +76,10 @@ impl ThemeChoice {
                 danger: hex(0xda373c),
                 mention: hex(0xf23f43),
                 unread: hex(0x060607),
+                strong: hex(0x060607),
+                msg_hover: hex(0xf7f7f8),
+                divider: hex(0xe1e2e4),
+                rail_icon: hex(0xffffff),
                 dark: false,
             },
         }
@@ -88,7 +107,73 @@ pub struct Palette {
     pub mention: Color32,
     /// Unread channel names and the unread pill (white in dark theme).
     pub unread: Color32,
+    /// Headers and the names in the chat header (brightest text).
+    pub strong: Color32,
+    /// Background of a hovered message.
+    pub msg_hover: Color32,
+    /// Thin lines: header borders, date dividers, rail separator.
+    pub divider: Color32,
+    /// Server icons without a picture, and the Home button.
+    pub rail_icon: Color32,
     pub dark: bool,
+}
+
+/// Name of the SemiBold font family.
+pub const BOLD: &str = "bold";
+
+/// The SemiBold font family (names, headers).
+pub fn bold_family() -> FontFamily {
+    FontFamily::Name(BOLD.into())
+}
+
+/// A SemiBold font of `size` points.
+pub fn bold_font(size: f32) -> FontId {
+    FontId::new(size, bold_family())
+}
+
+/// `RichText::bold()`: SemiBold weight (egui's `strong()` only changes colour).
+pub trait Bold {
+    fn bold(self) -> RichText;
+}
+
+impl Bold for RichText {
+    fn bold(self) -> RichText {
+        self.family(bold_family())
+    }
+}
+
+/// Install Noto Sans as the main font, keeping egui's fonts as fallbacks
+/// (and the system font fallback eframe adds for other scripts).
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    fonts.font_data.insert(
+        "NotoSans-Regular".into(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/fonts/NotoSans-Regular.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "NotoSans-SemiBold".into(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/fonts/NotoSans-SemiBold.ttf"
+        ))),
+    );
+    let fallbacks = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(p) = fonts.families.get_mut(&FontFamily::Proportional) {
+        p.insert(0, "NotoSans-Regular".into());
+    }
+    if let Some(m) = fonts.families.get_mut(&FontFamily::Monospace) {
+        // After Hack: arrows, symbols, accents Hack lacks.
+        m.insert(1, "NotoSans-Regular".into());
+    }
+    let mut bold = vec!["NotoSans-SemiBold".to_string(), "NotoSans-Regular".into()];
+    bold.extend(fallbacks);
+    fonts.families.insert(bold_family(), bold);
+    ctx.set_fonts(fonts);
 }
 
 const fn hex(rgb: u32) -> Color32 {
@@ -147,10 +232,28 @@ impl Palette {
         v.widgets.active.fg_stroke = Stroke::new(1.0, self.text);
         v.widgets.open.weak_bg_fill = self.selected;
 
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.divider);
+        v.popup_shadow = egui::Shadow {
+            offset: [0, 4],
+            blur: 16,
+            spread: 0,
+            color: Color32::from_black_alpha(if self.dark { 90 } else { 40 }),
+        };
+
         ctx.set_visuals(v);
         ctx.global_style_mut(|s| {
             s.spacing.item_spacing = egui::vec2(6.0, 4.0);
             s.spacing.button_padding = egui::vec2(8.0, 4.0);
+            s.spacing.menu_margin = egui::Margin::same(6);
+            s.spacing.interact_size.y = 22.0;
+            s.text_styles = [
+                (TextStyle::Small, FontId::proportional(11.5)),
+                (TextStyle::Body, FontId::proportional(14.5)),
+                (TextStyle::Button, FontId::proportional(14.5)),
+                (TextStyle::Heading, FontId::new(20.0, bold_family())),
+                (TextStyle::Monospace, FontId::monospace(13.0)),
+            ]
+            .into();
         });
     }
 
@@ -161,8 +264,22 @@ impl Palette {
 
     /// A filled "primary" button in Discord blurple.
     pub fn primary_button(&self, text: &str) -> egui::Button<'static> {
-        egui::Button::new(egui::RichText::new(text.to_string()).color(Color32::WHITE))
-            .fill(self.accent)
-            .corner_radius(4)
+        egui::Button::new(
+            egui::RichText::new(text.to_string())
+                .color(Color32::WHITE)
+                .bold(),
+        )
+        .fill(self.accent)
+        .corner_radius(4)
+    }
+
+    /// Discord's small uppercase section labels ("TEXT CHANNELS",
+    /// "ONLINE — 3"): small, bold, muted, slightly spaced.
+    pub fn section_label(&self, text: &str) -> RichText {
+        RichText::new(text.to_uppercase())
+            .size(11.5)
+            .extra_letter_spacing(0.3)
+            .color(self.muted)
+            .bold()
     }
 }

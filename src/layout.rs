@@ -91,16 +91,18 @@ pub fn default_tree() -> Tree<Pane> {
     let members = tab(&mut tiles, Pane::Members);
 
     let left = tiles.insert_vertical_tile(vec![servers, profile]);
-    set_shares(&mut tiles, left, &[(servers, 11.0), (profile, 1.0)]);
+    set_shares(&mut tiles, left, &[(servers, 11.0), (profile, 1.5)]);
 
     let chat = tiles.insert_vertical_tile(vec![messages, composer]);
-    set_shares(&mut tiles, chat, &[(messages, 9.0), (composer, 1.3)]);
+    set_shares(&mut tiles, chat, &[(messages, 9.0), (composer, 1.5)]);
 
+    // The server rail is icon-only like Discord's (~72 px at the default
+    // window size); drag its edge wider to show server names.
     let root = tiles.insert_horizontal_tile(vec![left, channels, chat, members]);
     set_shares(
         &mut tiles,
         root,
-        &[(left, 1.6), (channels, 2.1), (chat, 7.0), (members, 2.0)],
+        &[(left, 0.72), (channels, 2.1), (chat, 7.0), (members, 2.0)],
     );
 
     Tree::new(egui::Id::unique("rustcord_layout"), root, tiles)
@@ -118,6 +120,62 @@ pub fn is_complete(tree: &Tree<Pane>) -> bool {
         })
         .collect();
     Pane::ALL.iter().all(|p| present.contains(p))
+}
+
+/// Is the Members panel shown? (The 👥 button in the chat header hides it.)
+pub fn members_visible(tree: &Tree<Pane>) -> bool {
+    tree.tiles
+        .find_pane(&Pane::Members)
+        .is_none_or(|id| tree.tiles.is_visible(id))
+}
+
+/// Show / hide the Members panel. Hidden tiles keep their place in the
+/// tree, so showing it again puts it back where it was (and the choice is
+/// saved with the layout).
+pub fn toggle_members(tree: &mut Tree<Pane>) {
+    let Some(id) = tree.tiles.find_pane(&Pane::Members) else {
+        return;
+    };
+    let show = !tree.tiles.is_visible(id);
+    tree.tiles.set_visible(id, show);
+    // Stacked as a tab with other panels: switch tabs so one stays shown.
+    if let Some(parent) = tree.tiles.parent_of(id)
+        && let Some(Tile::Container(Container::Tabs(tabs))) = tree.tiles.get(parent)
+    {
+        let children = tabs.children.clone();
+        let target = if show {
+            Some(id)
+        } else {
+            children.into_iter().find(|c| *c != id)
+        };
+        if let (Some(t), Some(Tile::Container(Container::Tabs(tabs)))) =
+            (target, tree.tiles.get_mut(parent))
+        {
+            tabs.set_active(t);
+        }
+    }
+}
+
+/// Inner margin of each panel. Panels that draw full-width headers or
+/// hover rows (channels, messages) handle their own padding.
+fn pane_margin(pane: Pane) -> egui::Margin {
+    match pane {
+        Pane::Servers => egui::Margin::symmetric(0, 12),
+        Pane::Channels | Pane::Messages => egui::Margin::ZERO,
+        Pane::Composer => egui::Margin {
+            left: 16,
+            right: 16,
+            top: 0,
+            bottom: 0,
+        },
+        Pane::Members => egui::Margin {
+            left: 8,
+            right: 4,
+            top: 12,
+            bottom: 0,
+        },
+        Pane::Profile => egui::Margin::symmetric(8, 6),
+    }
 }
 
 fn set_shares(tiles: &mut Tiles<Pane>, container: TileId, shares: &[(TileId, f32)]) {
@@ -154,7 +212,7 @@ impl Behavior<Pane> for LayoutBehavior<'_> {
         let rect = ui.max_rect();
         egui::Frame::new()
             .fill(self.pal.pane_fill(*pane))
-            .inner_margin(8)
+            .inner_margin(pane_margin(*pane))
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
                 self.state.pane_ui(ui, *pane, self.config, &self.pal);
@@ -287,7 +345,19 @@ impl Behavior<Pane> for LayoutBehavior<'_> {
     }
 
     fn gap_width(&self, _style: &egui::Style) -> f32 {
-        if self.editing { 6.0 } else { 1.0 }
+        // No lines between panels (like Discord); they're still resizable
+        // by dragging the edge.
+        if self.editing { 6.0 } else { 0.0 }
+    }
+
+    fn resize_stroke(&self, _style: &egui::Style, resize_state: egui_tiles::ResizeState) -> Stroke {
+        match resize_state {
+            egui_tiles::ResizeState::Idle => Stroke::NONE,
+            egui_tiles::ResizeState::Hovering => {
+                Stroke::new(2.0, self.pal.accent.gamma_multiply(0.6))
+            }
+            egui_tiles::ResizeState::Dragging => Stroke::new(2.0, self.pal.accent),
+        }
     }
 
     fn min_size(&self) -> f32 {

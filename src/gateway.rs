@@ -7,11 +7,19 @@
 //! Discord replays the events we missed and sends RESUMED. If it can't
 //! resume it sends op 9 INVALID_SESSION (`d` = whether resuming may still
 //! work) and we identify from scratch.
+//!
+//! Transport compression: we connect with `compress=zlib-stream`, so Discord
+//! sends binary frames that are pieces of one long zlib stream. A message is
+//! complete when the bytes end with `00 00 FF FF` (a zlib sync flush); one
+//! `Inflater` per connection keeps the stream's dictionary between messages
+//! and is thrown away on reconnect / resume. This shrinks a big account's
+//! READY (~18 MB of JSON) several times on the wire.
 
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use flate2::{Decompress, FlushDecompress};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -26,8 +34,13 @@ use crate::presence::{self, Presence};
 use crate::read_state::ReadStateEntry;
 use crate::types::{Channel, Guild, Message, MessagePatch, ToUi, User};
 
-const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
-const GATEWAY_QUERY: &str = "?v=10&encoding=json";
+const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream";
+const GATEWAY_QUERY: &str = "?v=10&encoding=json&compress=zlib-stream";
+
+/// Every complete zlib-stream message ends with this (Z_SYNC_FLUSH).
+const ZLIB_SUFFIX: [u8; 4] = [0x00, 0x00, 0xff, 0xff];
+/// Largest inflated message we accept (same as the WebSocket limit).
+const MAX_INFLATED: usize = 256 << 20;
 
 // Gateway opcodes
 const OP_DISPATCH: u64 = 0;
@@ -121,9 +134,11 @@ pub async fn run_session(
         .await
         .context("gateway connect failed")?;
     let (mut write, mut read) = ws.split();
+    // A fresh zlib stream for every connection (including resumes).
+    let mut inflater = Inflater::new();
 
     // 1. Hello -> heartbeat interval
-    let hello = next_json(&mut read)
+    let hello = next_json(&mut read, &mut inflater)
         .await?
         .ok_or_else(|| anyhow!("closed before Hello"))?;
     if hello["op"].as_u64() != Some(OP_HELLO) {
@@ -170,6 +185,11 @@ pub async fn run_session(
             frame = read.next() => {
                 let Some(frame) = frame else { return Ok(SessionEnd::Retry) };
                 let payload: Value = match frame? {
+                    WsMessage::Binary(b) => match inflater.push(&b)? {
+                        Some(json) => serde_json::from_slice(&json)?,
+                        // Part of a message; the rest comes in the next frame.
+                        None => continue,
+                    },
                     WsMessage::Text(t) => serde_json::from_str(t.as_str())?,
                     WsMessage::Close(Some(close)) => {
                         let code: u16 = close.code.into();
@@ -467,17 +487,81 @@ fn member_events(event: &str, d: &Value) -> Vec<ToUi> {
     out
 }
 
-async fn next_json<S>(read: &mut S) -> Result<Option<Value>>
+async fn next_json<S>(read: &mut S, inflater: &mut Inflater) -> Result<Option<Value>>
 where
     S: futures_util::Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>>
         + Unpin,
 {
     while let Some(frame) = read.next().await {
-        if let WsMessage::Text(t) = frame? {
-            return Ok(Some(serde_json::from_str(t.as_str())?));
+        match frame? {
+            WsMessage::Text(t) => return Ok(Some(serde_json::from_str(t.as_str())?)),
+            WsMessage::Binary(b) => {
+                if let Some(json) = inflater.push(&b)? {
+                    return Ok(Some(serde_json::from_slice(&json)?));
+                }
+            }
+            _ => {}
         }
     }
     Ok(None)
+}
+
+/// Inflates Discord's `zlib-stream` transport compression. One per
+/// connection: the zlib context carries over from message to message.
+pub struct Inflater {
+    zlib: Decompress,
+    /// Compressed bytes of the message being received.
+    pending: Vec<u8>,
+}
+
+impl Inflater {
+    pub fn new() -> Self {
+        Self {
+            zlib: Decompress::new(true),
+            pending: Vec::new(),
+        }
+    }
+
+    /// Feed one binary frame. Returns the inflated JSON once a whole message
+    /// (ending in `00 00 FF FF`) has arrived, `None` while waiting for more.
+    pub fn push(&mut self, frame: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.pending.extend_from_slice(frame);
+        if !self.pending.ends_with(&ZLIB_SUFFIX) {
+            if self.pending.len() > MAX_INFLATED {
+                bail!("compressed gateway message too large");
+            }
+            return Ok(None);
+        }
+        let mut out: Vec<u8> = Vec::with_capacity((self.pending.len() * 4).max(1024));
+        let mut input = &self.pending[..];
+        loop {
+            if out.len() == out.capacity() {
+                if out.len() >= MAX_INFLATED {
+                    bail!("inflated gateway message too large");
+                }
+                out.reserve(out.len());
+            }
+            let (in_before, out_before) = (self.zlib.total_in(), out.len());
+            self.zlib
+                .decompress_vec(input, &mut out, FlushDecompress::Sync)
+                .context("gateway zlib-stream")?;
+            let used = (self.zlib.total_in() - in_before) as usize;
+            input = &input[used..];
+            // Done when all input is used and zlib didn't fill the buffer
+            // (a full buffer may mean more output is waiting).
+            let stuck = used == 0 && out.len() == out_before;
+            if (input.is_empty() && out.len() < out.capacity()) || stuck {
+                break;
+            }
+        }
+        // Don't keep a READY-sized buffer around for the whole session.
+        self.pending.clear();
+        if self.pending.capacity() > 1 << 20 {
+            self.pending.shrink_to(64 << 10);
+        }
+        out.shrink_to_fit();
+        Ok(Some(out))
+    }
 }
 
 #[cfg(test)]
@@ -495,7 +579,7 @@ mod tests {
         s.seq = Some(42);
         assert_eq!(
             s.url(),
-            "wss://gateway-us-east1-b.discord.gg/?v=10&encoding=json"
+            "wss://gateway-us-east1-b.discord.gg/?v=10&encoding=json&compress=zlib-stream"
         );
         s.reset();
         assert!(!s.can_resume());
@@ -547,6 +631,74 @@ mod tests {
         assert_eq!(identify(&cfg)["d"]["intents"], json!(BOT_INTENTS | 2 | 256));
         cfg.is_bot = false;
         assert!(identify(&cfg)["d"].get("intents").is_none());
+    }
+
+    /// Compress messages the way Discord does: one zlib stream, each message
+    /// ending with a sync flush.
+    fn zlib_stream(messages: &[&str]) -> Vec<Vec<u8>> {
+        use flate2::{Compress, Compression, FlushCompress};
+        let mut z = Compress::new(Compression::default(), true);
+        messages
+            .iter()
+            .map(|m| {
+                let mut out = Vec::with_capacity(m.len() + 64);
+                let mut input = m.as_bytes();
+                loop {
+                    if out.len() == out.capacity() {
+                        out.reserve(1024);
+                    }
+                    let before = z.total_in();
+                    z.compress_vec(input, &mut out, FlushCompress::Sync)
+                        .unwrap();
+                    input = &input[(z.total_in() - before) as usize..];
+                    if input.is_empty() && out.len() < out.capacity() {
+                        break;
+                    }
+                }
+                assert!(out.ends_with(&ZLIB_SUFFIX));
+                out
+            })
+            .collect()
+    }
+
+    #[test]
+    fn zlib_stream_messages() {
+        // A big READY-like message (inflates past the first buffer guess),
+        // then a small one that relies on the shared dictionary.
+        let big = json!({ "op": 0, "t": "READY", "d": {
+            "guilds": (0..2000).map(|i| json!({ "id": i.to_string(), "name": "server" })).collect::<Vec<_>>(),
+        }})
+        .to_string();
+        let small = r#"{"op":11}"#;
+        let frames = zlib_stream(&[&big, small, &big]);
+        assert!(frames[0].len() * 5 < big.len(), "should compress well");
+
+        let mut inf = Inflater::new();
+        // Split the first message across three frames like a fragmented send.
+        let f = &frames[0];
+        let (a, rest) = f.split_at(f.len() / 3);
+        let (b, c) = rest.split_at(rest.len() / 2);
+        assert!(inf.push(a).unwrap().is_none());
+        assert!(inf.push(b).unwrap().is_none());
+        let out = inf.push(c).unwrap().expect("complete message");
+        assert_eq!(out, big.as_bytes());
+        assert_eq!(inf.push(&frames[1]).unwrap().unwrap(), small.as_bytes());
+        assert_eq!(inf.push(&frames[2]).unwrap().unwrap(), big.as_bytes());
+        let v: Value = serde_json::from_slice(small.as_bytes()).unwrap();
+        assert_eq!(v["op"], 11);
+    }
+
+    #[test]
+    fn zlib_stream_reset_on_reconnect() {
+        // A new connection is a new stream: a fresh Inflater must handle its
+        // first message, and garbage is an error rather than a hang.
+        let frames = zlib_stream(&[r#"{"op":10}"#]);
+        let mut inf = Inflater::new();
+        assert_eq!(inf.push(&frames[0]).unwrap().unwrap(), br#"{"op":10}"#);
+        let mut fresh = Inflater::new();
+        assert!(fresh.push(&frames[0]).unwrap().is_some());
+        let mut bad = Inflater::new();
+        assert!(bad.push(&[1, 2, 3, 0, 0, 0xff, 0xff]).is_err());
     }
 
     #[test]

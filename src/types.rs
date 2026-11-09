@@ -21,6 +21,8 @@ pub const CHANNEL_DM: u64 = 1;
 pub const CHANNEL_GROUP_DM: u64 = 3;
 pub const CHANNEL_CATEGORY: u64 = 4;
 pub const CHANNEL_ANNOUNCEMENT: u64 = 5;
+pub const CHANNEL_VOICE: u64 = 2;
+pub const CHANNEL_STAGE: u64 = 13;
 
 /// Pseudo guild id used for the DMs "server".
 pub const DM_GUILD_ID: &str = "@me";
@@ -118,9 +120,11 @@ pub struct Channel {
     pub recipients: Vec<User>,
     /// Snowflake of the newest message, used to sort DMs by recency.
     pub last_message_id: u64,
+    /// Channel topic (shown in the chat header). Empty if none.
+    pub topic: String,
 }
 
-/// A category header (if any) and the text channels under it.
+/// A category header (if any) and the text and voice channels under it.
 pub struct ChannelGroup<'a> {
     pub category: Option<&'a Channel>,
     pub channels: Vec<&'a Channel>,
@@ -214,8 +218,9 @@ impl Guild {
         self.channels.iter().find(|c| c.id == id)
     }
 
-    /// Text channels grouped the way Discord shows them: uncategorised
-    /// channels first, then each category in order.
+    /// Text and voice channels grouped the way Discord shows them:
+    /// uncategorised channels first, then each category in order. Within a
+    /// group, voice channels come after text channels (like Discord).
     pub fn channel_groups(&self) -> Vec<ChannelGroup<'_>> {
         if self.is_dms() {
             return vec![ChannelGroup {
@@ -229,14 +234,14 @@ impl Guild {
             channels: self
                 .channels
                 .iter()
-                .filter(|c| c.is_text() && c.parent_id.is_none())
+                .filter(|c| c.is_listed() && c.parent_id.is_none())
                 .collect(),
         }];
         for cat in self.channels.iter().filter(|c| c.kind == CHANNEL_CATEGORY) {
             let channels: Vec<&Channel> = self
                 .channels
                 .iter()
-                .filter(|c| c.is_text() && c.parent_id.as_deref() == Some(cat.id.as_str()))
+                .filter(|c| c.is_listed() && c.parent_id.as_deref() == Some(cat.id.as_str()))
                 .collect();
             if !channels.is_empty() {
                 groups.push(ChannelGroup {
@@ -246,6 +251,10 @@ impl Guild {
             }
         }
         groups.retain(|g| !g.channels.is_empty());
+        for g in &mut groups {
+            // Stable sort: keeps position order within text and within voice.
+            g.channels.sort_by_key(|c| c.is_voice());
+        }
         groups
     }
 }
@@ -283,6 +292,7 @@ impl Channel {
                 .map(str::to_string),
             recipients,
             last_message_id: snowflake(v, "last_message_id").unwrap_or(0),
+            topic: str_of(v, "topic").trim().to_string(),
         }
     }
 
@@ -295,6 +305,28 @@ impl Channel {
 
     pub fn is_dm(&self) -> bool {
         self.kind == CHANNEL_DM || self.kind == CHANNEL_GROUP_DM
+    }
+
+    /// Voice and stage channels (listed, but not joinable yet).
+    pub fn is_voice(&self) -> bool {
+        self.kind == CHANNEL_VOICE || self.kind == CHANNEL_STAGE
+    }
+
+    /// Shown in the channel list.
+    fn is_listed(&self) -> bool {
+        self.is_text() || self.is_voice()
+    }
+
+    /// Icon in front of the name in the channel list and chat header.
+    pub fn icon(&self) -> &'static str {
+        match self.kind {
+            CHANNEL_DM => "@",
+            CHANNEL_GROUP_DM => "👥",
+            CHANNEL_ANNOUNCEMENT => "📢",
+            CHANNEL_VOICE => "🔊",
+            CHANNEL_STAGE => "📡",
+            _ => "#",
+        }
     }
 
     /// Label shown on the channel tab.
@@ -390,6 +422,8 @@ impl Attachment {
 #[derive(Debug, Clone)]
 pub struct ReplyPreview {
     pub author: String,
+    pub author_id: String,
+    pub avatar_url: String,
     pub content: String,
 }
 
@@ -399,7 +433,8 @@ pub struct Message {
     pub channel_id: String,
     pub author: User,
     pub content: String,
-    pub timestamp: String,
+    /// When it was sent, unix seconds (0 if unknown). See `timefmt`.
+    pub time: i64,
     pub edited: bool,
     pub attachments: Vec<Attachment>,
     pub reply: Option<ReplyPreview>,
@@ -421,7 +456,7 @@ impl Message {
             .get("referenced_message")
             .filter(|r| r.is_object())
             .map(|r| {
-                let author = User::from_json(&r["author"]).name;
+                let author = User::from_json(&r["author"]);
                 let mut content = str_of(r, "content").replace('\n', " ");
                 if content.chars().count() > 80 {
                     content = content.chars().take(80).collect::<String>() + "…";
@@ -429,7 +464,12 @@ impl Message {
                 if content.is_empty() {
                     content = "(attachment)".into();
                 }
-                ReplyPreview { author, content }
+                ReplyPreview {
+                    author: author.name,
+                    author_id: author.id,
+                    avatar_url: author.avatar_url,
+                    content,
+                }
             });
 
         Self {
@@ -437,7 +477,7 @@ impl Message {
             channel_id: str_of(v, "channel_id"),
             author: User::from_json(&v["author"]),
             content: str_of(v, "content"),
-            timestamp: str_of(v, "timestamp"),
+            time: crate::timefmt::parse_iso(v["timestamp"].as_str().unwrap_or_default()),
             edited: v.get("edited_timestamp").is_some_and(|t| !t.is_null()),
             attachments: parse_attachments(v).unwrap_or_default(),
             reply,
@@ -480,9 +520,9 @@ impl Message {
         }
     }
 
-    /// "HH:MM" from Discord's ISO-8601 timestamp (UTC).
-    pub fn short_time(&self) -> &str {
-        self.timestamp.get(11..16).unwrap_or("")
+    /// "HH:MM" in local time.
+    pub fn short_time(&self) -> String {
+        crate::timefmt::clock(self.time)
     }
 
     /// Apply a MESSAGE_UPDATE. Discord sends partial objects, so only
