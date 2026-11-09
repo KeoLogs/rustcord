@@ -624,6 +624,12 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             ToBackend::LoadProfile { user_id, guild_id } => {
                 send(ToUi::Profile(Box::new(fake_profile(&user_id, guild_id))))
             }
+            // --- themes --- (the picker works offline too)
+            ToBackend::PickTheme { folder } => {
+                send(ToUi::ThemePicked(
+                    crate::themes::pick_import_source(folder).await,
+                ));
+            }
             // --- onboarding --- (preview works; joining is off in the demo)
             ToBackend::ResolveInvite { code } => send(ToUi::InviteResolved {
                 result: crate::invites::classify_fetch(

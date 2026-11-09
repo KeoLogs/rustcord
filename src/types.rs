@@ -897,6 +897,9 @@ pub enum ToUi {
         burst: bool,
         error: String,
     },
+    // --- themes ---
+    /// The theme file / folder the user picked (None = cancelled).
+    ThemePicked(Option<std::path::PathBuf>),
     // --- onboarding ---
     InviteResolved {
         code: String,
@@ -1156,6 +1159,11 @@ pub enum ToBackend {
         emoji: crate::emoji_picker::EmojiRef,
         add: bool,
         burst: bool,
+    },
+    // --- themes ---
+    /// Settings → Themes → Import: the native file / folder picker.
+    PickTheme {
+        folder: bool,
     },
     // --- onboarding ---
     /// Invite preview (shown when an invite card appears).

@@ -1,0 +1,82 @@
+# Frosted Glass — a RustCord test theme converted from "Frosted Glass" by
+# Gibbu (DiscordStyles, MIT): https://github.com/DiscordStyles/FrostedGlass
+# Mapping: blurred backdrop image -> backdrop gradient + generated
+# background.jpg in chat; per-panel "brightness" -> darker translucent glass
+# (server list / channels 0.8, chat 0.6, members 0); window padding 20px ->
+# pane inset 10; window roundness 10px -> corner radius 10; accent gradient
+# from --gradient-primary/secondary; links #00b0f4.
+format = 1
+
+[meta]
+name = "Frosted Glass"
+author = "Gibbu (original BetterDiscord theme), converted for RustCord"
+version = "2.0.0-rc1"
+description = "Translucent dark glass panels over a soft blurred purple backdrop."
+base = "dark"
+
+[colors]
+servers = "#0d0b1f"
+sidebar = "#15122b"
+chat = "#120f26"
+input = "#ffffff14"
+hover = "#ffffff12"
+selected = "#ffffff22"
+text = "#e6e4f0"
+muted = "#a9a4c4"
+strong = "#ffffff"
+accent = "#5c4fc0"
+link = "#00b0f4"
+mention = "#ff339f"
+msg_hover = "#ffffff0a"
+divider = "#ffffff14"
+rail_icon = "#ffffff1c"
+
+[style]
+corner_radius = { widgets = 6, windows = 10, menus = 8 }
+window_shadow = { offset = [0, 8], blur = 30, spread = 0, color = "#00000070" }
+popup_shadow = { offset = [0, 6], blur = 22, color = "#00000060" }
+panel_shadow = { offset = [0, 4], blur = 18, color = "#00000050" }
+glass_opacity = 0.55
+backdrop = { top = "#2a1d5c", mid = "#3f51b5", bottom = "#673ab7" }
+accent_gradient = { top = "#7a5bd6", bottom = "#3f51b5" }
+
+[style.panes.servers]
+fill = "#00000033"
+glass = true
+corner_radius = 10
+inset = 10
+
+[style.panes.profile]
+fill = "#00000040"
+glass = true
+corner_radius = 10
+inset = 10
+
+[style.panes.channels]
+fill = "#00000033"
+glass = true
+corner_radius = 10
+inset = 10
+
+[style.panes.messages]
+fill = "#00000066"
+glass = true
+corner_radius = 10
+inset = 10
+
+[style.panes.composer]
+fill = "#00000066"
+glass = true
+corner_radius = 10
+inset = 10
+
+[style.panes.members]
+fill = "#000000c0"
+glass = true
+corner_radius = 10
+inset = 10
+
+[images]
+chat_background = "background.jpg"
+opacity = 0.45
+fit = "cover"

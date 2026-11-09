@@ -71,8 +71,15 @@ pub struct RustCordApp {
     tree: egui_tiles::Tree<Pane>,
     editing_layout: bool,
     settings: Option<SettingsPage>,
-    /// Theme + zoom currently applied, to re-apply only when they change.
-    applied: Option<(ThemeChoice, f32)>,
+    /// Zoom currently applied (with the active theme's visuals), to
+    /// re-apply only when it or the theme changes.
+    applied: Option<f32>,
+    /// Installed custom themes (nothing read while the module is off).
+    theme_store: crate::themes::ThemeStore,
+    /// The theme the UI draws with.
+    active_theme: crate::themes::ActiveTheme,
+    /// (built-in, custom id, module on) the active theme was built for.
+    theme_key: Option<(ThemeChoice, Option<String>, bool)>,
     /// Status bar module's RAM reading.
     ram: RamSampler,
     /// The running session's token and demo flag (in memory only), to
@@ -97,8 +104,16 @@ impl RustCordApp {
             tree = layout::alt_tree();
         }
 
+        let theme_store = crate::themes::ThemeStore::new(
+            crate::themes::default_dir(),
+            config.modules.custom_themes,
+        );
+        let active_theme = crate::themes::ActiveTheme::builtin(config.theme);
         let mut app = Self {
             screen: Screen::Login(LoginForm::new(config.remember_login, None)),
+            theme_store,
+            active_theme,
+            theme_key: None,
             config,
             tree,
             editing_layout: false,
@@ -151,14 +166,29 @@ impl RustCordApp {
     /// theme previews from the draft; zoom only changes on Save (applying it
     /// live made the slider jump under the cursor).
     fn apply_theme(&mut self, ctx: &egui::Context) {
-        let theme = self
-            .settings
-            .as_ref()
-            .map_or(self.config.theme, |p| p.draft.theme);
-        let want = (theme, self.config.zoom);
+        // Settings previews the draft's theme live.
+        let cfg = self.settings.as_ref().map_or(&self.config, |p| &p.draft);
+        let custom = cfg
+            .custom_theme
+            .clone()
+            .filter(|_| cfg.modules.custom_themes);
+        let key = (cfg.theme, custom, cfg.modules.custom_themes);
+        if self.theme_key.as_ref() != Some(&key) {
+            self.theme_store.set_enabled(cfg.modules.custom_themes);
+            let (active, error) =
+                crate::themes::ActiveTheme::from_config(ctx, cfg, &self.theme_store);
+            if let (Some(e), Screen::Main(state)) = (error, &mut self.screen) {
+                state.toast = Some((format!("Theme not loaded: {e}"), Instant::now()));
+            }
+            // Dropping the old theme frees its background texture.
+            self.active_theme = active;
+            self.theme_key = Some(key);
+            self.applied = None;
+        }
+        let want = self.config.zoom;
         if self.applied != Some(want) {
-            theme.palette().apply(ctx);
-            ctx.set_zoom_factor(self.config.zoom);
+            self.active_theme.apply(ctx);
+            ctx.set_zoom_factor(want);
             self.applied = Some(want);
         }
     }
@@ -281,6 +311,10 @@ impl eframe::App for RustCordApp {
         }
         state.drain_events(ctx, &self.config);
         apply_config_updates(&mut self.config, state);
+        if let Some(path) = state.picked_theme.take() {
+            // Small file copies; the picker itself ran in the backend.
+            let _ = self.theme_store.import(&path);
+        }
         state.ack_open_channel(ctx, self.settings.is_none());
         if !self.config.modules.notifications && !state.inbox.items.is_empty() {
             // Module switched off: free the inbox.
@@ -314,11 +348,7 @@ impl eframe::App for RustCordApp {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
         timefmt::set_12_hour(self.config.use_12_hour_time);
-        let pal = self
-            .settings
-            .as_ref()
-            .map_or(self.config.theme, |p| p.draft.theme)
-            .palette();
+        let pal = self.active_theme.palette;
 
         // ---- Login screen
         if let Screen::Login(form) = &mut self.screen {
@@ -366,6 +396,7 @@ impl eframe::App for RustCordApp {
                 state.me.as_ref(),
                 state.user_settings(),
                 &pal,
+                &mut self.theme_store,
             );
             match action {
                 Some(SettingsAction::Save { config, sync }) => {
@@ -401,6 +432,9 @@ impl eframe::App for RustCordApp {
                     ctx.copy_text(crate::layout_presets::export(&self.tree));
                 }
                 Some(SettingsAction::ImportLayout(tree)) => self.tree = *tree,
+                Some(SettingsAction::PickTheme { folder }) => {
+                    let _ = state.tx.send(ToBackend::PickTheme { folder });
+                }
                 Some(SettingsAction::LogOut) => self.log_out(None, true),
                 None => {}
             }
@@ -445,8 +479,12 @@ impl eframe::App for RustCordApp {
                 state,
                 config: &self.config,
                 pal,
+                theme: &self.active_theme,
                 editing: self.editing_layout,
             };
+            // Theme backdrop behind inset / glass panes and the gaps.
+            self.active_theme
+                .paint_backdrop(ui.painter(), ui.max_rect());
             self.tree.ui(&mut behavior, ui);
         });
         layout::end_frame(&self.tree, &ctx);
@@ -703,6 +741,9 @@ pub struct State {
     threads: Option<ThreadsState>,
     /// Invites / onboarding module state; `None` while the module is off.
     invites: Option<InvitesState>,
+    /// A theme file / folder picked in Settings → Themes, for the app to
+    /// import.
+    picked_theme: Option<PathBuf>,
     last_typing_sent: Option<(String, Instant)>,
     confirm_delete: Option<(String, String)>,
 
@@ -824,6 +865,7 @@ impl State {
             friends: None,
             threads: None,
             invites: None,
+            picked_theme: None,
             last_typing_sent: None,
             confirm_delete: None,
             reads: ReadState::default(),
@@ -1300,6 +1342,8 @@ impl State {
                 }
                 self.emoji_groups = None;
             }
+            // --- themes --- (the app imports it: it owns the ThemeStore)
+            ToUi::ThemePicked(path) => self.picked_theme = path,
             // --- onboarding ---
             ToUi::InviteResolved { code, result } => {
                 if let Some(s) = &mut self.invites {
@@ -7814,16 +7858,17 @@ fn date_divider(ui: &mut egui::Ui, label: &str, pal: &Palette) {
     ui.add_space(GROUP_GAP + 4.0);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 14.0), egui::Sense::hover());
     let line = rect.shrink2(vec2(MSG_PAD, 0.0));
-    ui.painter().hline(
-        line.x_range(),
-        rect.center().y,
-        egui::Stroke::new(1.0, pal.divider),
-    );
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_string(), theme::bold_font(11.5), pal.muted);
     let text = egui::Rect::from_center_size(rect.center(), galley.size() + vec2(8.0, 0.0));
-    ui.painter().rect_filled(text, 0, pal.chat);
+    // The line stops either side of the label (no filled box), so theme
+    // gradients and background images show through.
+    let stroke = egui::Stroke::new(1.0, pal.divider);
+    ui.painter()
+        .hline(line.left()..=text.left(), rect.center().y, stroke);
+    ui.painter()
+        .hline(text.right()..=line.right(), rect.center().y, stroke);
     ui.painter()
         .galley(text.min + vec2(4.0, 0.0), galley, pal.muted);
     ui.add_space(4.0);

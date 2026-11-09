@@ -20,6 +20,7 @@ pub enum Section {
     Privacy,
     Modules,
     Layout,
+    Themes,
     Performance,
     About,
 }
@@ -45,6 +46,7 @@ const SECTIONS: &[(&str, &[NavItem])] = &[
         &[
             (Section::Modules, "Modules", icons::PUZZLE),
             (Section::Layout, "Layout", icons::LAYOUT),
+            (Section::Themes, "Themes", icons::PALETTE),
             (Section::Performance, "Performance", icons::GAUGE),
             (Section::About, "About", icons::INFO),
         ],
@@ -61,6 +63,10 @@ pub enum SettingsAction {
     CopyLayout,
     /// Use a pasted layout (already checked by `layout_presets::import`).
     ImportLayout(Box<egui_tiles::Tree<crate::layout::Pane>>),
+    /// Settings → Themes → Import: open the file / folder picker (backend).
+    PickTheme {
+        folder: bool,
+    },
     LogOut,
     /// "Save Changes" (or Ctrl+S): the new config, plus synced settings to
     /// PATCH (user accounts). Nothing is applied or sent before this.
@@ -109,6 +115,8 @@ pub struct SettingsPage {
     /// Settings → Layout → Import: pasted text, its checked tree or error.
     import_text: String,
     import: Option<Result<egui_tiles::Tree<crate::layout::Pane>, String>>,
+    /// The themes folder was re-read since this page opened.
+    themes_read: bool,
 }
 
 impl SettingsPage {
@@ -122,6 +130,7 @@ impl SettingsPage {
             layout_preset: None,
             import_text: String::new(),
             import: None,
+            themes_read: false,
         }
     }
 
@@ -179,6 +188,7 @@ impl SettingsPage {
         me: Option<&User>,
         synced: Option<&UserSettings>,
         pal: &Palette,
+        themes: &mut crate::themes::ThemeStore,
     ) -> Option<SettingsAction> {
         // The real config changed underneath (e.g. synced compact mode from
         // another device): follow it unless the user is editing.
@@ -288,7 +298,7 @@ impl SettingsPage {
                     .show(ui, |ui| {
                         ui.set_max_width(680.0);
                         ui.spacing_mut().item_spacing.y = 6.0;
-                        if let Some(a) = self.section_ui(ui, me, synced, pal) {
+                        if let Some(a) = self.section_ui(ui, me, synced, pal, themes) {
                             action = Some(a);
                         }
                         // Room so the unsaved-changes bar never covers the end.
@@ -427,6 +437,7 @@ impl SettingsPage {
         me: Option<&User>,
         synced: Option<&UserSettings>,
         pal: &Palette,
+        themes: &mut crate::themes::ThemeStore,
     ) -> Option<SettingsAction> {
         let mut action = None;
         let config = &mut self.draft;
@@ -661,6 +672,36 @@ impl SettingsPage {
                         }
                         None => {}
                     }
+                }
+            }
+            Section::Themes => {
+                use crate::themes_page::{ThemesAction, ThemesPage};
+                // Like the other settings, a theme applies to the draft
+                // (live preview) and is kept with Save Changes.
+                themes.sync_with(config);
+                if !std::mem::replace(&mut self.themes_read, true) {
+                    themes.refresh();
+                }
+                match ThemesPage::show(ui, themes, pal) {
+                    Some(ThemesAction::ApplyBuiltin(t)) => {
+                        config.theme = t;
+                        config.custom_theme = None;
+                    }
+                    Some(ThemesAction::Apply(id)) => config.custom_theme = Some(id),
+                    Some(ThemesAction::Delete(id)) => {
+                        if themes.delete(&id).is_ok() && config.custom_theme.as_ref() == Some(&id) {
+                            config.custom_theme = None;
+                        }
+                    }
+                    Some(ThemesAction::Import { folder }) => {
+                        action = Some(SettingsAction::PickTheme { folder });
+                    }
+                    Some(ThemesAction::OpenFolder) => {
+                        if let Some(dir) = themes.dir() {
+                            let _ = crate::themes::open_folder(dir);
+                        }
+                    }
+                    None => {}
                 }
             }
             Section::Performance => {

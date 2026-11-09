@@ -232,14 +232,19 @@ pub struct LayoutBehavior<'a> {
     pub state: &'a mut State,
     pub config: &'a Config,
     pub pal: Palette,
+    /// The active theme (gradients, glass, chat background).
+    pub theme: &'a crate::themes::ActiveTheme,
     pub editing: bool,
 }
 
 impl Behavior<Pane> for LayoutBehavior<'_> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, tile_id: TileId, pane: &mut Pane) -> UiResponse {
         let rect = ui.max_rect();
+        // Theme gradients / glass / background image first; the frame fill
+        // is transparent for panes the theme paints.
+        self.theme.paint_pane_background(ui.painter(), rect, *pane);
         egui::Frame::new()
-            .fill(self.pal.pane_fill(*pane))
+            .fill(self.theme.pane_fill(*pane))
             .inner_margin(pane_margin(*pane))
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());

@@ -13,6 +13,10 @@ pub const CONFIG_KEY: &str = "config_v1";
 #[serde(default)]
 pub struct Config {
     pub theme: ThemeChoice,
+    /// Id (folder name) of the applied custom theme, if any; it overrides
+    /// `theme` while the Custom themes module is on.
+    #[serde(default)]
+    pub custom_theme: Option<String>,
     /// UI scale (1.0 = 100%).
     pub zoom: f32,
     pub modules: Modules,
@@ -73,6 +77,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: ThemeChoice::default(),
+            custom_theme: None,
             zoom: 1.0,
             modules: Modules::default(),
             remember_login: true,
@@ -218,6 +223,9 @@ pub struct Modules {
     /// Settings, Layout: preset picker and layout copy / import.
     #[serde(default = "on")]
     pub layout_presets: bool,
+    /// Themes imported from .rctheme files.
+    #[serde(default = "on")]
+    pub custom_themes: bool,
 }
 
 impl Default for Modules {
@@ -239,6 +247,7 @@ impl Default for Modules {
             threads: true,
             invites: true,
             layout_presets: true,
+            custom_themes: true,
         }
     }
 }
@@ -260,6 +269,7 @@ pub mod live {
     pub static THREADS: AtomicBool = AtomicBool::new(true);
     pub static INVITES: AtomicBool = AtomicBool::new(true);
     pub static LAYOUT_PRESETS: AtomicBool = AtomicBool::new(true);
+    pub static CUSTOM_THEMES: AtomicBool = AtomicBool::new(true);
     // (end of flags)
 
     pub fn sync(m: &super::Modules) {
@@ -269,6 +279,7 @@ pub mod live {
         THREADS.store(m.threads, Relaxed);
         INVITES.store(m.invites, Relaxed);
         LAYOUT_PRESETS.store(m.layout_presets, Relaxed);
+        CUSTOM_THEMES.store(m.custom_themes, Relaxed);
     }
 
     pub fn on(flag: &AtomicBool) -> bool {
@@ -364,6 +375,11 @@ pub const MODULES: &[ModuleInfo] = &[
         description: "Ready-made panel layouts and copying / importing a layout as text in Settings, Layout. Off = only Edit layout and Reset.",
         get: |m| &mut m.layout_presets,
     },
+    ModuleInfo {
+        name: "Custom themes",
+        description: "Import and apply your own themes (Settings, Themes). Off = only the built-in Dark and Light themes, and no theme files are read.",
+        get: |m| &mut m.custom_themes,
+    },
 ];
 
 #[cfg(test)]
@@ -398,6 +414,8 @@ mod tests {
             }
         }
         assert!(c.modules.reactions);
+        assert_eq!(c.custom_theme, None);
+        assert!(c.modules.custom_themes);
     }
 
     #[test]

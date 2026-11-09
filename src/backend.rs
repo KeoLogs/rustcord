@@ -448,6 +448,10 @@ async fn run(
                     .set_note(&user_id, &note)
                     .await
                     .map(|_| Some(ToUi::Note { user_id, note })),
+                // --- themes ---
+                ToBackend::PickTheme { folder } => Ok(Some(ToUi::ThemePicked(
+                    crate::themes::pick_import_source(folder).await,
+                ))),
                 // --- onboarding --- (user accounts; writes only from clicks)
                 ToBackend::JoinInvite { code } if is_bot => Ok(Some(ToUi::InviteJoined {
                     code,
