@@ -384,6 +384,32 @@ impl Api {
         Ok(Self::check(resp, "Saving settings").await?.json().await?)
     }
 
+    /// Generic JSON request to `API_BASE` + `path` (e.g. `/users/@me`), with
+    /// Discord's error message on failure. An empty body (204) gives
+    /// `Value::Null`. Used by `user_settings::backend`.
+    pub async fn request_json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+        what: &str,
+    ) -> Result<Value> {
+        let mut req = self
+            .http
+            .request(method, format!("{API_BASE}{path}"))
+            .header("Authorization", &self.auth);
+        req = match body {
+            Some(b) => req.json(b),
+            None => req,
+        };
+        let resp = req.send().await.with_context(|| format!("{what} request failed"))?;
+        let text = Self::check(resp, what).await?.text().await?;
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
     /// Show the typing indicator to others for ~10 seconds.
     pub async fn trigger_typing(&self, channel_id: &str) -> Result<()> {
         let resp = self
