@@ -28,6 +28,20 @@ tokio = { version = "1.54.1", features = ["full"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 unicode-segmentation = "1.13.3"
 
+# Voice spike only (`--features voice`, off by default): DAVE E2EE (pure
+# Rust, OpenMLS), Opus (bundled libopus, needs cmake + a C compiler) and the
+# two transport AEADs. See docs/VOICE.md.
+davey = { version = "0.2.0", optional = true }
+opus2 = { version = "0.4.0", optional = true, features = ["bundled"] }
+aes-gcm = { version = "0.10", optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+# Audio devices (Linux: needs libasound2-dev / alsa-lib headers).
+cpal = { version = "0.18", optional = true }
+
+[features]
+default = []
+voice = ["dep:davey", "dep:opus2", "dep:aes-gcm", "dep:chacha20poly1305", "dep:cpal"]
+
 # Smaller, faster release builds.
 [profile.release]
 lto = "thin"

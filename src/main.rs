@@ -27,6 +27,9 @@ mod status;
 mod theme;
 mod timefmt;
 mod types;
+// Voice groundwork; wired into the UI/backend by the integrator.
+#[allow(dead_code)]
+mod voice;
 
 fn main() -> eframe::Result {
     // Two dependencies enable different rustls crypto backends (aws-lc-rs via
