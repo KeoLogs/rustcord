@@ -38,9 +38,10 @@ const MAX_ZIP_ENTRIES: usize = 64;
 /// Most themes listed.
 const MAX_THEMES: usize = 200;
 
-/// `<RustCord data dir>/themes` (eframe's storage folder).
-pub fn default_dir() -> Option<PathBuf> {
-    eframe::storage_dir("RustCord").map(|d| d.join("themes"))
+/// `<RustCord data dir>/themes` (eframe's storage folder; demo runs use
+/// the demo folder).
+pub fn default_dir(demo: bool) -> Option<PathBuf> {
+    crate::storage::themes_dir(demo)
 }
 
 /// One folder in the themes directory.
@@ -72,7 +73,7 @@ pub struct ThemeStore {
 }
 
 impl ThemeStore {
-    /// `dir` is usually `default_dir()`. Scans it when `enabled`.
+    /// `dir` is usually `default_dir(demo)`. Scans it when `enabled`.
     pub fn new(dir: Option<PathBuf>, enabled: bool) -> Self {
         let mut s = Self {
             dir,

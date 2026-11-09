@@ -125,7 +125,7 @@ impl RustCordApp {
         let themes_dir = if demo_shot {
             Some(std::env::temp_dir().join("rustcord-demo-themes"))
         } else {
-            crate::themes::default_dir()
+            crate::themes::default_dir(demo)
         };
         let theme_store = crate::themes::ThemeStore::new(themes_dir, config.modules.custom_themes);
         let active_theme = crate::themes::ActiveTheme::builtin(config.theme);

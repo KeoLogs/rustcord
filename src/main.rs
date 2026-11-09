@@ -37,6 +37,7 @@ mod search;
 mod settings;
 mod settings_proto;
 mod status;
+mod storage;
 mod sysmsg;
 mod theme;
 mod theme_file;
@@ -57,7 +58,7 @@ fn main() -> eframe::Result {
 
     // Optional: skip the login screen with DISCORD_TOKEN, or run offline with
     // RUSTCORD_DEMO=1.
-    let demo = std::env::var("RUSTCORD_DEMO").is_ok_and(|v| v == "1");
+    let demo = storage::demo_from_env();
     let env_token = std::env::var("DISCORD_TOKEN")
         .ok()
         .filter(|t| !t.trim().is_empty());
@@ -65,6 +66,9 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("RustCord")
+            // Demo runs save under their own app id (storage folder), so
+            // they never read or write the real config, layout or window.
+            .with_app_id(storage::app_id(demo))
             .with_inner_size([1200.0, 760.0])
             .with_min_inner_size([640.0, 420.0]),
         // OpenGL renderer: noticeably less RAM than wgpu for a 2D chat UI.
@@ -78,7 +82,7 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "RustCord",
+        storage::app_id(demo),
         options,
         Box::new(move |cc| {
             // Images (avatars, server icons, attachments, emoji) load
