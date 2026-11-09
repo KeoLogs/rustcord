@@ -7,6 +7,7 @@ description = "A native, customisable Discord client written in Rust"
 
 [dependencies]
 anyhow = "1.0.104"
+chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "persistence", "default_fonts", "system_fonts", "accesskit", "clipboard", "links", "wayland", "x11"] }
 egui_extras = { version = "0.37", features = ["all_loaders", "http"] }
 egui_tiles = { version = "0.18", features = ["serde"] }
