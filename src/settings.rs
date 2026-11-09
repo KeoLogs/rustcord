@@ -55,6 +55,12 @@ pub enum SettingsAction {
     Close,
     EditLayout,
     ResetLayout,
+    /// Settings → Layout: replace the layout with a preset.
+    ApplyPreset(crate::layout_presets::Preset),
+    /// Copy the current layout to the clipboard as text.
+    CopyLayout,
+    /// Use a pasted layout (already checked by `layout_presets::import`).
+    ImportLayout(Box<egui_tiles::Tree<crate::layout::Pane>>),
     LogOut,
     /// "Save Changes" (or Ctrl+S): the new config, plus synced settings to
     /// PATCH (user accounts). Nothing is applied or sent before this.
@@ -98,6 +104,11 @@ pub struct SettingsPage {
     synced: SyncedDraft,
     /// When the unsaved-changes bar started shaking (tried to leave).
     shake_at: Option<f64>,
+    /// Which preset the current layout still is (set by the app each frame).
+    pub layout_preset: Option<crate::layout_presets::Preset>,
+    /// Settings → Layout → Import: pasted text, its checked tree or error.
+    import_text: String,
+    import: Option<Result<egui_tiles::Tree<crate::layout::Pane>, String>>,
 }
 
 impl SettingsPage {
@@ -108,6 +119,9 @@ impl SettingsPage {
             base: config.clone(),
             synced: SyncedDraft::default(),
             shake_at: None,
+            layout_preset: None,
+            import_text: String::new(),
+            import: None,
         }
     }
 
@@ -586,6 +600,67 @@ impl SettingsPage {
                         pal,
                         "Turn on the Layout editor module to edit the layout.",
                     );
+                }
+                if config.modules.layout_presets {
+                    ui.add_space(16.0);
+                    ui.label(pal.section_label("Presets"));
+                    ui.add_space(6.0);
+                    if let Some(p) =
+                        crate::layout_presets::preset_picker(ui, pal, self.layout_preset)
+                    {
+                        action = Some(SettingsAction::ApplyPreset(p));
+                    }
+                    ui.add_space(16.0);
+                    ui.label(pal.section_label("Share a layout"));
+                    ui.add_space(6.0);
+                    if ui
+                        .button(icons::label(icons::COPY, "Copy layout"))
+                        .on_hover_text("Copy the current layout as text to share it")
+                        .clicked()
+                    {
+                        action = Some(SettingsAction::CopyLayout);
+                    }
+                    ui.add_space(6.0);
+                    let edit = ui.add(
+                        egui::TextEdit::multiline(&mut self.import_text)
+                            .hint_text("Paste a layout here to import it")
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if edit.changed() {
+                        self.import = (!self.import_text.trim().is_empty()).then(|| {
+                            crate::layout_presets::import(&self.import_text)
+                                .map_err(|e| format!("{e:#}"))
+                        });
+                    }
+                    match &self.import {
+                        Some(Ok(tree)) => {
+                            ui.add_space(6.0);
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(240.0, 150.0),
+                                egui::Sense::hover(),
+                            );
+                            crate::layout_presets::paint_preview(ui.painter(), pal, tree, rect);
+                            ui.add_space(6.0);
+                            if ui
+                                .add(
+                                    pal.primary_button(&icons::label(
+                                        icons::CHECK,
+                                        "Use this layout",
+                                    )),
+                                )
+                                .clicked()
+                            {
+                                action = Some(SettingsAction::ImportLayout(Box::new(tree.clone())));
+                                self.import_text.clear();
+                                self.import = None;
+                            }
+                        }
+                        Some(Err(e)) => {
+                            ui.label(RichText::new(e).color(pal.danger));
+                        }
+                        None => {}
+                    }
                 }
             }
             Section::Performance => {

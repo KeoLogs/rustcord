@@ -90,6 +90,8 @@ impl RustCordApp {
             .storage
             .and_then(|s| eframe::get_value::<egui_tiles::Tree<Pane>>(s, LAYOUT_KEY))
             .filter(layout::is_complete)
+            // A saved layout must be a well-formed tree with every panel once.
+            .and_then(|t| crate::layout_presets::sanitize(&t).ok())
             .unwrap_or_else(layout::default_tree);
         if demo && std::env::var("RUSTCORD_DEMO_LAYOUT").as_deref() == Ok("alt") {
             tree = layout::alt_tree();
@@ -357,6 +359,7 @@ impl eframe::App for RustCordApp {
             let Screen::Main(state) = &mut self.screen else {
                 return;
             };
+            page.layout_preset = crate::layout_presets::detect(&self.tree);
             let action = page.ui(
                 ui,
                 &self.config,
@@ -390,6 +393,14 @@ impl eframe::App for RustCordApp {
                     self.editing_layout = true;
                 }
                 Some(SettingsAction::ResetLayout) => self.tree = layout::default_tree(),
+                Some(SettingsAction::ApplyPreset(p)) => {
+                    self.tree = crate::layout_presets::build(p);
+                    state.toast = Some((format!("Layout: {}", p.name()), Instant::now()));
+                }
+                Some(SettingsAction::CopyLayout) => {
+                    ctx.copy_text(crate::layout_presets::export(&self.tree));
+                }
+                Some(SettingsAction::ImportLayout(tree)) => self.tree = *tree,
                 Some(SettingsAction::LogOut) => self.log_out(None, true),
                 None => {}
             }

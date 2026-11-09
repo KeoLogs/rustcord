@@ -215,6 +215,9 @@ pub struct Modules {
     /// Invite cards, Join a Server, rules screening and onboarding.
     #[serde(default = "on")]
     pub invites: bool,
+    /// Settings, Layout: preset picker and layout copy / import.
+    #[serde(default = "on")]
+    pub layout_presets: bool,
 }
 
 impl Default for Modules {
@@ -235,6 +238,7 @@ impl Default for Modules {
             friends: true,
             threads: true,
             invites: true,
+            layout_presets: true,
         }
     }
 }
@@ -255,6 +259,7 @@ pub mod live {
     pub static FRIENDS: AtomicBool = AtomicBool::new(true);
     pub static THREADS: AtomicBool = AtomicBool::new(true);
     pub static INVITES: AtomicBool = AtomicBool::new(true);
+    pub static LAYOUT_PRESETS: AtomicBool = AtomicBool::new(true);
     // (end of flags)
 
     pub fn sync(m: &super::Modules) {
@@ -263,6 +268,7 @@ pub mod live {
         FRIENDS.store(m.friends, Relaxed);
         THREADS.store(m.threads, Relaxed);
         INVITES.store(m.invites, Relaxed);
+        LAYOUT_PRESETS.store(m.layout_presets, Relaxed);
     }
 
     pub fn on(flag: &AtomicBool) -> bool {
@@ -352,6 +358,11 @@ pub const MODULES: &[ModuleInfo] = &[
         name: "Invites & onboarding",
         description: "Invite cards under messages, the rail's Add a Server button, server rules screening and onboarding questions. Off = invite links stay plain links, nothing loaded.",
         get: |m| &mut m.invites,
+    },
+    ModuleInfo {
+        name: "Layout presets",
+        description: "Ready-made panel layouts and copying / importing a layout as text in Settings, Layout. Off = only Edit layout and Reset.",
+        get: |m| &mut m.layout_presets,
     },
 ];
 

@@ -17,6 +17,7 @@ mod home;
 mod icons;
 mod invites;
 mod layout;
+mod layout_presets;
 mod links;
 mod login;
 mod markdown;
