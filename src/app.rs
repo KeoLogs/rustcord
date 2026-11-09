@@ -55,6 +55,8 @@ const IMAGE_MAX: (f32, f32) = (400.0, 300.0);
 const UPLOAD_LIMIT: u64 = 10 * 1024 * 1024;
 /// Acks for messages arriving in the open channel are sent at most this often.
 const ACK_INTERVAL: Duration = Duration::from_secs(3);
+/// Shown when a form is submitted while a rate-limit wait is running.
+const SLOW_DOWN_RETRY: &str = "Slow down: try again in a few seconds.";
 
 // ===========================================================================
 // App shell
@@ -1856,6 +1858,11 @@ impl State {
                 Some(OnboardingAction::Submit { guild_id, body }) if !slow => {
                     let _ = self.tx.send(ToBackend::SubmitOnboarding { guild_id, body });
                 }
+                // Held by a slow-down: unlock the dialog instead of leaving it
+                // stuck on "Submitting…".
+                Some(OnboardingAction::Submit { .. }) => {
+                    f.set_saved(Err(SLOW_DOWN_RETRY.into()));
+                }
                 Some(OnboardingAction::Close) => {
                     s.onboarding = None;
                     screening_after = s.screening_next.take();
@@ -1871,6 +1878,9 @@ impl State {
             match d.show(ctx, pal) {
                 Some(ScreeningAction::Submit { guild_id, body }) if !slow => {
                     let _ = self.tx.send(ToBackend::SubmitScreening { guild_id, body });
+                }
+                Some(ScreeningAction::Submit { .. }) => {
+                    d.set_result(Err(SLOW_DOWN_RETRY.into()));
                 }
                 Some(ScreeningAction::Retry { guild_id }) => {
                     let _ = self.tx.send(ToBackend::LoadScreening { guild_id });
@@ -1892,6 +1902,9 @@ impl State {
             match act {
                 Some(OnboardingAction::Submit { guild_id, body }) if !slow => {
                     let _ = self.tx.send(ToBackend::SubmitOnboarding { guild_id, body });
+                }
+                Some(OnboardingAction::Submit { .. }) => {
+                    p.set_saved(Err(SLOW_DOWN_RETRY.into()));
                 }
                 Some(OnboardingAction::Close) => open = false,
                 _ => {}
@@ -2960,6 +2973,10 @@ impl State {
             .unwrap_or_default();
         let mut acks = Vec::new();
         for cid in ids {
+            // Message requests are only marked read when opened on purpose.
+            if self.is_request_channel(&cid) {
+                continue;
+            }
             self.inbox.mark_channel_read(&cid);
             if let Some(mid) = self.reads.mark_read(&cid) {
                 acks.push((cid, mid.to_string()));

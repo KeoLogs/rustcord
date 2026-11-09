@@ -69,6 +69,11 @@ fn main() -> eframe::Result {
             .with_min_inner_size([640.0, 420.0]),
         // OpenGL renderer: noticeably less RAM than wgpu for a 2D chat UI.
         renderer: eframe::Renderer::Glow,
+        // Demo screenshot runs resize the window; don't let them overwrite
+        // the user's saved window size or egui memory.
+        persist_window: !(demo
+            && (std::env::var("RUSTCORD_DEMO_OPEN").is_ok()
+                || std::env::var("RUSTCORD_DEMO_SHOT").is_ok())),
         ..Default::default()
     };
 
