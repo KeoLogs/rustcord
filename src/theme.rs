@@ -142,37 +142,89 @@ impl Bold for RichText {
     }
 }
 
-/// Install Noto Sans as the main font, keeping egui's fonts as fallbacks
+/// Fonts bundled as fallbacks for symbols Noto Sans lacks, so "fancy text"
+/// (math alphanumerics), Braille, box drawing, dingbats and arrows render
+/// the same on every OS (see `assets/fonts/README.md`). Scripts like CJK,
+/// Arabic or Thai still come from the system fonts.
+const SYMBOL_FONTS: [(&str, &[u8]); 4] = [
+    (
+        "NotoSansSymbols2",
+        include_bytes!("../assets/fonts/NotoSansSymbols2-Subset.ttf"),
+    ),
+    (
+        "NotoSansSymbols",
+        include_bytes!("../assets/fonts/NotoSansSymbols-Regular.ttf"),
+    ),
+    (
+        "NotoSansMath",
+        include_bytes!("../assets/fonts/NotoSansMath-Subset.ttf"),
+    ),
+    (
+        "NotoSansMono-Box",
+        include_bytes!("../assets/fonts/NotoSansMono-Box.ttf"),
+    ),
+];
+
+/// Install Noto Sans as the main font, the Phosphor icon font (see
+/// `icons.rs`) and the symbol fallbacks, keeping egui's fonts as fallbacks
 /// (and the system font fallback eframe adds for other scripts).
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    fonts.font_data.insert(
-        "NotoSans-Regular".into(),
-        Arc::new(FontData::from_static(include_bytes!(
-            "../assets/fonts/NotoSans-Regular.ttf"
-        ))),
+    let mut add = |name: &str, bytes: &'static [u8]| {
+        fonts
+            .font_data
+            .insert(name.into(), Arc::new(FontData::from_static(bytes)));
+    };
+    add(
+        "NotoSans-Regular",
+        include_bytes!("../assets/fonts/NotoSans-Regular.ttf"),
     );
-    fonts.font_data.insert(
-        "NotoSans-SemiBold".into(),
-        Arc::new(FontData::from_static(include_bytes!(
-            "../assets/fonts/NotoSans-SemiBold.ttf"
-        ))),
+    add(
+        "NotoSans-SemiBold",
+        include_bytes!("../assets/fonts/NotoSans-SemiBold.ttf"),
     );
-    let fallbacks = fonts
+    add("Phosphor", include_bytes!("../assets/fonts/Phosphor.ttf"));
+    add(
+        "Phosphor-Fill",
+        include_bytes!("../assets/fonts/Phosphor-Fill.ttf"),
+    );
+    for (name, bytes) in SYMBOL_FONTS {
+        add(name, bytes);
+    }
+    let symbols: Vec<String> = SYMBOL_FONTS.iter().map(|(n, _)| n.to_string()).collect();
+
+    // egui's own fonts (Ubuntu, Noto Emoji, egui's icon font) go last.
+    let egui_fonts = fonts
         .families
         .get(&FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
-    if let Some(p) = fonts.families.get_mut(&FontFamily::Proportional) {
-        p.insert(0, "NotoSans-Regular".into());
-    }
+    let chain = |first: &str| {
+        let mut v = vec![first.to_string(), "Phosphor".into()];
+        if first != "NotoSans-Regular" {
+            v.push("NotoSans-Regular".into());
+        }
+        v.extend(symbols.iter().cloned());
+        v.extend(egui_fonts.iter().cloned());
+        v
+    };
+    fonts
+        .families
+        .insert(FontFamily::Proportional, chain("NotoSans-Regular"));
+    fonts
+        .families
+        .insert(bold_family(), chain("NotoSans-SemiBold"));
     if let Some(m) = fonts.families.get_mut(&FontFamily::Monospace) {
         // After Hack: arrows, symbols, accents Hack lacks.
         m.insert(1, "NotoSans-Regular".into());
+        for (i, s) in symbols.iter().enumerate() {
+            m.insert(2 + i, s.clone());
+        }
     }
-    let mut bold = vec!["NotoSans-SemiBold".to_string(), "NotoSans-Regular".into()];
-    bold.extend(fallbacks);
-    fonts.families.insert(bold_family(), bold);
+    fonts.families.insert(
+        FontFamily::Name(crate::icons::FILL.into()),
+        vec!["Phosphor-Fill".into(), "NotoSans-Regular".into()],
+    );
     ctx.set_fonts(fonts);
 }
 
@@ -198,16 +250,25 @@ impl Palette {
             Visuals::light()
         };
         v.panel_fill = self.chat;
-        v.window_fill = self.sidebar;
+        // Menus, popups, tooltips and modals: Discord's darkest surface.
+        v.window_fill = self.menu_bg();
         v.extreme_bg_color = self.input; // text edit background
         v.faint_bg_color = self.hover;
         v.override_text_color = Some(self.text);
         v.hyperlink_color = hex(0x00a8fc);
         v.selection.bg_fill = self.accent;
-        v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
-        v.window_stroke = Stroke::NONE;
+        // White selected text; width 0 = no focus ring around text boxes
+        // (Discord has none).
+        v.selection.stroke = Stroke::new(0.0, Color32::WHITE);
+        v.window_stroke = Stroke::new(1.0, self.divider.gamma_multiply(0.6));
         v.window_corner_radius = CornerRadius::same(8);
-        v.menu_corner_radius = CornerRadius::same(6);
+        v.menu_corner_radius = CornerRadius::same(8);
+        v.window_shadow = egui::Shadow {
+            offset: [0, 8],
+            blur: 24,
+            spread: 0,
+            color: Color32::from_black_alpha(if self.dark { 110 } else { 50 }),
+        };
 
         let r = CornerRadius::same(4);
         for w in [
@@ -243,9 +304,24 @@ impl Palette {
         ctx.set_visuals(v);
         ctx.global_style_mut(|s| {
             s.spacing.item_spacing = egui::vec2(6.0, 4.0);
-            s.spacing.button_padding = egui::vec2(8.0, 4.0);
-            s.spacing.menu_margin = egui::Margin::same(6);
-            s.spacing.interact_size.y = 22.0;
+            s.spacing.button_padding = egui::vec2(12.0, 5.0);
+            s.spacing.menu_margin = egui::Margin::same(12);
+            s.spacing.interact_size.y = 24.0;
+            s.spacing.tooltip_width = 320.0;
+            // Thin dark scrollbars that widen on hover (Discord's).
+            s.spacing.scroll = egui::style::ScrollStyle {
+                bar_width: 8.0,
+                floating_width: 4.0,
+                bar_inner_margin: 2.0,
+                handle_min_length: 24.0,
+                dormant_handle_opacity: 0.45,
+                active_handle_opacity: 0.8,
+                interact_handle_opacity: 1.0,
+                dormant_background_opacity: 0.0,
+                active_background_opacity: 0.25,
+                interact_background_opacity: 0.4,
+                ..egui::style::ScrollStyle::floating()
+            };
             s.text_styles = [
                 (TextStyle::Small, FontId::proportional(11.5)),
                 (TextStyle::Body, FontId::proportional(14.5)),
@@ -255,6 +331,17 @@ impl Palette {
             ]
             .into();
         });
+    }
+
+    /// Background of menus, popups, tooltips and modals (Discord's darkest
+    /// surface in dark mode, white in light mode).
+    pub fn menu_bg(&self) -> Color32 {
+        if self.dark { self.servers } else { self.chat }
+    }
+
+    /// Discord's green "Save Changes" / success button colour.
+    pub fn positive(&self) -> Color32 {
+        self.online
     }
 
     /// Muted channels / servers: greyed out.

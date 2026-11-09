@@ -198,9 +198,9 @@ fn result_row(ui: &mut egui::Ui, e: &Entry, selected: bool, pal: &Palette) -> eg
         ui.painter().rect_filled(rect, 4, pal.selected);
     }
     let icon = match e.kind {
-        Kind::Channel => "#",
-        Kind::Dm => "@",
-        Kind::Server => "🏠",
+        Kind::Channel => crate::icons::HASH,
+        Kind::Dm => crate::icons::AT,
+        Kind::Server => crate::icons::SQUARES_FOUR,
     };
     let y = rect.center().y;
     ui.painter().text(

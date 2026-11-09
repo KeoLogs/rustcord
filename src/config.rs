@@ -9,7 +9,7 @@ use crate::theme::ThemeChoice;
 
 pub const CONFIG_KEY: &str = "config_v1";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub theme: ThemeChoice,
@@ -119,6 +119,13 @@ impl ClientIdentity {
     }
 
     /// IDENTIFY `d.properties`. `os` is `std::env::consts::OS`.
+    ///
+    /// Discord picks the platform icon friends see (desktop / mobile / web)
+    /// from these. Desktop and Mobile copy what the official apps send
+    /// (versions are plausible, not exact); Web is RustCord's honest
+    /// identity. A change needs a fresh IDENTIFY (not a RESUME), so saving
+    /// it reconnects; other open sessions (the official app, a browser tab)
+    /// can still decide which icon friends see.
     pub fn properties(self, os: &str) -> serde_json::Value {
         use serde_json::json;
         match self {
@@ -126,21 +133,43 @@ impl ClientIdentity {
                 json!({ "os": os, "browser": "RustCord", "device": "RustCord" })
             }
             ClientIdentity::Desktop => {
-                let os = match os {
-                    "windows" => "Windows",
-                    "macos" => "Mac OS X",
-                    _ => "Linux",
+                let (os, os_version) = match os {
+                    "windows" => ("Windows", "10.0.22631"),
+                    "macos" => ("Mac OS X", "23.6.0"),
+                    _ => ("Linux", "6.8.0"),
                 };
-                json!({ "os": os, "browser": "Discord Client", "device": "" })
+                json!({
+                    "os": os,
+                    "browser": "Discord Client",
+                    "device": "",
+                    "release_channel": "stable",
+                    "client_version": DESKTOP_CLIENT_VERSION,
+                    "os_version": os_version,
+                    "os_arch": "x64",
+                    "app_arch": "x64",
+                    "system_locale": "en-US",
+                    "has_client_mods": false,
+                })
             }
-            ClientIdentity::Mobile => {
-                json!({ "os": "Android", "browser": "Discord Android", "device": "" })
-            }
+            ClientIdentity::Mobile => json!({
+                "os": "Android",
+                "browser": "Discord Android",
+                "device": "Pixel 8",
+                "release_channel": "googleRelease",
+                "client_version": MOBILE_CLIENT_VERSION,
+                "os_version": "34",
+                "os_arch": "arm64-v8a",
+                "system_locale": "en-US",
+            }),
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Plausible current versions of the official apps for "Show as".
+const DESKTOP_CLIENT_VERSION: &str = "1.0.9215";
+const MOBILE_CLIENT_VERSION: &str = "300.18 - rn";
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Modules {
     /// Move/resize panels.
@@ -153,7 +182,7 @@ pub struct Modules {
     pub typing_indicators: bool,
     /// Member list panel contents, online status and profile popouts' status.
     pub member_list: bool,
-    /// Desktop notifications, taskbar flash and the 🔔 mentions inbox.
+    /// Desktop notifications, taskbar flash and the mentions inbox.
     pub notifications: bool,
     /// Thin bar at the bottom: connection state, channel, typing, RAM.
     pub status_bar: bool,
@@ -161,6 +190,8 @@ pub struct Modules {
     pub embeds: bool,
     /// `@` / `#` / `:` suggestions in the message box.
     pub autocomplete: bool,
+    /// GIF button + picker in the message box (Discord's GIF search).
+    pub gif_picker: bool,
 }
 
 impl Default for Modules {
@@ -175,6 +206,7 @@ impl Default for Modules {
             status_bar: false,
             embeds: true,
             autocomplete: true,
+            gif_picker: true,
         }
     }
 }
@@ -214,7 +246,7 @@ pub const MODULES: &[ModuleInfo] = &[
     },
     ModuleInfo {
         name: "Notifications",
-        description: "Desktop notifications and taskbar flashing for mentions and DMs, plus the 🔔 mentions inbox. Unread markers work either way.",
+        description: "Desktop notifications and taskbar flashing for mentions and DMs, plus the mentions inbox (bell in the chat header). Unread markers work either way.",
         get: |m| &mut m.notifications,
     },
     ModuleInfo {
@@ -232,6 +264,11 @@ pub const MODULES: &[ModuleInfo] = &[
         description: "Suggestions while typing @mentions, #channels and :emoji: in the message box.",
         get: |m| &mut m.autocomplete,
     },
+    ModuleInfo {
+        name: "GIF picker",
+        description: "The GIF button in the message box: trending GIFs and Tenor search through Discord (user accounts). Off = no button, nothing loaded.",
+        get: |m| &mut m.gif_picker,
+    },
 ];
 
 #[cfg(test)]
@@ -248,6 +285,9 @@ mod tests {
         assert_eq!(desk["browser"], "Discord Client");
         assert_eq!(desk["os"], "Windows");
         assert_eq!(desk["device"], "");
+        assert_eq!(desk["release_channel"], "stable");
+        assert_eq!(desk["os_arch"], "x64");
+        assert!(desk["client_version"].as_str().is_some());
         assert_eq!(
             ClientIdentity::Desktop.properties("macos")["os"],
             "Mac OS X"
@@ -256,6 +296,19 @@ mod tests {
         let mobile = ClientIdentity::Mobile.properties("linux");
         assert_eq!(mobile["browser"], "Discord Android");
         assert_eq!(mobile["os"], "Android");
+        assert_eq!(mobile["release_channel"], "googleRelease");
+        assert!(!mobile["device"].as_str().unwrap().is_empty());
+        for p in [&desk, &mobile] {
+            for k in [
+                "release_channel",
+                "client_version",
+                "os_version",
+                "os_arch",
+                "system_locale",
+            ] {
+                assert!(p[k].as_str().is_some_and(|v| !v.is_empty()), "{k} in {p}");
+            }
+        }
         // Old configs without the field stay on Web.
         let c: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(c.client_identity, ClientIdentity::Web);

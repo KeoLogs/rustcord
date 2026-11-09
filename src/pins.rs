@@ -65,8 +65,8 @@ fn preview_for(v: &Value, m: &Message) -> String {
     }
     match m.attachments.len() {
         0 => "(no text)".into(),
-        1 => format!("📎 {}", m.attachments[0].filename),
-        n => format!("📎 {n} attachments"),
+        1 => format!("{} {}", crate::icons::PAPERCLIP, m.attachments[0].filename),
+        n => format!("{} {n} attachments", crate::icons::PAPERCLIP),
     }
 }
 
@@ -207,7 +207,14 @@ impl PinsPopup {
         ui.set_width(POPUP_WIDTH);
 
         ui.horizontal(|ui| {
-            ui.label(RichText::new("📌 Pinned Messages").strong().size(15.0));
+            ui.label(
+                RichText::new(crate::icons::label(
+                    crate::icons::PUSH_PIN,
+                    "Pinned Messages",
+                ))
+                .strong()
+                .size(16.0),
+            );
             ui.add(
                 egui::Label::new(RichText::new(&self.channel_name).small().color(pal.muted))
                     .truncate(),
@@ -219,7 +226,7 @@ impl PinsPopup {
             let mut dismiss = false;
             ui.horizontal(|ui| {
                 ui.add(egui::Label::new(RichText::new(err).small().color(pal.danger)).wrap());
-                dismiss = ui.small_button("✕").clicked();
+                dismiss = ui.small_button(crate::icons::X).clicked();
             });
             if dismiss {
                 self.error = None;
@@ -248,7 +255,11 @@ impl PinsPopup {
             }
             PinsState::Loaded(pins) if pins.is_empty() => {
                 centred(ui, |ui| {
-                    ui.label(RichText::new("📌").size(28.0));
+                    ui.label(
+                        RichText::new(crate::icons::PUSH_PIN)
+                            .size(40.0)
+                            .color(pal.muted),
+                    );
                     ui.label(
                         RichText::new("This channel doesn't have any pinned messages… yet.")
                             .color(pal.muted),
@@ -368,7 +379,7 @@ fn pin_row(
                     if view.can_unpin
                         && confirm.as_deref() != Some(m.id.as_str())
                         && ui
-                            .small_button("✕")
+                            .small_button(crate::icons::X)
                             .on_hover_text("Unpin message")
                             .clicked()
                     {
@@ -455,8 +466,14 @@ mod tests {
         assert_eq!(list[0].preview, "Read the rules");
         assert_eq!(list[0].message.author.name, "Leo");
         assert_eq!(list[1].preview, "[Rules]");
-        assert_eq!(list[2].preview, "📎 2 attachments");
-        assert_eq!(list[3].preview, "📎 map.zip");
+        assert_eq!(
+            list[2].preview,
+            format!("{} 2 attachments", crate::icons::PAPERCLIP)
+        );
+        assert_eq!(
+            list[3].preview,
+            format!("{} map.zip", crate::icons::PAPERCLIP)
+        );
         assert_eq!(list[4].preview, "hello world");
         assert_eq!(
             list[4].pinned_at.as_deref(),

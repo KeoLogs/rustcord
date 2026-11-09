@@ -87,8 +87,9 @@ async fn run(
     // Ops for the gateway (op 14 / op 8) from UI requests.
     let (gw_tx, mut gw_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
 
-    // Gateway task: reconnects with backoff until a fatal error.
-    {
+    // Gateway task: reconnects with backoff until a fatal error, or until
+    // the UI goes away (then it closes the connection cleanly).
+    let gateway = {
         let tx = tx.clone();
         let ctx = egui_ctx.clone();
         tokio::spawn(async move {
@@ -109,17 +110,22 @@ async fn run(
                         repaint();
                         return;
                     }
+                    Ok(SessionEnd::Shutdown) => return,
                     Ok(SessionEnd::Retry) => backoff = 1,
                     Err(e) => {
                         let _ = tx.send(ToUi::Status(format!("Disconnected: {e}")));
                         repaint();
                     }
                 }
+                // Stop waiting if the UI goes away meanwhile.
+                if gw_rx.is_closed() {
+                    return;
+                }
                 tokio::time::sleep(Duration::from_secs(backoff)).await;
                 backoff = (backoff * 2).min(60);
             }
-        });
-    }
+        })
+    };
 
     // Handle requests from the UI.
     while let Some(req) = rx.recv().await {
@@ -170,6 +176,7 @@ async fn run(
                     reply_to,
                     reply_ping,
                     files,
+                    spoilers,
                 } => api
                     .send_message(
                         &channel_id,
@@ -177,9 +184,23 @@ async fn run(
                         reply_to.as_deref(),
                         reply_ping,
                         &files,
+                        &spoilers,
                     )
                     .await
                     .map(|_| None),
+                ToBackend::CloseDm { channel_id } => api.close_dm(&channel_id).await.map(|_| None),
+                ToBackend::LoadGifs { .. } if is_bot => Ok(Some(ToUi::GifsFailed {
+                    error: "GIF search needs a user account".into(),
+                })),
+                ToBackend::LoadGifs { query } => Ok(Some(match api.gifs(query.as_deref()).await {
+                    Ok(v) => ToUi::Gifs {
+                        results: crate::gif_picker::parse(&v),
+                        query,
+                    },
+                    Err(e) => ToUi::GifsFailed {
+                        error: e.to_string(),
+                    },
+                })),
                 ToBackend::PickFiles => {
                     let picked = rfd::AsyncFileDialog::new()
                         .set_title("Upload files")
@@ -349,4 +370,10 @@ async fn run(
             ctx.request_repaint();
         });
     }
+
+    // The UI is gone (log out, or a restart for "Show as"): let the gateway
+    // send its close frame so Discord ends this session now instead of
+    // keeping it (and its platform) around until it times out.
+    drop(gw_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(3), gateway).await;
 }

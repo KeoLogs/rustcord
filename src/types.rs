@@ -373,12 +373,12 @@ impl Channel {
     /// Icon in front of the name in the channel list and chat header.
     pub fn icon(&self) -> &'static str {
         match self.kind {
-            CHANNEL_DM => "@",
-            CHANNEL_GROUP_DM => "👥",
-            CHANNEL_ANNOUNCEMENT => "📢",
-            CHANNEL_VOICE => "🔊",
-            CHANNEL_STAGE => "📡",
-            _ => "#",
+            CHANNEL_DM => crate::icons::AT,
+            CHANNEL_GROUP_DM => crate::icons::USERS,
+            CHANNEL_ANNOUNCEMENT => crate::icons::MEGAPHONE,
+            CHANNEL_VOICE => crate::icons::SPEAKER,
+            CHANNEL_STAGE => crate::icons::BROADCAST,
+            _ => crate::icons::HASH,
         }
     }
 
@@ -386,7 +386,7 @@ impl Channel {
     pub fn label(&self) -> String {
         match self.kind {
             CHANNEL_DM => format!("@ {}", self.name),
-            CHANNEL_GROUP_DM => format!("👥 {}", self.name),
+            CHANNEL_GROUP_DM => format!("{} {}", crate::icons::USERS, self.name),
             _ => format!("# {}", self.name),
         }
     }
@@ -509,6 +509,19 @@ pub struct Message {
     /// Link previews and bot embeds (see `embed.rs`).
     pub embeds: Vec<crate::embed::Embed>,
     pub pinned: bool,
+    /// Discord's message `type` (0 default, 19 reply, 7 join, 6 pin…).
+    /// System types render as one muted line (see `sysmsg.rs`).
+    pub kind: u8,
+    /// When it was last edited, unix seconds (0 if never / unknown).
+    pub edited_time: i64,
+    /// Stickers (`sticker_items`).
+    pub stickers: Vec<crate::sysmsg::Sticker>,
+    /// A forwarded message (`message_snapshots`).
+    pub forwarded: Option<Box<crate::sysmsg::Forwarded>>,
+    /// Poll question, if the message is a poll.
+    pub poll: Option<String>,
+    /// Has bot components (buttons / menus) we don't draw yet.
+    pub has_components: bool,
 }
 
 impl Message {
@@ -591,6 +604,22 @@ impl Message {
             }),
             embeds: crate::embed::parse_embeds(v),
             pinned: v.get("pinned").and_then(Value::as_bool).unwrap_or(false),
+            kind: v.get("type").and_then(Value::as_u64).unwrap_or(0).min(255) as u8,
+            edited_time: v
+                .get("edited_timestamp")
+                .and_then(Value::as_str)
+                .map(crate::timefmt::parse_iso)
+                .unwrap_or(0),
+            stickers: crate::sysmsg::parse_stickers(v),
+            forwarded: crate::sysmsg::parse_forwarded(v).map(Box::new),
+            poll: v
+                .pointer("/poll/question/text")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            has_components: v
+                .get("components")
+                .and_then(Value::as_array)
+                .is_some_and(|c| !c.is_empty()),
         }
     }
 
@@ -620,6 +649,9 @@ impl Message {
         }
         if patch.edited {
             self.edited = true;
+            if patch.edited_time > 0 {
+                self.edited_time = patch.edited_time;
+            }
         }
         if let Some(embeds) = &patch.embeds {
             self.embeds = embeds.clone();
@@ -647,6 +679,8 @@ pub struct MessagePatch {
     /// New embeds (link previews arrive this way a moment after the message).
     pub embeds: Option<Vec<crate::embed::Embed>>,
     pub pinned: Option<bool>,
+    /// Unix seconds of the edit (0 if not given).
+    pub edited_time: i64,
 }
 
 impl MessagePatch {
@@ -659,6 +693,11 @@ impl MessagePatch {
             edited: v.get("edited_timestamp").is_some_and(|t| !t.is_null()),
             embeds: crate::embed::embeds_patch(v),
             pinned: v.get("pinned").and_then(Value::as_bool),
+            edited_time: v
+                .get("edited_timestamp")
+                .and_then(Value::as_str)
+                .map(crate::timefmt::parse_iso)
+                .unwrap_or(0),
         }
     }
 }
@@ -670,6 +709,14 @@ impl MessagePatch {
 /// Events the backend sends to the UI.
 #[derive(Debug)]
 pub enum ToUi {
+    /// GIF picker results for `query` (None = trending).
+    Gifs {
+        query: Option<String>,
+        results: crate::gif_picker::GifResults,
+    },
+    GifsFailed {
+        error: String,
+    },
     Status(String),
     /// The session can't continue (e.g. invalid token). The UI logs out.
     Fatal(String),
@@ -804,6 +851,17 @@ pub enum ToBackend {
         reply_ping: bool,
         /// Files to upload with the message.
         files: Vec<PathBuf>,
+        /// Per file: upload as a spoiler (`SPOILER_` filename prefix).
+        spoilers: Vec<bool>,
+    },
+    /// Close a DM (`DELETE channels/{id}`; only from the user's × / menu).
+    CloseDm {
+        channel_id: String,
+    },
+    /// GIF picker: trending (`None`) or a search, from Discord's GIF
+    /// endpoints (user accounts).
+    LoadGifs {
+        query: Option<String>,
     },
     /// Open the system file picker (runs off the UI thread).
     PickFiles,

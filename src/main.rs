@@ -9,6 +9,8 @@ mod demo;
 mod embed;
 mod emoji;
 mod gateway;
+mod gif_picker;
+mod icons;
 mod layout;
 mod links;
 mod login;
@@ -24,9 +26,11 @@ mod read_state;
 mod settings;
 mod settings_proto;
 mod status;
+mod sysmsg;
 mod theme;
 mod timefmt;
 mod types;
+mod widgets;
 
 fn main() -> eframe::Result {
     // Two dependencies enable different rustls crypto backends (aws-lc-rs via

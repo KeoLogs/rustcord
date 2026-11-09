@@ -86,7 +86,11 @@ impl LoginForm {
                     .hint_text("Paste your token"),
             );
             submitted = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let eye = if self.show_token { "🙈" } else { "👁" };
+            let eye = if self.show_token {
+                crate::icons::EYE_SLASH
+            } else {
+                crate::icons::EYE
+            };
             if ui.button(eye).on_hover_text("Show / hide token").clicked() {
                 self.show_token = !self.show_token;
             }

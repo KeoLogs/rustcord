@@ -701,13 +701,26 @@ pub fn list_ui(
                     ui.allocate_exact_size(vec2(ui.available_width(), h), egui::Sense::click());
                 match (view.rows)(i) {
                     Some(Row::Group { id, count }) => {
-                        ui.painter().text(
-                            egui::pos2(rect.left() + 8.0, rect.bottom() - 6.0),
-                            egui::Align2::LEFT_BOTTOM,
-                            group_label(id, *count, view.roles),
+                        // "ADMIN — 1" with a faint line after it (Discord
+                        // Messenger's role headers).
+                        let text = group_label(id, *count, view.roles);
+                        let galley = ui.painter().layout_no_wrap(
+                            text,
                             crate::theme::bold_font(11.5),
                             pal.muted,
                         );
+                        let pos =
+                            egui::pos2(rect.left() + 8.0, rect.bottom() - 6.0 - galley.size().y);
+                        let line_y = pos.y + galley.size().y / 2.0;
+                        let x0 = pos.x + galley.size().x + 8.0;
+                        ui.painter().galley(pos, galley, pal.muted);
+                        if x0 < rect.right() - 12.0 {
+                            ui.painter().hline(
+                                x0..=rect.right() - 8.0,
+                                line_y,
+                                egui::Stroke::new(1.0, pal.divider),
+                            );
+                        }
                     }
                     Some(Row::Member(m)) => {
                         if member_row(ui, rect, &resp, m, &view, compact, config, pal) {

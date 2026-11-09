@@ -108,6 +108,10 @@ impl Session {
 pub enum SessionEnd {
     /// Worth reconnecting (resuming if the session allows it).
     Retry,
+    /// The UI went away (log out, or "Show as" changed): the connection was
+    /// closed with code 1000, which ends the session on Discord's side so it
+    /// can't be resumed and its platform stops showing. Don't reconnect.
+    Shutdown,
     /// Bad token / disallowed intents etc. Stop.
     Fatal(String),
 }
@@ -170,12 +174,26 @@ pub async fn run_session(
     let mut awaiting_ack = false;
     // Ops from the UI (op 14 / op 8) wait until READY or RESUMED.
     let mut ready = false;
+    let mut pending: Vec<Value> = Vec::new();
 
     loop {
         tokio::select! {
-            Some(cmd) = commands.recv(), if ready => {
-                write.send(WsMessage::Text(cmd.to_string().into())).await?;
-            }
+            cmd = commands.recv() => match cmd {
+                Some(cmd) if ready => {
+                    write.send(WsMessage::Text(cmd.to_string().into())).await?;
+                }
+                // Held until READY / RESUMED (a few at most).
+                Some(cmd) => {
+                    if pending.len() < 64 {
+                        pending.push(cmd);
+                    }
+                }
+                None => {
+                    session.reset();
+                    let _ = write.send(WsMessage::Close(Some(close_normal()))).await;
+                    return Ok(SessionEnd::Shutdown);
+                }
+            },
 
             _ = heartbeat.tick() => {
                 if awaiting_ack {
@@ -238,6 +256,11 @@ pub async fn run_session(
                             }
                             _ => {}
                         }
+                        if ready {
+                            for cmd in pending.drain(..) {
+                                write.send(WsMessage::Text(cmd.to_string().into())).await?;
+                            }
+                        }
                         if let Some(ev) = handle_dispatch(event, d, &session.my_id) {
                             send_ui(ev);
                         }
@@ -267,6 +290,14 @@ pub async fn run_session(
                 }
             }
         }
+    }
+}
+
+/// Close frame 1000: Discord ends the session (no RESUME, presence gone).
+fn close_normal() -> tokio_tungstenite::tungstenite::protocol::CloseFrame {
+    tokio_tungstenite::tungstenite::protocol::CloseFrame {
+        code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+        reason: "".into(),
     }
 }
 

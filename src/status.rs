@@ -7,11 +7,13 @@
 //! shows straight away, like Discord's client does.
 
 use chrono::{Local, TimeZone};
-use eframe::egui::{self, Color32, RichText, vec2};
+use eframe::egui::{self, Color32, RichText};
 use serde_json::{Value, json};
 
+use crate::icons;
 use crate::settings_proto::{CustomStatus, Status};
 use crate::theme::{Bold, Palette};
+use crate::widgets::{self, Tone};
 
 /// Gateway op 3. `custom` becomes a type 4 "Custom Status" activity.
 pub fn presence_op(status: &str, custom: Option<&CustomStatus>) -> Value {
@@ -48,14 +50,6 @@ pub fn label(s: Status) -> &'static str {
     }
 }
 
-fn hint(s: Status) -> &'static str {
-    match s {
-        Status::Dnd => "You will not receive desktop notifications",
-        Status::Invisible => "You will appear offline",
-        _ => "",
-    }
-}
-
 pub fn color(s: Status, pal: &Palette) -> Color32 {
     match s {
         Status::Online => pal.online,
@@ -73,7 +67,8 @@ pub enum MenuAction {
     ClearCustom,
 }
 
-/// The menu under the profile bar avatar.
+/// The menu under the profile bar avatar: Discord's minimal picker, one
+/// full-width row per status (dot + label), then the custom status rows.
 pub fn menu(
     ui: &mut egui::Ui,
     current: Status,
@@ -81,64 +76,33 @@ pub fn menu(
     pal: &Palette,
 ) -> Option<MenuAction> {
     let mut action = None;
-    ui.set_width(240.0);
+    ui.set_width(220.0);
+    ui.spacing_mut().item_spacing.y = 0.0;
     for s in ALL {
-        let resp = ui
-            .horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
-                ui.painter().circle_filled(r.center(), 5.0, color(s, pal));
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    let mut t = RichText::new(label(s)).color(pal.strong);
-                    if s == current {
-                        t = t.bold();
-                    }
-                    ui.label(t);
-                    if !hint(s).is_empty() {
-                        ui.label(RichText::new(hint(s)).size(11.0).color(pal.muted));
-                    }
-                });
-            })
-            .response;
-        let resp = ui.interact(
-            resp.rect,
-            ui.scope_id().with(("status", label(s))),
-            egui::Sense::click(),
-        );
-        if resp.hovered() {
-            ui.painter()
-                .rect_filled(resp.rect.expand(2.0), 4, pal.hover.gamma_multiply(0.6));
-        }
-        if resp.clicked() {
+        if widgets::dot_item(ui, color(s, pal), label(s), s == current, pal).clicked() {
             action = Some(MenuAction::Set(s));
         }
-        ui.add_space(2.0);
     }
-    ui.separator();
+    widgets::menu_separator(ui, pal);
     let text = match custom {
-        Some(c) => format!(
-            "{} {}",
-            c.emoji_name.as_deref().unwrap_or("💬"),
-            if c.text.is_empty() {
+        Some(c) => {
+            let t = if c.text.is_empty() {
                 "Edit custom status"
             } else {
                 &c.text
+            };
+            match c.emoji_name.as_deref() {
+                Some(e) => format!("{e} {t}"),
+                None => t.to_string(),
             }
-        ),
-        None => "😀 Set custom status".into(),
+        }
+        None => "Set custom status".into(),
     };
-    if ui
-        .add(egui::Button::new(RichText::new(text).color(pal.text)).frame(false))
-        .clicked()
-    {
+    if widgets::menu_item(ui, Some(icons::SMILEY), &text, Tone::Normal, pal).clicked() {
         action = Some(MenuAction::EditCustom);
     }
     if custom.is_some()
-        && ui
-            .add(
-                egui::Button::new(RichText::new("✕ Clear custom status").color(pal.muted))
-                    .frame(false),
-            )
+        && widgets::menu_item(ui, Some(icons::X), "Clear custom status", Tone::Normal, pal)
             .clicked()
     {
         action = Some(MenuAction::ClearCustom);
@@ -331,6 +295,25 @@ mod tests {
         // No custom status: no activities.
         let op = presence_op("online", None);
         assert_eq!(op["d"]["activities"], json!([]));
+    }
+
+    /// Op 3 only carries status + activities: it must never touch the
+    /// IDENTIFY properties that decide "Show as" (desktop / mobile / web).
+    #[test]
+    fn op3_keeps_show_as() {
+        let op = presence_op("idle", None);
+        let mut keys: Vec<&str> = op["d"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["activities", "afk", "since", "status"]);
+        let text = op.to_string();
+        for k in ["properties", "browser", "client_status", "os"] {
+            assert!(!text.contains(&format!("\"{k}\"")), "{k} in {text}");
+        }
     }
 
     #[test]

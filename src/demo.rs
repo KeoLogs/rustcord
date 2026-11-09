@@ -32,6 +32,11 @@
 //! - Synced settings: a custom status, Gaming Hangout + Big Public Server in
 //!   a "Games" folder, DM safety settings. Patches are applied and echoed.
 //! - The Test Server has a custom :pepe: emoji for `:` autocomplete.
+//! - #showcase has a Unicode torture test (symbols, fancy text, zalgo, RTL,
+//!   CJK, kaomoji, flags, ZWJ emoji), stickers, system messages (joins,
+//!   pin, thread, boost, call), a forwarded message, a poll and messages
+//!   with nothing RustCord can draw (shown as "unsupported", never blank).
+//! - The GIF button shows fake results (offline, so the pictures fail).
 
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
@@ -210,6 +215,7 @@ fn last_id(channel_id: &str) -> u64 {
         "201" => 30,
         "202" => 40,
         "203" => 60,
+        "204" => 70,
         "210" => 80,
         "211" => 85,
         "220" => 90,
@@ -253,6 +259,7 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
               "last_message_id": last_id("201").to_string(),
               "topic": "Chat about anything. Be nice, no spoilers without tags." },
             ch("202", "memes", 1, Some("300")),
+            ch("204", "showcase", 2, Some("300")),
             { "id": "301", "name": "Dev", "type": 4, "position": 2 },
             { "id": "203", "name": "rust", "type": 0, "position": 0, "parent_id": "301",
               "last_message_id": last_id("203").to_string(),
@@ -466,19 +473,31 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                 eprintln!("demo: save {url} as {filename}");
                 send(ToUi::Notice(format!("Demo mode: would save {filename}")));
             }
+            ToBackend::CloseDm { channel_id } => eprintln!("demo: close DM {channel_id}"),
+            ToBackend::LoadGifs { query } => {
+                eprintln!("demo: GIFs {query:?}");
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                send(ToUi::Gifs {
+                    results: crate::gif_picker::demo_results(query.as_deref()),
+                    query,
+                });
+            }
             ToBackend::Send {
                 channel_id,
                 content,
                 files,
+                spoilers,
                 ..
             } => {
                 next_id += 1;
                 let attachments: Vec<Value> = files
                     .iter()
-                    .map(|p| {
+                    .zip(spoilers.iter().chain(std::iter::repeat(&false)))
+                    .map(|(p, spoiler)| {
+                        let name = p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
                         json!({
                             "url": "https://example.com/upload",
-                            "filename": p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+                            "filename": if *spoiler { format!("SPOILER_{name}") } else { name.to_string() },
                             "size": std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
                         })
                     })
@@ -659,6 +678,9 @@ fn sample_values(channel_id: &str) -> Vec<Value> {
     if channel_id == "200" {
         return welcome_values();
     }
+    if channel_id == "204" {
+        return showcase_values();
+    }
     let sam = user(SAM, "Sam", None);
     let alex = user(ALEX, "Alex", None);
     let me = user(ME, "You", None);
@@ -712,6 +734,101 @@ fn sample_values(channel_id: &str) -> Vec<Value> {
             json!({ "attachments": [{ "url": "https://example.com/build.log", "filename": "build.log", "size": 20480, "content_type": "text/plain" }] }),
         ),
     ]
+}
+
+/// #showcase: Unicode coverage, stickers, system messages, a forward, a
+/// poll and content RustCord can't draw (never blank).
+fn showcase_values() -> Vec<Value> {
+    let sam = user(SAM, "Sam", None);
+    let alex = user(ALEX, "Alex", None);
+    let maya = user("610000000000000004", "Maya", None);
+    let olly = user("390000000000000007", "Olly", None);
+    let me = user(ME, "You", None);
+    let items: Vec<(Value, i64, &str, Value)> = vec![
+        (
+            alex.clone(),
+            90,
+            "Symbols ☆♪✓⚡☯ ★✦✧❤❥ ♠♣♥♦ ☀☁☂☃ ⌘⌥⏎ · arrows ←↑→↓⇄⟶ · box ╔═╗║╚═╝ ▀▄█░▒▓ · Braille ⠓⠑⠇⠇⠕ · math ∑∫√≠≈∞",
+            json!({}),
+        ),
+        (
+            alex.clone(),
+            89,
+            "Fancy text: 𝓯𝓪𝓷𝓬𝔂 𝕥𝕖𝕩𝕥 𝐛𝐨𝐥𝐝 𝘪𝘵𝘢𝘭𝘪𝘤 𝚖𝚘𝚗𝚘 ⓒⓘⓡⓒⓛⓔ ｆｕｌｌｗｉｄｔｈ · Zalgo: Z̷a̶l̵g̴o̸ t̶̡e̷x̸t̴",
+            json!({}),
+        ),
+        (
+            alex.clone(),
+            88,
+            "Scripts: עברית · العربية · 中文 · 日本語 · 한국어 · ไทย · हिन्दी · ქართული · Հայերեն · አማርኛ · ᏣᎳᎩ · Ελληνικά · Русский",
+            json!({}),
+        ),
+        (
+            alex.clone(),
+            87,
+            "Kaomoji ʕ•ᴥ•ʔ (╯°□°)╯︵ ┻━┻ ¯\\_(ツ)_/¯ ༼ つ ◕_◕ ༽つ ꧁꧂ · flags 🇬🇧🇽🇰 · keycaps 1️⃣2️⃣#️⃣ · ZWJ 👨‍👩‍👧 🏳️‍🌈 · skin 👍🏽",
+            json!({}),
+        ),
+        (
+            sam.clone(),
+            60,
+            "",
+            json!({ "sticker_items": [{ "id": "749054660769218631", "name": "Wumpus wave", "format_type": 1 }] }),
+        ),
+        (
+            sam.clone(),
+            59,
+            "",
+            json!({ "sticker_items": [{ "id": "816087792291282944", "name": "Hype dance", "format_type": 3 }] }),
+        ),
+        (maya.clone(), 50, "", json!({ "type": 7 })),
+        (olly.clone(), 45, "", json!({ "type": 7 })),
+        (sam.clone(), 40, "", json!({ "type": 6 })),
+        (alex.clone(), 35, "release-notes", json!({ "type": 18 })),
+        (maya.clone(), 30, "2", json!({ "type": 8 })),
+        (
+            me.clone(),
+            25,
+            "",
+            json!({ "type": 3, "call": { "participants": [ME] } }),
+        ),
+        (
+            alex.clone(),
+            20,
+            "",
+            json!({ "message_reference": { "type": 1 }, "message_snapshots": [{ "message": {
+            "content": "forwarded from #general: **ship it** 🚀", "attachments": [], "embeds": [] } }] }),
+        ),
+        (
+            sam.clone(),
+            15,
+            "",
+            json!({ "poll": { "question": { "text": "Tabs or spaces?" } } }),
+        ),
+        (
+            alex,
+            10,
+            "",
+            json!({ "type": 0, "components": [{ "type": 1, "components": [{ "type": 2, "label": "Click" }] }] }),
+        ),
+        (sam, 5, "", json!({ "type": 0 })),
+    ];
+    let last = last_id("204");
+    let first = last + 1 - items.len() as u64;
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(i, (author, ago, content, extra))| {
+            let mut v = json!({
+                "id": (first + i as u64).to_string(), "channel_id": "204", "author": author,
+                "content": content, "timestamp": iso_minutes_ago(ago),
+            });
+            if let (Some(obj), Some(extra)) = (v.as_object_mut(), extra.as_object()) {
+                obj.extend(extra.clone());
+            }
+            v
+        })
+        .collect()
 }
 
 /// #welcome: everything Batch C can draw.

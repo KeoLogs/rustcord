@@ -12,6 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::autocomplete::{self, Autocomplete, Candidate, Trigger};
 use crate::config::{CONFIG_KEY, Config};
 use crate::embed;
+use crate::gif_picker::{GifAction, GifPicker};
 use crate::layout::{self, LAYOUT_KEY, LayoutBehavior, Pane};
 use crate::links::{self, LinkCheck, LinkDecision, LinkWarning};
 use crate::login::{LoginAction, LoginForm};
@@ -30,6 +31,8 @@ use crate::status::{self, CustomStatusDialog, DialogResult};
 use crate::theme::{self, Bold, Palette, ThemeChoice};
 use crate::timefmt;
 use crate::types::{Attachment, CHANNEL_DM, DM_GUILD_ID, Guild, Message, ToBackend, ToUi, User};
+use crate::widgets::{self, Tone, icon_button};
+use crate::{icons, sysmsg};
 
 const TYPING_TIMEOUT: Duration = Duration::from_secs(10);
 const TYPING_RESEND: Duration = Duration::from_secs(8);
@@ -58,6 +61,9 @@ pub struct RustCordApp {
     applied: Option<(ThemeChoice, f32)>,
     /// Status bar module's RAM reading.
     ram: RamSampler,
+    /// The running session's token and demo flag (in memory only), to
+    /// reconnect with a fresh IDENTIFY when "Show as" changes.
+    session: Option<(String, bool)>,
 }
 
 impl RustCordApp {
@@ -66,11 +72,14 @@ impl RustCordApp {
             .storage
             .and_then(|s| eframe::get_value(s, CONFIG_KEY))
             .unwrap_or_default();
-        let tree = cc
+        let mut tree = cc
             .storage
             .and_then(|s| eframe::get_value::<egui_tiles::Tree<Pane>>(s, LAYOUT_KEY))
             .filter(layout::is_complete)
             .unwrap_or_else(layout::default_tree);
+        if demo && std::env::var("RUSTCORD_DEMO_LAYOUT").as_deref() == Ok("alt") {
+            tree = layout::alt_tree();
+        }
 
         let mut app = Self {
             screen: Screen::Login(LoginForm::new(config.remember_login, None)),
@@ -80,6 +89,7 @@ impl RustCordApp {
             settings: None,
             applied: None,
             ram: RamSampler::default(),
+            session: None,
         };
 
         // Log in straight away if we can: demo, DISCORD_TOKEN, or a saved token.
@@ -103,6 +113,7 @@ impl RustCordApp {
             bot_member_intents: self.config.bot_member_intents,
             identity: self.config.client_identity,
         };
+        self.session = Some((token.clone(), demo));
         crate::backend::spawn(token, demo, options, ui_tx, be_rx, ctx.clone());
         self.screen = Screen::Main(Box::new(State::new(ui_rx, be_tx)));
     }
@@ -115,13 +126,21 @@ impl RustCordApp {
         }
         self.settings = None;
         self.editing_layout = false;
+        self.session = None;
         self.screen = Screen::Login(LoginForm::new(self.config.remember_login, error));
     }
 
+    /// Apply theme + zoom when they change. While Settings is open the
+    /// theme previews from the draft; zoom only changes on Save (applying it
+    /// live made the slider jump under the cursor).
     fn apply_theme(&mut self, ctx: &egui::Context) {
-        let want = (self.config.theme, self.config.zoom);
+        let theme = self
+            .settings
+            .as_ref()
+            .map_or(self.config.theme, |p| p.draft.theme);
+        let want = (theme, self.config.zoom);
         if self.applied != Some(want) {
-            self.config.theme.palette().apply(ctx);
+            theme.palette().apply(ctx);
             ctx.set_zoom_factor(self.config.zoom);
             self.applied = Some(want);
         }
@@ -148,7 +167,11 @@ impl RustCordApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if self.editing_layout {
-                        ui.label(RichText::new("✏ Editing layout").bold().color(pal.accent));
+                        ui.label(
+                            RichText::new(icons::label(icons::MOVE, "Editing layout"))
+                                .bold()
+                                .color(pal.accent),
+                        );
                         ui.label(
                             RichText::new(
                                 "hover a panel, hold and drag to move · drag the gaps to resize",
@@ -156,10 +179,12 @@ impl RustCordApp {
                             .small()
                             .color(pal.muted),
                         );
-                        if ui.button("↺ Reset").clicked() {
+                        if ui.button(icons::label(icons::RESET, "Reset")).clicked() {
                             self.tree = layout::default_tree();
                         }
-                        if ui.add(pal.primary_button("✔ Done")).clicked()
+                        if ui
+                            .add(pal.primary_button(&icons::label(icons::CHECK, "Done")))
+                            .clicked()
                             || ui.input(|i| i.key_pressed(egui::Key::Escape))
                         {
                             self.editing_layout = false;
@@ -257,7 +282,11 @@ impl eframe::App for RustCordApp {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
         timefmt::set_12_hour(self.config.use_12_hour_time);
-        let pal = self.config.theme.palette();
+        let pal = self
+            .settings
+            .as_ref()
+            .map_or(self.config.theme, |p| p.draft.theme)
+            .palette();
 
         // ---- Login screen
         if let Screen::Login(form) = &mut self.screen {
@@ -289,7 +318,7 @@ impl eframe::App for RustCordApp {
             return;
         }
         if wants_settings {
-            self.settings = Some(SettingsPage::default());
+            self.settings = Some(SettingsPage::new(&self.config));
             self.editing_layout = false;
         }
 
@@ -300,13 +329,31 @@ impl eframe::App for RustCordApp {
             };
             let action = page.ui(
                 ui,
-                &mut self.config,
+                &self.config,
                 state.me.as_ref(),
                 state.user_settings(),
                 &pal,
             );
             match action {
-                Some(SettingsAction::Sync(change)) => state.apply_sync_change(change),
+                Some(SettingsAction::Save { config, sync }) => {
+                    let reconnect = config.client_identity != self.config.client_identity;
+                    self.config = *config;
+                    for change in sync {
+                        state.apply_sync_change(change);
+                    }
+                    // "Show as" only changes with a fresh IDENTIFY: start a
+                    // new session (a new backend never RESUMEs the old one).
+                    if reconnect
+                        && let Some((token, demo)) = self.session.clone()
+                        && !demo
+                        && !state.is_bot_session()
+                    {
+                        self.start_session(&ctx, token, false);
+                        if let Screen::Main(state) = &mut self.screen {
+                            state.status = "Reconnecting to apply \"Show as\"…".into();
+                        }
+                    }
+                }
                 Some(SettingsAction::Close) => self.settings = None,
                 Some(SettingsAction::EditLayout) => {
                     self.settings = None;
@@ -336,7 +383,9 @@ impl eframe::App for RustCordApp {
         if ctx.input_mut(|i| i.consume_shortcut(&quick)) {
             state.toggle_switcher();
         }
-        state.members_visible = layout::members_visible(&self.tree);
+        state.shortcuts(&ctx, &self.config);
+        state.members_visible = layout::pane_visible(&self.tree, Pane::Members);
+        state.channels_visible = layout::pane_visible(&self.tree, Pane::Channels);
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let mut behavior = LayoutBehavior {
                 state,
@@ -348,7 +397,10 @@ impl eframe::App for RustCordApp {
         });
         layout::end_frame(&self.tree, &ctx);
         if std::mem::take(&mut state.toggle_members) {
-            layout::toggle_members(&mut self.tree);
+            layout::toggle_pane(&mut self.tree, Pane::Members);
+        }
+        if std::mem::take(&mut state.toggle_channels) {
+            layout::toggle_pane(&mut self.tree, Pane::Channels);
         }
 
         state.overlays(ui, &self.config, &pal);
@@ -367,6 +419,14 @@ impl eframe::App for RustCordApp {
 // ===========================================================================
 // Chat state
 // ===========================================================================
+
+/// Buttons in the message box that open pickers. The emoji picker is a
+/// hook for `src/emoji_picker.rs` (another branch): `ComposerAction::
+/// OpenEmojiPicker` is where it plugs in.
+pub enum ComposerAction {
+    OpenEmojiPicker(egui::Rect),
+    ToggleGifPicker(egui::Rect),
+}
 
 /// What the message box is currently doing.
 enum Compose {
@@ -469,6 +529,15 @@ pub struct State {
     draft: String,
     compose: Compose,
     pending_files: Vec<PathBuf>,
+    /// Pending files to upload as spoilers (`SPOILER_` prefix).
+    pending_spoilers: HashSet<PathBuf>,
+    /// Ctrl+/ keyboard shortcuts dialog open.
+    show_shortcuts: bool,
+    /// GIF picker popup (GIF picker module) and its button's rect.
+    gif_picker: Option<(GifPicker, egui::Rect)>,
+    /// Emoji button's rect while the emoji picker is open (placeholder until
+    /// the real picker lands).
+    emoji_picker: Option<egui::Rect>,
     last_typing_sent: Option<(String, Instant)>,
     confirm_delete: Option<(String, String)>,
 
@@ -509,8 +578,12 @@ pub struct State {
     collapsed: HashSet<String>,
     /// Is the Members panel shown (set by the app from the layout each frame).
     members_visible: bool,
-    /// The 👥 header button was clicked; the app toggles the panel.
+    /// The members header button was clicked; the app toggles the panel.
     toggle_members: bool,
+    /// Is the Channels panel shown (« in its header hides it)?
+    channels_visible: bool,
+    /// Header button asked to show / hide the Channels panel.
+    toggle_channels: bool,
     /// Reply / Edit was picked: focus the message box next frame.
     focus_composer: bool,
 
@@ -521,7 +594,7 @@ pub struct State {
     user_names: HashMap<String, String>,
     /// "Leaving RustCord" dialog for a clicked link.
     link_warning: Option<LinkWarning>,
-    /// Pinned messages popup, and the 📌 button's rect it hangs from.
+    /// Pinned messages popup, and the pin button's rect it hangs from.
     pins: Option<(PinsPopup, egui::Rect)>,
     /// Scroll to (and flash) this message once it's on screen.
     scroll_to: Option<(String, String)>,
@@ -573,6 +646,10 @@ impl State {
             draft: String::new(),
             compose: Compose::New,
             pending_files: Vec::new(),
+            pending_spoilers: HashSet::new(),
+            show_shortcuts: false,
+            gif_picker: None,
+            emoji_picker: None,
             last_typing_sent: None,
             confirm_delete: None,
             reads: ReadState::default(),
@@ -594,6 +671,8 @@ impl State {
             collapsed: HashSet::new(),
             members_visible: true,
             toggle_members: false,
+            channels_visible: true,
+            toggle_channels: false,
             focus_composer: false,
             md_cache: ParseCache::default(),
             user_names: HashMap::new(),
@@ -743,6 +822,16 @@ impl State {
                 self.scroll_to = Some((channel_id, message_id));
             }
             ToUi::FilesPicked(paths) => self.add_files(paths),
+            ToUi::Gifs { query, results } => {
+                if let Some((p, _)) = &mut self.gif_picker {
+                    p.set_results(query, results);
+                }
+            }
+            ToUi::GifsFailed { error, .. } => {
+                if let Some((p, _)) = &mut self.gif_picker {
+                    p.set_error(error);
+                }
+            }
             ToUi::NewMessage(mut msg) => {
                 if let (Some(gid), Some(member)) = (&msg.guild_id, msg.member.take()) {
                     self.member_cache
@@ -1604,11 +1693,21 @@ impl State {
                 if resp.clicked() {
                     ev.clicked = Some(DM_GUILD_ID.to_string());
                 }
-                egui::Popup::context_menu(&resp).show(|ui| {
-                    if ui.button("✔ Mark as read").clicked() {
-                        ev.mark_read = Some(DM_GUILD_ID.to_string());
-                    }
-                });
+                egui::Popup::context_menu(&resp)
+                    .frame(widgets::menu_frame(pal))
+                    .show(|ui| {
+                        if widgets::menu_item(
+                            ui,
+                            Some(icons::CHECKS),
+                            "Mark as Read",
+                            Tone::Normal,
+                            pal,
+                        )
+                        .clicked()
+                        {
+                            ev.mark_read = Some(DM_GUILD_ID.to_string());
+                        }
+                    });
                 // Separator under Home, centred under the icons.
                 let (sep, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 2.0), egui::Sense::hover());
@@ -1736,31 +1835,42 @@ impl State {
         if resp.clicked() {
             ev.clicked = Some(g.id.clone());
         }
-        egui::Popup::context_menu(&resp).show(|ui| {
-            let any_unread = badge.unread || badge.mentions > 0;
-            if ui
-                .add_enabled(any_unread, egui::Button::new("✔ Mark as read"))
-                .clicked()
-            {
-                ev.mark_read = Some(g.id.clone());
-            }
-            if badge.muted {
-                ui.label(RichText::new("🔕 Muted").small().color(pal.muted));
-            }
-            ui.separator();
-            if ui
-                .button(RichText::new("🚪 Leave Server").color(pal.danger))
-                .clicked()
-            {
-                ev.leave = Some((g.id.clone(), g.name.clone()));
-            }
-        });
+        egui::Popup::context_menu(&resp)
+            .frame(widgets::menu_frame(pal))
+            .show(|ui| {
+                let any_unread = badge.unread || badge.mentions > 0;
+                let tone = if any_unread {
+                    Tone::Normal
+                } else {
+                    Tone::Disabled
+                };
+                if widgets::menu_item(ui, Some(icons::CHECKS), "Mark as Read", tone, pal).clicked()
+                {
+                    ev.mark_read = Some(g.id.clone());
+                }
+                if badge.muted {
+                    widgets::menu_note(ui, icons::BELL_SLASH, "Muted", pal);
+                }
+                widgets::menu_separator(ui, pal);
+                if widgets::menu_item(ui, Some(icons::ID), "Copy Server ID", Tone::Normal, pal)
+                    .clicked()
+                {
+                    ui.ctx().copy_text(g.id.clone());
+                }
+                widgets::menu_separator(ui, pal);
+                if widgets::menu_item(ui, Some(icons::SIGN_OUT), "Leave Server", Tone::Danger, pal)
+                    .clicked()
+                {
+                    ev.leave = Some((g.id.clone(), g.name.clone()));
+                }
+            });
     }
 
-    /// Bottom-left user panel: avatar with status dot, bold name, custom
-    /// status (or status), ⚙ settings. Clicking the avatar opens the status
-    /// picker (user accounts). In the narrow default rail it stacks the
-    /// avatar over the gear.
+    /// Bottom-left user panel (Discord's): avatar 32 with a status ring,
+    /// SemiBold name over the custom status / status (ellipsized), and the
+    /// gear. The avatar + name area opens the status picker (user
+    /// accounts). Narrow panels collapse to avatar + gear (side by side, or
+    /// stacked in the icon-only server rail).
     fn profile_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let (name, uid, url) = match &self.me {
             Some(me) => (me.name.clone(), me.id.clone(), me.avatar_url.clone()),
@@ -1779,70 +1889,124 @@ impl State {
             None => status_text.clone(),
         };
         let can_pick = self.user_settings.is_some() && self.connected;
-        let mut picked = None;
-        let mut draw_avatar = |ui: &mut egui::Ui| {
-            let rect = avatar(ui, &uid, &name, &url, 32.0, config, pal);
-            let c = rect.right_bottom() - vec2(4.0, 4.0);
-            ui.painter().circle_filled(c, 6.0, pal.servers);
-            ui.painter().circle_filled(c, 4.0, dot);
-            let resp = ui
-                .interact(rect, ui.scope_id().with("me_avatar"), egui::Sense::click())
-                .on_hover_text(if can_pick {
-                    format!("{name} · {status_text} · click to set your status")
-                } else {
-                    format!("{name} · {status_text}")
-                });
-            if can_pick {
-                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                egui::Popup::menu(&resp)
-                    .align(egui::RectAlign::TOP_START)
-                    .show(|ui| {
-                        if let Some(a) = status::menu(
-                            ui,
-                            my_status.unwrap_or(sp::Status::Online),
-                            custom.as_ref(),
-                            pal,
-                        ) {
-                            picked = Some(a);
-                            ui.close();
-                        }
-                    });
-            }
-        };
+        let full = ui.max_rect();
+        let w = full.width();
+        let bg = pal.pane_fill(Pane::Profile);
         let mut open = false;
-        if ui.available_width() < 120.0 {
-            ui.vertical_centered(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                draw_avatar(ui);
-                open = icon_button(ui, "⚙", "User Settings", false, true, pal).clicked();
-            });
+        let mut picked = None;
+
+        // Where things go: (avatar+name hit area, gear button).
+        let (hit, gear, show_text) = if w >= 150.0 {
+            let gear = egui::Rect::from_center_size(
+                egui::pos2(full.right() - 22.0, full.center().y),
+                vec2(32.0, 32.0),
+            );
+            let hit = egui::Rect::from_min_max(
+                egui::pos2(full.left(), full.center().y - 21.0),
+                egui::pos2(gear.left() - 4.0, full.center().y + 21.0),
+            );
+            (hit, gear, true)
+        } else if w >= 84.0 || full.height() < 84.0 {
+            let hit = egui::Rect::from_center_size(
+                egui::pos2(full.left() + 22.0, full.center().y),
+                vec2(40.0, 40.0),
+            );
+            let gear = egui::Rect::from_center_size(
+                egui::pos2((hit.right() + full.right()) / 2.0, full.center().y),
+                vec2(28.0, 28.0),
+            );
+            (hit, gear, false)
         } else {
-            ui.horizontal_centered(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    open = icon_button(ui, "⚙", "User Settings", false, true, pal).clicked();
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        draw_avatar(ui);
-                        ui.add_space(2.0);
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&name).bold().size(14.5).color(pal.strong),
-                                )
-                                .truncate()
-                                .selectable(false),
-                            );
-                            ui.add(
-                                egui::Label::new(RichText::new(&line2).size(12.0).color(pal.muted))
-                                    .truncate()
-                                    .selectable(false),
-                            )
-                            .on_hover_text(&status_text);
-                        });
-                    });
-                });
-            });
+            let c = full.center();
+            let hit = egui::Rect::from_center_size(c - vec2(0.0, 18.0), vec2(40.0, 40.0));
+            let gear = egui::Rect::from_center_size(c + vec2(0.0, 20.0), vec2(28.0, 28.0));
+            (hit, gear, false)
+        };
+
+        let resp = ui.interact(hit, ui.scope_id().with("me_panel"), egui::Sense::click());
+        if resp.hovered() && can_pick {
+            ui.painter().rect_filled(hit, 4, pal.hover);
         }
+        let av = egui::Rect::from_center_size(
+            egui::pos2(hit.left() + 4.0 + 16.0, hit.center().y),
+            vec2(32.0, 32.0),
+        );
+        let av = if show_text {
+            av
+        } else {
+            egui::Rect::from_center_size(hit.center(), vec2(32.0, 32.0))
+        };
+        paint_avatar(ui, av, &uid, &name, &url, config, pal);
+        // Status dot with a ring in the panel colour (Discord's cut-out).
+        let ring = if resp.hovered() && can_pick {
+            pal.hover
+        } else {
+            bg
+        };
+        let c = av.right_bottom() - vec2(3.0, 3.0);
+        ui.painter().circle_filled(c, 7.0, ring);
+        ui.painter().circle_filled(c, 5.0, dot);
+        if show_text {
+            let x = av.right() + 8.0;
+            let max_w = hit.right() - x - 4.0;
+            let n = truncated(ui, &name, theme::bold_font(14.0), pal.strong, max_w);
+            let l2 = truncated(
+                ui,
+                &line2,
+                egui::FontId::proportional(12.0),
+                pal.muted,
+                max_w,
+            );
+            let total = n.size().y + l2.size().y - 2.0;
+            let top = hit.center().y - total / 2.0;
+            let nh = n.size().y;
+            ui.painter().galley(egui::pos2(x, top), n, pal.strong);
+            ui.painter()
+                .galley(egui::pos2(x, top + nh - 2.0), l2, pal.muted);
+        }
+        let resp = if can_pick {
+            resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        } else {
+            resp
+        };
+        let resp = resp.on_hover_text(if can_pick {
+            format!("{name} · {status_text} · click to set your status")
+        } else {
+            format!("{name} · {status_text}")
+        });
+        if can_pick {
+            egui::Popup::menu(&resp)
+                .align(egui::RectAlign::TOP_START)
+                .frame(widgets::menu_frame(pal))
+                .show(|ui| {
+                    if let Some(a) = status::menu(
+                        ui,
+                        my_status.unwrap_or(sp::Status::Online),
+                        custom.as_ref(),
+                        pal,
+                    ) {
+                        picked = Some(a);
+                        ui.close();
+                    }
+                });
+        }
+        let mut gear_ui = ui.new_child(egui::UiBuilder::new().max_rect(gear));
+        let size = gear.width();
+        if widgets::icon_button_sized(
+            &mut gear_ui,
+            icons::GEAR,
+            "User Settings",
+            false,
+            true,
+            size,
+            20.0,
+            pal,
+        )
+        .clicked()
+        {
+            open = true;
+        }
+        ui.allocate_rect(full, egui::Sense::hover());
         if open {
             self.open_settings = true;
         }
@@ -1933,7 +2097,7 @@ impl State {
         self.user_settings.as_ref()
     }
 
-    /// The 📌 header button: open (and load) or close the pins popup.
+    /// The pin header button: open (and load) or close the pins popup.
     fn toggle_pins(&mut self, anchor: egui::Rect) {
         if self.pins.take().is_some() {
             return;
@@ -1967,25 +2131,48 @@ impl State {
             );
             return;
         };
-        // Header: server name, with a border + soft shadow under it.
+        // Header: server name (DMs: "Direct Messages"), with a border + soft
+        // shadow under it, and « to collapse the panel (Discord Messenger).
         let rect = header_bar(ui, pal);
+        let collapse = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - 24.0, rect.center().y),
+            vec2(28.0, 28.0),
+        );
+        let title = if guild.is_dms() {
+            "Direct Messages"
+        } else {
+            guild.name.as_str()
+        };
         let galley = truncated(
             ui,
-            &guild.name,
+            title,
             theme::bold_font(15.0),
             pal.strong,
-            rect.width() - 32.0,
+            collapse.left() - rect.left() - 20.0,
         );
         ui.painter().galley(
             egui::pos2(rect.left() + 16.0, rect.center().y - galley.size().y / 2.0),
             galley,
             pal.strong,
         );
+        let mut collapse_ui = ui.new_child(egui::UiBuilder::new().max_rect(collapse));
+        let hide = widgets::icon_button_sized(
+            &mut collapse_ui,
+            icons::CARET_DOUBLE_LEFT,
+            "Hide channel list",
+            false,
+            true,
+            28.0,
+            16.0,
+            pal,
+        )
+        .clicked();
 
         let mut clicked = None;
         let mut first = None;
         let mut mark_read = None;
         let mut toggle_cat = None;
+        let mut close_dm = None;
         let now = notify::now_iso();
         let guild_muted = self.mutes.guild_muted(&guild.id, &now);
         egui::ScrollArea::vertical()
@@ -2014,8 +2201,11 @@ impl State {
                         }
                         if guild.is_dms() {
                             ui.add_space(8.0);
-                            ui.label(pal.section_label("Direct Messages"));
-                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(8.0);
+                                ui.label(pal.section_label("Direct Messages"));
+                            });
+                            ui.add_space(4.0);
                         }
                         for group in groups {
                             let mut collapsed = false;
@@ -2044,36 +2234,88 @@ impl State {
                                     .then(|| c.recipients.first())
                                     .flatten()
                                     .and_then(|u| self.presences.status(&u.id));
+                                let activity = (c.kind == CHANNEL_DM && config.modules.member_list)
+                                    .then(|| c.recipients.first())
+                                    .flatten()
+                                    .and_then(|u| self.presences.get(&u.id))
+                                    .and_then(|p| p.activity.as_deref().map(str::to_string));
                                 let row = ChannelRow {
                                     selected,
                                     muted,
                                     unread,
                                     mentions,
                                     status,
+                                    activity,
                                 };
-                                let resp = channel_row(ui, c, &row, config, pal);
-                                if resp.clicked() && !c.is_voice() {
+                                let (resp, close) = channel_row(ui, c, &row, config, pal);
+                                if close {
+                                    close_dm = Some(c.id.clone());
+                                } else if resp.clicked() && !c.is_voice() {
                                     clicked = Some(c.id.clone());
                                 }
                                 if c.is_voice() {
                                     continue;
                                 }
-                                egui::Popup::context_menu(&resp).show(|ui| {
-                                    if ui
-                                        .add_enabled(
-                                            unread || mentions > 0,
-                                            egui::Button::new("✔ Mark as read"),
+                                egui::Popup::context_menu(&resp)
+                                    .frame(widgets::menu_frame(pal))
+                                    .show(|ui| {
+                                        let tone = if unread || mentions > 0 {
+                                            Tone::Normal
+                                        } else {
+                                            Tone::Disabled
+                                        };
+                                        if widgets::menu_item(
+                                            ui,
+                                            Some(icons::CHECKS),
+                                            "Mark as Read",
+                                            tone,
+                                            pal,
                                         )
                                         .clicked()
-                                    {
-                                        mark_read = Some(c.id.clone());
-                                    }
-                                    if muted {
-                                        ui.label(
-                                            RichText::new("🔕 Muted").small().color(pal.muted),
-                                        );
-                                    }
-                                });
+                                        {
+                                            mark_read = Some(c.id.clone());
+                                        }
+                                        if muted {
+                                            widgets::menu_note(ui, icons::BELL_SLASH, "Muted", pal);
+                                        }
+                                        widgets::menu_separator(ui, pal);
+                                        if c.is_dm()
+                                            && widgets::menu_item(
+                                                ui,
+                                                Some(icons::X),
+                                                "Close DM",
+                                                Tone::Normal,
+                                                pal,
+                                            )
+                                            .clicked()
+                                        {
+                                            close_dm = Some(c.id.clone());
+                                        }
+                                        if widgets::menu_item(
+                                            ui,
+                                            Some(icons::ID),
+                                            "Copy Channel ID",
+                                            Tone::Normal,
+                                            pal,
+                                        )
+                                        .clicked()
+                                        {
+                                            ui.ctx().copy_text(c.id.clone());
+                                        }
+                                        if let Some(u) =
+                                            c.recipients.first().filter(|_| c.kind == CHANNEL_DM)
+                                            && widgets::menu_item(
+                                                ui,
+                                                Some(icons::USER),
+                                                "Copy User ID",
+                                                Tone::Normal,
+                                                pal,
+                                            )
+                                            .clicked()
+                                        {
+                                            ui.ctx().copy_text(u.id.clone());
+                                        }
+                                    });
                             }
                         }
                     });
@@ -2087,6 +2329,20 @@ impl State {
         if let Some(id) = mark_read {
             self.mark_channel_read(&id);
         }
+        if hide {
+            self.toggle_channels = true;
+        }
+        if let Some(id) = close_dm {
+            // Explicit user action (× on the row / menu), like Discord's.
+            let _ = self.tx.send(ToBackend::CloseDm {
+                channel_id: id.clone(),
+            });
+            self.dms.channels.retain(|c| c.id != id);
+            if self.selected_channel.as_deref() == Some(id.as_str()) {
+                self.selected_channel = None;
+            }
+            return;
+        }
         let auto = if self.selected_channel.is_none() {
             first
         } else {
@@ -2098,7 +2354,7 @@ impl State {
         }
     }
 
-    /// Chat header: channel icon + bold name, topic, and the 🔔 / 📌 / 👥
+    /// Chat header: channel icon + bold name, topic, and the inbox / pins / members
     /// buttons on the right.
     fn chat_header(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let rect = header_bar(ui, pal);
@@ -2118,7 +2374,7 @@ impl State {
         if config.modules.member_list
             && icon_button(
                 ui,
-                "👥",
+                icons::USERS,
                 if self.members_visible {
                     "Hide Member List"
                 } else {
@@ -2134,7 +2390,7 @@ impl State {
         }
         let pin_btn = icon_button(
             ui,
-            "📌",
+            icons::PUSH_PIN,
             "Pinned Messages",
             self.pins.is_some(),
             channel.is_some(),
@@ -2150,17 +2406,46 @@ impl State {
             self.inbox_button(ui, config, pal);
         }
         ui.add_space(8.0);
+        let show_channels = !self.channels_visible;
         let Some((icon, name, topic, dm)) = channel else {
+            if show_channels {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    if icon_button(
+                        ui,
+                        icons::CARET_DOUBLE_RIGHT,
+                        "Show channel list",
+                        false,
+                        true,
+                        pal,
+                    )
+                    .clicked()
+                    {
+                        self.toggle_channels = true;
+                    }
+                });
+            }
             return;
         };
         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new(icon)
-                    .size(if icon == "#" { 20.0 } else { 18.0 })
-                    .color(pal.muted),
-            );
+            if show_channels {
+                // » brings back the channel list hidden with «.
+                if icon_button(
+                    ui,
+                    icons::CARET_DOUBLE_RIGHT,
+                    "Show channel list",
+                    false,
+                    true,
+                    pal,
+                )
+                .clicked()
+                {
+                    self.toggle_channels = true;
+                }
+            } else {
+                ui.add_space(4.0);
+            }
+            ui.label(RichText::new(icon).size(22.0).color(pal.muted));
             ui.add(
                 egui::Label::new(RichText::new(&name).bold().size(15.0).color(pal.strong))
                     .truncate()
@@ -2209,7 +2494,8 @@ impl State {
 
         // Parse (cached) message bodies and reply snippets first: that needs
         // the cache mutably, drawing needs the rest of the state.
-        let (blocks, replies): (Vec<Arc<[Block]>>, Vec<Option<String>>) = {
+        type Parsed = (Arc<[Block]>, Option<String>, Option<Arc<[Block]>>);
+        let parsed: Vec<Parsed> = {
             let lookup = ChatLookup {
                 guild: guild_idx.map(|i| &self.guilds[i]),
                 guilds: &self.guilds,
@@ -2230,9 +2516,14 @@ impl State {
                             markdown::to_plain_text(&b, &lookup).replace('\n', " ")
                         }
                     });
-                    (blocks, reply)
+                    let fwd = m
+                        .forwarded
+                        .as_ref()
+                        .filter(|f| !f.content.is_empty())
+                        .map(|f| cache.get(&format!("fwd:{}", m.id), &f.content, formatting));
+                    (blocks, reply, fwd)
                 })
-                .unzip()
+                .collect()
         };
 
         let guild = guild_idx.map(|i| &self.guilds[i]);
@@ -2278,6 +2569,10 @@ impl State {
             .stick_to_bottom(scroll_id.is_none())
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
+                // Message text at 15 px (Discord: 16 px at 100%).
+                ui.style_mut()
+                    .text_styles
+                    .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
                 ui.add_space(8.0);
                 let mut prev: Option<&Message> = None;
                 let mut revealed_run = false;
@@ -2292,7 +2587,9 @@ impl State {
                         && !new_day
                         && !config.compact_messages
                         && prev.is_some_and(|p| {
-                            p.author.id == m.author.id && (m.time - p.time).abs() < 7 * 60
+                            sysmsg::is_normal(p.kind)
+                                && p.author.id == m.author.id
+                                && (m.time - p.time).abs() < 7 * 60
                         });
                     if let (true, Some(day)) = (new_day, day) {
                         date_divider(ui, &timefmt::day_label(day), pal);
@@ -2330,6 +2627,25 @@ impl State {
                     }
 
                     let author = self.author_style(guild, &m.author);
+                    // Joins, pins, calls, boosts…: one muted line.
+                    if !sysmsg::is_normal(m.kind) {
+                        let target = m.mention_names.first().map(|(_, n)| n.as_str());
+                        let server = guild.map_or("", |g| g.name.as_str());
+                        if let Some(line) = sysmsg::system_line(
+                            m.kind,
+                            author.name,
+                            target,
+                            &m.content,
+                            server,
+                            &m.id,
+                        ) && let Some(a) = system_row(ui, m, &line, pal)
+                        {
+                            action = Some(a);
+                        }
+                        prev = Some(m);
+                        i += 1;
+                        continue;
+                    }
                     let mentions_me = !my_id.is_empty()
                         && m.author.id != my_id
                         && (m.mention_everyone || m.mentions.contains(&my_id));
@@ -2346,8 +2662,9 @@ impl State {
                         menu: &menu,
                     };
                     let body = Body {
-                        blocks: &blocks[i],
-                        reply: replies[i].as_deref(),
+                        blocks: &parsed[i].0,
+                        reply: parsed[i].1.as_deref(),
+                        forwarded: parsed[i].2.as_deref(),
                         lookup: &lookup,
                     };
                     let (a, rect) = message_row(ui, m, &body, &author, &rc, config, pal);
@@ -2542,11 +2859,11 @@ impl State {
         markdown::to_plain_text(&markdown::parse(content), &lookup)
     }
 
-    /// 🔔 button with a red dot when there are unread mentions; opens the
+    /// Inbox button with a red badge when there are unread mentions; opens the
     /// inbox popup. Clicking a mention jumps to its channel.
     fn inbox_button(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let unread = self.inbox.unread();
-        let bell = icon_button(ui, "🔔", "Inbox: recent mentions", false, true, pal);
+        let bell = icon_button(ui, icons::TRAY, "Inbox", false, true, pal);
         if unread > 0 {
             mention_badge(
                 ui,
@@ -2561,11 +2878,17 @@ impl State {
         let mut clear = false;
         egui::Popup::menu(&bell)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .frame(widgets::menu_frame(pal))
             .show(|ui| {
                 ui.set_width(340.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Inbox").strong().size(15.0));
-                    ui.label(RichText::new("Mentions").small().color(pal.muted));
+                    ui.label(
+                        RichText::new(icons::label(icons::TRAY, "Inbox"))
+                            .bold()
+                            .size(16.0)
+                            .color(pal.strong),
+                    );
+                    ui.label(RichText::new("Mentions").size(13.0).color(pal.muted));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if !self.inbox.items.is_empty() && ui.small_button("Clear").clicked() {
                             clear = true;
@@ -2626,6 +2949,8 @@ impl State {
         let mut edit_id = None;
         let mut cursor = None;
         let mut has_focus = false;
+        let mut composer_action = None;
+        let mut toggle_spoiler = None;
 
         // Autocomplete keys go first so the text box doesn't see them.
         let ac_on = config.modules.autocomplete;
@@ -2658,209 +2983,279 @@ impl State {
 
         // Built bottom-up (like Discord) so the input row always stays visible
         // and extra rows (files, reply banner) grow upwards.
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            // Who's typing (under the box)
-            let typers: Vec<&str> = config
-                .modules
-                .typing_indicators
-                .then(|| self.typing.get(&channel_id))
-                .flatten()
-                .map(|t| t.iter().map(|t| t.name.as_str()).collect())
-                .unwrap_or_default();
-            typing_row(ui, &typers, pal);
+        let used = ui
+            .with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                // Who's typing (under the box)
+                let typers: Vec<&str> = config
+                    .modules
+                    .typing_indicators
+                    .then(|| self.typing.get(&channel_id))
+                    .flatten()
+                    .map(|t| t.iter().map(|t| t.name.as_str()).collect())
+                    .unwrap_or_default();
+                typing_row(ui, &typers, pal);
 
-            // (+) [ message …               ] ➤
-            let reply_banner = !matches!(self.compose, Compose::New);
-            let mut box_frame = egui::Frame::new()
-                .fill(pal.input)
-                .corner_radius(8)
-                .inner_margin(egui::Margin {
-                    left: 12,
-                    right: 12,
-                    top: 10,
-                    bottom: 10,
-                });
-            if reply_banner {
-                box_frame = box_frame.corner_radius(egui::CornerRadius {
-                    nw: 0,
-                    ne: 0,
-                    sw: 8,
-                    se: 8,
-                });
-            }
-            box_rect = box_frame
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        if plus_button(ui, pal).clicked() {
-                            let _ = self.tx.send(ToBackend::PickFiles);
-                        }
-                        ui.add_space(8.0);
-                        let can_send =
-                            !self.draft.trim().is_empty() || !self.pending_files.is_empty();
-                        let hint = match self
-                            .find_channel(&channel_id)
-                            .map(|(_, c)| (c.is_dm(), c.name.clone()))
-                        {
-                            Some((true, name)) => format!("Message @{name}"),
-                            Some((false, name)) => format!("Message #{name}"),
-                            None => "Message".into(),
-                        };
-                        let send_w = if can_send {
-                            24.0 + ui.spacing().item_spacing.x
-                        } else {
-                            0.0
-                        };
-                        let out = egui::TextEdit::singleline(&mut self.draft)
-                            .hint_text(RichText::new(hint).color(pal.muted))
-                            .font(egui::FontId::proportional(15.0))
-                            .frame(egui::Frame::NONE)
-                            .margin(egui::Margin::ZERO)
-                            .desired_width(ui.available_width() - send_w)
-                            .show(ui);
-                        let resp = out.response;
-                        edit_id = Some(resp.id);
-                        cursor = out.cursor_range.map(|r| r.primary.index.0);
-                        has_focus = resp.has_focus();
-                        if std::mem::take(&mut self.focus_composer) {
-                            resp.request_focus();
-                        }
-                        changed = resp.changed();
-                        if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                            cancel = true;
-                        }
-                        let enter =
-                            resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        // Discord has no send button; a subtle one shows only
-                        // when there's something to send.
-                        let send_btn = can_send && send_button(ui, pal).clicked();
-                        if enter || send_btn {
-                            send = true;
-                            resp.request_focus();
-                        }
+                // (+) [ message …               ] ➤
+                let reply_banner = !matches!(self.compose, Compose::New);
+                let mut box_frame = egui::Frame::new()
+                    .fill(pal.input)
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin {
+                        left: 12,
+                        right: 12,
+                        top: 10,
+                        bottom: 10,
                     });
-                })
-                .response
-                .rect;
-
-            // Reply / edit banner, attached to the top of the box.
-            let (banner, ping) = match &self.compose {
-                Compose::New => (None, None),
-                Compose::Reply { author, ping, .. } => {
-                    (Some(("Replying to ", author.clone())), Some(*ping))
+                if reply_banner {
+                    box_frame = box_frame.corner_radius(egui::CornerRadius {
+                        nw: 0,
+                        ne: 0,
+                        sw: 8,
+                        se: 8,
+                    });
                 }
-                Compose::Edit { .. } => (Some(("Editing message", String::new())), None),
-            };
-            if let Some((what, who)) = banner {
-                egui::Frame::new()
-                    .fill(pal.sidebar)
-                    .corner_radius(egui::CornerRadius {
-                        nw: 8,
-                        ne: 8,
-                        sw: 0,
-                        se: 0,
-                    })
-                    .inner_margin(egui::Margin::symmetric(12, 6))
+                box_rect = box_frame
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            ui.label(RichText::new(what).size(13.0).color(pal.muted));
-                            if !who.is_empty() {
-                                ui.label(RichText::new(who).size(13.0).bold().color(pal.text));
-                            } else {
-                                ui.label(
-                                    RichText::new(" · Esc to cancel")
-                                        .size(13.0)
-                                        .color(pal.muted),
-                                );
+                            if plus_button(ui, pal).clicked() {
+                                let _ = self.tx.send(ToBackend::PickFiles);
                             }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let x = ui
-                                        .add(
-                                            egui::Button::new(RichText::new("✕").color(pal.muted))
-                                                .frame(false),
-                                        )
-                                        .on_hover_text("Cancel (Esc)");
-                                    cancel |= x.clicked();
-                                    if let Some(on) = ping {
-                                        ui.add_space(10.0);
-                                        // Discord's "@ ON" switch: ping the author?
-                                        let (text, col) = if on {
-                                            ("@ ON", pal.accent)
-                                        } else {
-                                            ("@ OFF", pal.muted)
-                                        };
-                                        let chip = ui
+                            ui.add_space(8.0);
+                            let can_send =
+                                !self.draft.trim().is_empty() || !self.pending_files.is_empty();
+                            let hint = match self
+                                .find_channel(&channel_id)
+                                .map(|(_, c)| (c.is_dm(), c.name.clone()))
+                            {
+                                Some((true, name)) => format!("Message @{name}"),
+                                Some((false, name)) => format!("Message #{name}"),
+                                None => "Message".into(),
+                            };
+                            // Right-hand buttons: [GIF] [emoji] [send].
+                            let n_buttons =
+                                1 + usize::from(config.modules.gif_picker) + usize::from(can_send);
+                            let send_w = n_buttons as f32 * (28.0 + ui.spacing().item_spacing.x);
+                            let out = egui::TextEdit::singleline(&mut self.draft)
+                                .hint_text(RichText::new(hint).color(pal.muted))
+                                .font(egui::FontId::proportional(15.0))
+                                .frame(egui::Frame::NONE)
+                                .margin(egui::Margin::ZERO)
+                                .desired_width(ui.available_width() - send_w)
+                                .show(ui);
+                            let resp = out.response;
+                            edit_id = Some(resp.id);
+                            cursor = out.cursor_range.map(|r| r.primary.index.0);
+                            has_focus = resp.has_focus();
+                            if std::mem::take(&mut self.focus_composer) {
+                                resp.request_focus();
+                            }
+                            changed = resp.changed();
+                            if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                cancel = true;
+                            }
+                            let enter =
+                                resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if config.modules.gif_picker {
+                                let open = self.gif_picker.is_some();
+                                let gif = widgets::icon_button_sized(
+                                    ui,
+                                    icons::GIF,
+                                    "GIFs",
+                                    open,
+                                    true,
+                                    28.0,
+                                    24.0,
+                                    pal,
+                                );
+                                if gif.clicked() {
+                                    composer_action =
+                                        Some(ComposerAction::ToggleGifPicker(gif.rect));
+                                }
+                            }
+                            let emoji = widgets::icon_button_sized(
+                                ui,
+                                icons::SMILEY,
+                                "Emoji",
+                                self.emoji_picker.is_some(),
+                                true,
+                                28.0,
+                                22.0,
+                                pal,
+                            );
+                            if emoji.clicked() {
+                                composer_action = Some(ComposerAction::OpenEmojiPicker(emoji.rect));
+                            }
+                            // Discord has no send button; a subtle one shows only
+                            // when there's something to send.
+                            let send_btn = can_send && send_button(ui, pal).clicked();
+                            if enter || send_btn {
+                                send = true;
+                                resp.request_focus();
+                            }
+                        });
+                    })
+                    .response
+                    .rect;
+
+                // Reply / edit banner, attached to the top of the box.
+                let (banner, ping) = match &self.compose {
+                    Compose::New => (None, None),
+                    Compose::Reply { author, ping, .. } => {
+                        (Some(("Replying to ", author.clone())), Some(*ping))
+                    }
+                    Compose::Edit { .. } => (Some(("Editing message", String::new())), None),
+                };
+                if let Some((what, who)) = banner {
+                    egui::Frame::new()
+                        .fill(pal.sidebar)
+                        .corner_radius(egui::CornerRadius {
+                            nw: 8,
+                            ne: 8,
+                            sw: 0,
+                            se: 0,
+                        })
+                        .inner_margin(egui::Margin::symmetric(12, 6))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                ui.label(RichText::new(what).size(13.0).color(pal.muted));
+                                if !who.is_empty() {
+                                    ui.label(RichText::new(who).size(13.0).bold().color(pal.text));
+                                } else {
+                                    ui.label(
+                                        RichText::new(" · Esc to cancel")
+                                            .size(13.0)
+                                            .color(pal.muted),
+                                    );
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let x = ui
                                             .add(
                                                 egui::Button::new(
-                                                    RichText::new(text)
-                                                        .size(12.0)
-                                                        .bold()
-                                                        .color(col),
+                                                    RichText::new(icons::X)
+                                                        .size(16.0)
+                                                        .color(pal.muted),
                                                 )
                                                 .frame(false),
                                             )
-                                            .on_hover_text(if on {
-                                                "Mentioning the author (click to turn off)"
+                                            .on_hover_text("Cancel (Esc)");
+                                        cancel |= x.clicked();
+                                        if let Some(on) = ping {
+                                            ui.add_space(10.0);
+                                            // Discord's "@ ON" switch: ping the author?
+                                            let (text, col) = if on {
+                                                ("@ ON", pal.accent)
                                             } else {
-                                                "Not mentioning the author (click to turn on)"
-                                            });
-                                        toggle_ping = chip.clicked();
-                                        ui.add_space(6.0);
-                                    }
-                                },
-                            );
+                                                ("@ OFF", pal.muted)
+                                            };
+                                            let chip = ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new(text)
+                                                            .size(12.0)
+                                                            .bold()
+                                                            .color(col),
+                                                    )
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text(if on {
+                                                    "Mentioning the author (click to turn off)"
+                                                } else {
+                                                    "Not mentioning the author (click to turn on)"
+                                                });
+                                            toggle_ping = chip.clicked();
+                                            ui.add_space(6.0);
+                                        }
+                                    },
+                                );
+                            });
                         });
-                    });
-            }
+                }
+            })
+            .response
+            .rect;
 
-            // Files waiting to upload
-            if !self.pending_files.is_empty() {
-                ui.add_space(6.0);
-                ui.with_layout(
-                    egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
-                    |ui| {
-                        ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
-                        let mut total = 0;
-                        for (i, p) in self.pending_files.iter().enumerate() {
-                            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-                            total += size;
-                            let name = p
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default();
-                            egui::Frame::new()
-                                .fill(pal.input)
-                                .corner_radius(6)
-                                .inner_margin(egui::Margin::symmetric(8, 4))
-                                .show(ui, |ui| {
-                                    ui.label(RichText::new(format!("📄 {name}")).small());
-                                    ui.label(
-                                        RichText::new(human_size(size)).small().color(pal.muted),
-                                    );
-                                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+        // Files waiting to upload: Discord's attachment cards above the box
+        // (floating over the chat, so the message box keeps its height),
+        // with spoiler (eye) and remove (trash) buttons. The message text is
+        // the comment.
+        if !self.pending_files.is_empty() {
+            let w = box_rect.width();
+            egui::Area::new(egui::Id::unique("rc_upload_cards"))
+                .order(egui::Order::Middle)
+                .pivot(egui::Align2::LEFT_BOTTOM)
+                .fixed_pos(egui::pos2(box_rect.left(), used.top() - 6.0))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::new()
+                        .fill(pal.input)
+                        .corner_radius(8)
+                        .inner_margin(10)
+                        .shadow(egui::Shadow {
+                            offset: [0, -2],
+                            blur: 8,
+                            spread: 0,
+                            color: Color32::from_black_alpha(if pal.dark { 60 } else { 20 }),
+                        })
+                        .show(ui, |ui| {
+                            ui.set_width(w - 20.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
+                                let mut total = 0;
+                                for (i, p) in self.pending_files.iter().enumerate() {
+                                    let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                                    total += size;
+                                    let spoiler = self.pending_spoilers.contains(p);
+                                    let (t, r) = upload_card(ui, p, size, spoiler, pal);
+                                    if t {
+                                        toggle_spoiler = Some(p.clone());
+                                    }
+                                    if r {
                                         remove = Some(i);
                                     }
-                                });
-                        }
-                        if total > UPLOAD_LIMIT {
-                            ui.label(
-                                RichText::new("Over 10 MB, Discord may reject this")
-                                    .small()
-                                    .color(pal.danger),
-                            );
-                        }
-                    },
-                );
-            }
-        });
+                                }
+                                if total > UPLOAD_LIMIT {
+                                    ui.label(
+                                        RichText::new("Over 10 MB, Discord may reject this")
+                                            .small()
+                                            .color(pal.danger),
+                                    );
+                                }
+                            });
+                        });
+                });
+        }
 
         if let Some(i) = remove {
-            self.pending_files.remove(i);
+            let p = self.pending_files.remove(i);
+            self.pending_spoilers.remove(&p);
+        }
+        if let Some(p) = toggle_spoiler
+            && !self.pending_spoilers.remove(&p)
+        {
+            self.pending_spoilers.insert(p);
+        }
+        match composer_action {
+            Some(ComposerAction::ToggleGifPicker(anchor)) => {
+                if let Some((picker, _)) = self.gif_picker.take() {
+                    picker.free(ui.ctx());
+                } else {
+                    self.gif_picker = Some((GifPicker::default(), anchor));
+                }
+            }
+            Some(ComposerAction::OpenEmojiPicker(anchor)) => {
+                // Hook for the emoji picker (src/emoji_picker.rs, built on
+                // another branch): for now a small placeholder popup.
+                self.emoji_picker = match self.emoji_picker {
+                    Some(_) => None,
+                    None => Some(anchor),
+                };
+            }
+            None => {}
         }
         if toggle_ping && let Compose::Reply { ping, .. } = &mut self.compose {
             *ping = !*ping;
@@ -2915,6 +3310,29 @@ impl State {
     /// accounts, the full list for bots with the Server Members intent),
     /// people in the conversation for DMs, and "recently active" otherwise.
     fn members_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
+        // Same 48 px header strip as the chat, so the shadow line runs
+        // across (Discord's header spans chat + members).
+        let header = header_bar(ui, pal);
+        egui::Frame::new()
+            .inner_margin(egui::Margin {
+                left: 8,
+                right: 4,
+                top: 8,
+                bottom: 0,
+            })
+            .show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                self.members_inner(ui, header, config, pal);
+            });
+    }
+
+    fn members_inner(
+        &mut self,
+        ui: &mut egui::Ui,
+        header: egui::Rect,
+        config: &Config,
+        pal: &Palette,
+    ) {
         if !config.modules.member_list {
             ui.label(
                 RichText::new("Member list is off (Settings → Modules)")
@@ -3025,19 +3443,25 @@ impl State {
             None => fallback.get(i).and_then(Option::as_ref),
         };
         let total = list.map_or(fallback.len(), |l| l.total_rows().min(100_000));
-        if let Some(l) = list.filter(|l| l.member_count > 0) {
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new(format!(
-                        "{} members · {} online",
-                        l.member_count, l.online_count
-                    ))
-                    .size(11.5)
-                    .color(pal.muted),
-                );
-            });
-        }
+        let title = match list.filter(|l| l.member_count > 0) {
+            Some(l) => format!("Members — {} · {} online", l.member_count, l.online_count),
+            None => "Members".to_string(),
+        };
+        let galley = truncated(
+            ui,
+            &title,
+            theme::bold_font(14.0),
+            pal.muted,
+            header.width() - 32.0,
+        );
+        ui.painter().galley(
+            egui::pos2(
+                header.left() + 16.0,
+                header.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            pal.muted,
+        );
         let (clicked, visible) = members::list_ui(
             ui,
             members::ListView {
@@ -3113,7 +3537,7 @@ impl State {
                     .unwrap_or_default();
                 let mut items = autocomplete::rank_named(&q.text, candidates);
                 for i in &mut items {
-                    i.glyph = "#".into();
+                    i.glyph = icons::HASH.into();
                 }
                 items
             }
@@ -3222,6 +3646,8 @@ impl State {
     fn submit(&mut self, channel_id: String) {
         let content = self.draft.trim().to_string();
         let files = std::mem::take(&mut self.pending_files);
+        let spoiler_set = std::mem::take(&mut self.pending_spoilers);
+        let spoilers: Vec<bool> = files.iter().map(|p| spoiler_set.contains(p)).collect();
         if content.is_empty() && files.is_empty() {
             return;
         }
@@ -3237,6 +3663,7 @@ impl State {
                 reply_to: None,
                 reply_ping: false,
                 files,
+                spoilers,
             },
             Compose::Reply {
                 message_id, ping, ..
@@ -3246,6 +3673,7 @@ impl State {
                 reply_to: Some(message_id),
                 reply_ping: ping,
                 files,
+                spoilers,
             },
         };
         let _ = self.tx.send(req);
@@ -3256,8 +3684,10 @@ impl State {
     /// Status bar module: a thin bar at the bottom like Discord Messenger's
     /// (connection, where you are, who's typing, RAM).
     fn status_bar(&self, ui: &mut egui::Ui, config: &Config, pal: &Palette, ram: Option<u64>) {
+        // Discord Messenger's segmented status bar: connection | where you
+        // are | unread mentions … typing | RAM, each with a line icon.
         egui::Panel::bottom("status_bar")
-            .exact_size(22.0)
+            .exact_size(24.0)
             .frame(
                 egui::Frame::new()
                     .fill(pal.servers)
@@ -3266,26 +3696,49 @@ impl State {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    let small = |t: &str| RichText::new(t).size(11.5).color(pal.muted);
-                    let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
-                    let dot = if self.connected { pal.online } else { pal.idle };
-                    ui.painter().circle_filled(r.center(), 4.0, dot);
+                    let small = |t: &str| RichText::new(t).size(12.0).color(pal.muted);
+                    let seg = |ui: &mut egui::Ui| {
+                        let (r, _) = ui.allocate_exact_size(vec2(9.0, 14.0), egui::Sense::hover());
+                        ui.painter().vline(
+                            r.center().x,
+                            r.y_range(),
+                            egui::Stroke::new(1.0, pal.divider),
+                        );
+                    };
+                    let (icon, col) = if self.connected {
+                        (icons::WIFI, pal.online)
+                    } else {
+                        (icons::WIFI_SLASH, pal.idle)
+                    };
+                    ui.label(RichText::new(icon).size(14.0).color(col));
                     ui.label(small(&self.status));
                     if let Some(cid) = &self.selected_channel
                         && let Some((g, c)) = self.find_channel(cid)
                     {
-                        ui.separator();
+                        seg(ui);
+                        ui.label(RichText::new(c.icon()).size(14.0).color(pal.muted));
                         let place = if g.is_dms() {
-                            format!("{} {}", c.icon(), c.name)
+                            c.name.clone()
                         } else {
-                            format!("{} {} · {}", c.icon(), c.name, g.name)
+                            format!("{} · {}", c.name, g.name)
                         };
                         ui.add(egui::Label::new(small(&place)).truncate());
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(bytes) = ram {
-                            ui.label(small(&format!("RAM {:.0} MB", bytes as f64 / 1_048_576.0)));
+                            ui.label(small(&format!("{:.0} MB", bytes as f64 / 1_048_576.0)));
+                            ui.label(RichText::new(icons::MEMORY).size(14.0).color(pal.muted))
+                                .on_hover_text("RAM used by RustCord");
                             ui.ctx().request_repaint_after(Duration::from_secs(2));
+                        }
+                        let mentions = self.inbox.unread();
+                        if mentions > 0 {
+                            seg(ui);
+                            ui.label(small(&format!(
+                                "{mentions} mention{}",
+                                if mentions == 1 { "" } else { "s" }
+                            )));
+                            ui.label(RichText::new(icons::AT).size(14.0).color(pal.mention));
                         }
                         let typing = config
                             .modules
@@ -3295,12 +3748,13 @@ impl State {
                             .and_then(|c| self.typing.get(c))
                             .filter(|t| !t.is_empty());
                         if let Some(t) = typing {
-                            ui.separator();
+                            seg(ui);
                             let text = match t.as_slice() {
                                 [one] => format!("{} is typing…", one.name),
                                 _ => format!("{} people are typing…", t.len()),
                             };
                             ui.label(small(&text));
+                            ui.label(RichText::new(icons::PENCIL).size(14.0).color(pal.muted));
                         }
                     });
                 });
@@ -3310,6 +3764,7 @@ impl State {
     /// Profile card, pins, dialogs and the "drop files here" overlay.
     fn overlays(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let ctx = ui.ctx().clone();
+        self.picker_overlays(&ctx, config, pal);
         self.popout_overlay(&ctx, config, pal);
         self.pins_overlay(&ctx, config, pal);
         self.dialogs(&ctx, config, pal);
@@ -3370,8 +3825,78 @@ impl State {
 }
 
 impl State {
+    /// GIF picker and the emoji picker placeholder above the message box.
+    fn picker_overlays(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        if (!config.modules.gif_picker || self.selected_channel.is_none())
+            && let Some((p, _)) = self.gif_picker.take()
+        {
+            p.free(ctx);
+        }
+        if let Some((picker, anchor)) = &mut self.gif_picker {
+            match picker.show(ctx, *anchor, config.modules.images, pal) {
+                Some(GifAction::Load(query)) => {
+                    let _ = self.tx.send(ToBackend::LoadGifs { query });
+                }
+                Some(GifAction::Pick(url)) => {
+                    // The user clicked this GIF: send its link, like Discord.
+                    if let Some(cid) = self.selected_channel.clone() {
+                        let _ = self.tx.send(ToBackend::Send {
+                            channel_id: cid,
+                            content: url,
+                            reply_to: None,
+                            reply_ping: false,
+                            files: Vec::new(),
+                            spoilers: Vec::new(),
+                        });
+                    }
+                    if let Some((p, _)) = self.gif_picker.take() {
+                        p.free(ctx);
+                    }
+                }
+                Some(GifAction::Close) => {
+                    if let Some((p, _)) = self.gif_picker.take() {
+                        p.free(ctx);
+                    }
+                }
+                None => {}
+            }
+        }
+        // Placeholder until src/emoji_picker.rs is merged.
+        if let Some(anchor) = self.emoji_picker {
+            let area = egui::Area::new(egui::Id::unique("rc_emoji_placeholder"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(egui::pos2(anchor.right() - 280.0, anchor.top() - 96.0))
+                .constrain(true)
+                .show(ctx, |ui| {
+                    widgets::menu_frame(pal).show(ui, |ui| {
+                        ui.set_width(264.0);
+                        ui.label(
+                            RichText::new(icons::label(icons::SMILEY, "Emoji"))
+                                .bold()
+                                .color(pal.strong),
+                        );
+                        ui.label(
+                            RichText::new("The emoji picker is coming soon. Type :name: in the message box to search emoji.")
+                                .size(13.0)
+                                .color(pal.muted),
+                        );
+                    });
+                });
+            let outside = ctx.input(|i| {
+                i.pointer.any_click()
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|p| !area.response.rect.contains(p) && !anchor.contains(p))
+            });
+            if outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.emoji_picker = None;
+            }
+        }
+    }
+
     /// Link warning, pin / leave confirmations, custom status, Ctrl+K.
     fn dialogs(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        self.shortcuts_dialog(ctx, pal);
         if let Some(w) = &mut self.link_warning
             && let Some(decision) = w.show(ctx, pal)
         {
@@ -3497,6 +4022,132 @@ impl State {
                 }
                 None => {}
             }
+        }
+    }
+
+    /// Discord's keyboard shortcuts (Ctrl+/ lists them):
+    /// Alt+↑/↓ previous / next channel, Alt+Shift+↑/↓ previous / next
+    /// unread channel, Ctrl+Alt+↑/↓ previous / next server, Ctrl+, settings.
+    fn shortcuts(&mut self, ctx: &egui::Context, config: &Config) {
+        use egui::{Key, KeyboardShortcut as K, Modifiers as M};
+        let alt = M::ALT;
+        let alt_shift = M::ALT | M::SHIFT;
+        let ctrl_alt = M::COMMAND | M::ALT;
+        let (prev, next, prev_unread, next_unread, prev_server, next_server, settings, help) = ctx
+            .input_mut(|i| {
+                (
+                    i.consume_shortcut(&K::new(alt, Key::ArrowUp)),
+                    i.consume_shortcut(&K::new(alt, Key::ArrowDown)),
+                    i.consume_shortcut(&K::new(alt_shift, Key::ArrowUp)),
+                    i.consume_shortcut(&K::new(alt_shift, Key::ArrowDown)),
+                    i.consume_shortcut(&K::new(ctrl_alt, Key::ArrowUp)),
+                    i.consume_shortcut(&K::new(ctrl_alt, Key::ArrowDown)),
+                    i.consume_shortcut(&K::new(M::COMMAND, Key::Comma)),
+                    i.consume_shortcut(&K::new(M::COMMAND, Key::Slash)),
+                )
+            });
+        if settings {
+            self.open_settings = true;
+        }
+        if help {
+            self.show_shortcuts = !self.show_shortcuts;
+        }
+        let step = |back: bool| if back { -1 } else { 1 };
+        if prev || next {
+            self.step_channel(step(prev), false, ctx, config);
+        }
+        if prev_unread || next_unread {
+            self.step_channel(step(prev_unread), true, ctx, config);
+        }
+        if prev_server || next_server {
+            let mut ids = vec![DM_GUILD_ID.to_string()];
+            ids.extend(self.guilds.iter().map(|g| g.id.clone()));
+            let cur = self
+                .selected_guild
+                .as_ref()
+                .and_then(|g| ids.iter().position(|x| x == g))
+                .unwrap_or(0) as i64;
+            let n = ids.len() as i64;
+            let to = (cur + step(prev_server)).rem_euclid(n) as usize;
+            self.select_guild(ids[to].clone());
+        }
+    }
+
+    /// Move to the previous / next (unread) text channel of the open server.
+    fn step_channel(&mut self, dir: i64, unread_only: bool, ctx: &egui::Context, config: &Config) {
+        let Some(g) = self.current_guild() else {
+            return;
+        };
+        let ids: Vec<String> = g
+            .channel_groups()
+            .iter()
+            .flat_map(|grp| grp.channels.iter())
+            .filter(|c| !c.is_voice())
+            .map(|c| c.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let n = ids.len() as i64;
+        let cur = self
+            .selected_channel
+            .as_ref()
+            .and_then(|c| ids.iter().position(|x| x == c))
+            .map_or(if dir > 0 { -1 } else { 0 }, |p| p as i64);
+        for k in 1..=n {
+            let id = &ids[(cur + dir * k).rem_euclid(n) as usize];
+            if !unread_only || self.reads.is_unread(id) || self.reads.mentions(id) > 0 {
+                let id = id.clone();
+                self.select_channel(id, ctx, config);
+                return;
+            }
+        }
+    }
+
+    /// Ctrl+/: the keyboard shortcuts list.
+    fn shortcuts_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
+        if !self.show_shortcuts {
+            return;
+        }
+        let modal = egui::Modal::new(egui::Id::unique("rc_shortcuts")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.label(
+                RichText::new(icons::label(icons::KEYBOARD, "Keyboard Shortcuts"))
+                    .bold()
+                    .size(18.0)
+                    .color(pal.strong),
+            );
+            ui.add_space(8.0);
+            let rows = [
+                ("Ctrl + K", "Quick switcher"),
+                ("Alt + ↑ / ↓", "Previous / next channel"),
+                ("Alt + Shift + ↑ / ↓", "Previous / next unread channel"),
+                ("Ctrl + Alt + ↑ / ↓", "Previous / next server"),
+                ("Ctrl + ,", "User settings"),
+                ("Ctrl + S", "Save settings (in Settings)"),
+                ("Enter / Esc", "Send / cancel reply or edit"),
+                ("Tab / Enter", "Accept a suggestion (@, #, :)"),
+                ("Ctrl + /", "Show this list"),
+            ];
+            egui::Grid::new("rc_shortcut_grid")
+                .num_columns(2)
+                .spacing(vec2(24.0, 8.0))
+                .show(ui, |ui| {
+                    for (keys, what) in rows {
+                        egui::Frame::new()
+                            .fill(pal.input)
+                            .corner_radius(4)
+                            .inner_margin(egui::Margin::symmetric(6, 2))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(keys).bold().size(13.0).color(pal.strong));
+                            });
+                        ui.label(RichText::new(what).color(pal.text));
+                        ui.end_row();
+                    }
+                });
+        });
+        if modal.should_close() {
+            self.show_shortcuts = false;
         }
     }
 
@@ -3692,6 +4343,23 @@ fn forget_message_images(ctx: &egui::Context, messages: &[Message]) {
                 ctx.forget_image(&uri);
             }
         }
+        let fwd = m.forwarded.as_ref();
+        for st in m
+            .stickers
+            .iter()
+            .chain(fwd.into_iter().flat_map(|f| &f.stickers))
+        {
+            if let Some(url) = st.image_url(STICKER_SIZE as u32) {
+                ctx.forget_image(&url);
+            }
+        }
+        for a in fwd
+            .into_iter()
+            .flat_map(|f| &f.attachments)
+            .filter(|a| a.is_image())
+        {
+            ctx.forget_image(&a.thumbnail_url(w as u32, h as u32));
+        }
     }
 }
 
@@ -3786,12 +4454,16 @@ fn category_header(
     let (rect, resp) =
         ui.allocate_exact_size(vec2(ui.available_width(), 22.0), egui::Sense::click());
     let col = if resp.hovered() { pal.text } else { pal.muted };
-    let chevron = if collapsed { "▸" } else { "▾" };
+    let chevron = if collapsed {
+        icons::CARET_RIGHT
+    } else {
+        icons::CARET_DOWN
+    };
     ui.painter().text(
-        rect.left_center() + vec2(2.0, 0.0),
+        rect.left_center() + vec2(1.0, 0.0),
         egui::Align2::LEFT_CENTER,
         chevron,
-        egui::FontId::proportional(11.0),
+        icons::font(11.0),
         col,
     );
     let galley = truncated(
@@ -3817,18 +4489,21 @@ struct ChannelRow {
     mentions: u32,
     /// DM partner's status (shown on their avatar).
     status: Option<Status>,
+    /// DM partner's custom status / activity (second line).
+    activity: Option<String>,
 }
 
 /// One channel in the list: "# name" (32 px) or, for DMs, avatar + name
-/// (42 px); hover / selected backgrounds, white unread text and pill,
-/// mention badge. Voice channels are listed greyed out.
+/// (42 px) with a × to close on hover; hover / selected backgrounds, white
+/// unread text and pill, mention badge. Voice channels are listed greyed
+/// out. Returns the row's response and whether × was clicked.
 fn channel_row(
     ui: &mut egui::Ui,
     c: &crate::types::Channel,
     row: &ChannelRow,
     config: &Config,
     pal: &Palette,
-) -> egui::Response {
+) -> (egui::Response, bool) {
     let dm = c.is_dm();
     let h = if dm { 42.0 } else { 32.0 };
     let sense = if c.is_voice() {
@@ -3874,8 +4549,8 @@ fn channel_row(
                 ui.painter().text(
                     a.center(),
                     egui::Align2::CENTER_CENTER,
-                    "👥",
-                    egui::FontId::proportional(15.0),
+                    icons::USERS,
+                    icons::fill_font(17.0),
                     Color32::WHITE,
                 );
             }
@@ -3896,7 +4571,7 @@ fn channel_row(
             egui::pos2(x + 10.0, rect.center().y),
             egui::Align2::CENTER_CENTER,
             c.icon(),
-            egui::FontId::proportional(if c.icon() == "#" { 20.0 } else { 15.0 }),
+            icons::font(20.0),
             if row.selected || hovered || bold {
                 color
             } else {
@@ -3905,13 +4580,57 @@ fn channel_row(
         );
         x += 28.0;
     }
-    let right_pad = if row.mentions > 0 { 34.0 } else { 8.0 };
-    let galley = truncated(ui, &c.name, font, color, rect.right() - right_pad - x);
-    ui.painter().galley(
-        egui::pos2(x, rect.center().y - galley.size().y / 2.0),
-        galley,
-        color,
+    // DMs: × on hover closes the conversation (like Discord).
+    let show_close = dm && hovered && row.mentions == 0;
+    let close_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - 18.0, rect.center().y),
+        vec2(20.0, 20.0),
     );
+    let mut close = false;
+    if show_close {
+        let over = ui.rect_contains_pointer(close_rect);
+        icons::paint(
+            ui,
+            close_rect,
+            icons::X,
+            icons::font(16.0),
+            if over { pal.strong } else { pal.muted },
+        );
+        if over && resp.clicked() {
+            close = true;
+        }
+    }
+    let right_pad = if row.mentions > 0 || show_close {
+        34.0
+    } else {
+        8.0
+    };
+    let galley = truncated(ui, &c.name, font, color, rect.right() - right_pad - x);
+    match row.activity.as_deref().filter(|_| dm) {
+        // Name over the custom status / activity, like Discord's DM list.
+        Some(act) => {
+            let sub = truncated(
+                ui,
+                act,
+                egui::FontId::proportional(12.0),
+                pal.muted,
+                rect.right() - right_pad - x,
+            );
+            let total = galley.size().y + sub.size().y - 3.0;
+            let top = rect.center().y - total / 2.0;
+            let gh = galley.size().y;
+            ui.painter().galley(egui::pos2(x, top), galley, color);
+            ui.painter()
+                .galley(egui::pos2(x, top + gh - 3.0), sub, pal.muted);
+        }
+        None => {
+            ui.painter().galley(
+                egui::pos2(x, rect.center().y - galley.size().y / 2.0),
+                galley,
+                color,
+            );
+        }
+    }
     if row.unread && !row.selected {
         unread_pill(ui, rect, 8.0, pal);
     }
@@ -3930,13 +4649,18 @@ fn channel_row(
         );
     }
     if c.is_voice() {
-        return resp.on_hover_text("Voice channels are coming later");
+        return (resp.on_hover_text("Voice channels are coming later"), false);
     }
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    match row.status.filter(|_| dm) {
-        Some(st) => resp.on_hover_text(st.label()),
-        None => resp,
-    }
+    let resp = if show_close && ui.rect_contains_pointer(close_rect) {
+        resp.on_hover_text("Close DM")
+    } else {
+        match row.status.filter(|_| dm) {
+            Some(st) => resp.on_hover_text(st.label()),
+            None => resp,
+        }
+    };
+    (resp, close)
 }
 
 /// Discord's ⊕ upload button: a filled circle with a plus cut out.
@@ -3956,24 +4680,89 @@ fn plus_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
         .on_hover_text("Upload files (or drag them onto the window)")
 }
 
-/// The subtle ➤ at the right of the message box (only when there's
+/// The subtle send arrow at the right of the message box (only when there's
 /// something to send).
 fn send_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 20.0), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), egui::Sense::click());
     let col = if resp.hovered() {
         pal.accent
     } else {
         pal.muted
     };
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        "➤",
-        egui::FontId::proportional(18.0),
-        col,
-    );
+    icons::paint(ui, rect, icons::SEND, icons::fill_font(20.0), col);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Send (Enter)")
+}
+
+/// A file waiting to upload (Discord's attachment card): icon, name, size,
+/// SPOILER tag, and spoiler / remove buttons. Returns (toggle spoiler,
+/// remove).
+fn upload_card(
+    ui: &mut egui::Ui,
+    path: &std::path::Path,
+    size: u64,
+    spoiler: bool,
+    pal: &Palette,
+) -> (bool, bool) {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut toggle = false;
+    let mut remove = false;
+    egui::Frame::new()
+        .fill(pal.sidebar)
+        .corner_radius(6)
+        .inner_margin(8)
+        .show(ui, |ui| {
+            ui.set_width(196.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let icon = if spoiler {
+                    icons::EYE_SLASH
+                } else {
+                    icons::FILE
+                };
+                ui.label(RichText::new(icon).size(26.0).color(pal.muted));
+                ui.vertical(|ui| {
+                    ui.set_width(104.0);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.add(
+                        egui::Label::new(RichText::new(&name).size(13.0).color(pal.strong))
+                            .truncate(),
+                    );
+                    let mut info = human_size(size);
+                    if spoiler {
+                        info.push_str(" · SPOILER");
+                    }
+                    ui.label(RichText::new(info).size(11.5).color(pal.muted));
+                });
+                let tip = if spoiler {
+                    "Remove spoiler"
+                } else {
+                    "Mark as spoiler"
+                };
+                let eye = if spoiler {
+                    icons::EYE
+                } else {
+                    icons::EYE_SLASH
+                };
+                toggle = widgets::icon_button_sized(ui, eye, tip, spoiler, true, 26.0, 16.0, pal)
+                    .clicked();
+                remove = widgets::icon_button_sized(
+                    ui,
+                    icons::TRASH,
+                    "Remove",
+                    false,
+                    true,
+                    26.0,
+                    16.0,
+                    pal,
+                )
+                .clicked();
+            });
+        });
+    (toggle, remove)
 }
 
 /// "● ● ●  Sam is typing…" under the message box, with Discord's
@@ -4027,43 +4816,6 @@ fn typing_row(ui: &mut egui::Ui, names: &[&str], pal: &Palette) {
         galley,
         pal.muted,
     );
-}
-
-/// A square icon button like Discord's header / user-panel icons: muted
-/// glyph, brighter with a soft background on hover, white when active.
-fn icon_button(
-    ui: &mut egui::Ui,
-    glyph: &str,
-    tooltip: &str,
-    active: bool,
-    enabled: bool,
-    pal: &Palette,
-) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), egui::Sense::click());
-    let hovered = resp.hovered() && enabled;
-    if hovered {
-        ui.painter().rect_filled(rect.shrink(2.0), 4, pal.hover);
-    }
-    let col = if !enabled {
-        pal.muted_text()
-    } else if active || hovered {
-        pal.strong
-    } else {
-        pal.muted
-    };
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        glyph,
-        egui::FontId::proportional(18.0),
-        col,
-    );
-    let resp = if enabled {
-        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-    } else {
-        resp
-    };
-    resp.on_hover_text(tooltip)
 }
 
 /// Unread / mention / muted state of a server icon.
@@ -4187,6 +4939,12 @@ fn inbox_row(ui: &mut egui::Ui, item: &InboxItem, pal: &Palette) -> egui::Respon
 /// The rail shows server names when dragged at least this wide.
 const RAIL_NAMES_WIDTH: f32 = 160.0;
 
+/// Server icons are 48 px; a rail squeezed below Discord's 72 px (small
+/// window, custom layout) shrinks them instead of clipping them.
+fn rail_icon_size(width: f32) -> f32 {
+    (width - 20.0).clamp(28.0, 48.0)
+}
+
 enum RailIcon<'a> {
     Home,
     Image(&'a str),
@@ -4206,23 +4964,23 @@ fn rail_item(
     config: &Config,
     pal: &Palette,
 ) -> egui::Response {
-    const SIZE: f32 = 48.0;
     let width = ui.available_width();
     let wide = width >= RAIL_NAMES_WIDTH;
-    let (row, resp) = ui.allocate_exact_size(vec2(width, SIZE), egui::Sense::click());
+    let size = rail_icon_size(width);
+    let (row, resp) = ui.allocate_exact_size(vec2(width, size), egui::Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     let hovered = resp.hovered();
     let ctx = ui.ctx().clone();
 
     // Circle (radius 24) → rounded square (radius 16).
     let t = ctx.animate_bool_with_time(resp.id.with("shape"), selected || hovered, 0.12);
-    let radius = egui::lerp(SIZE / 2.0..=16.0, t);
+    let radius = egui::lerp(size / 2.0..=size / 3.0, t);
     let x = if wide {
         row.left() + 12.0
     } else {
-        row.center().x - SIZE / 2.0
+        row.center().x - size / 2.0
     };
-    let rect = egui::Rect::from_min_size(egui::pos2(x, row.top()), vec2(SIZE, SIZE));
+    let rect = egui::Rect::from_min_size(egui::pos2(x, row.top()), vec2(size, size));
     let active = selected || hovered;
 
     match icon {
@@ -4247,7 +5005,7 @@ fn rail_item(
                     let size = if i.chars().count() > 2 { 14.0 } else { 16.0 };
                     (i, theme::bold_font(size))
                 }
-                _ => ("💬", egui::FontId::proportional(20.0)),
+                _ => (icons::DISCORD_LOGO, icons::fill_font(26.0)),
             };
             let col = if active {
                 Color32::WHITE
@@ -4363,17 +5121,17 @@ fn folder_item(
     config: &Config,
     pal: &Palette,
 ) -> egui::Response {
-    const SIZE: f32 = 48.0;
     let width = ui.available_width();
     let wide = width >= RAIL_NAMES_WIDTH;
-    let (row, resp) = ui.allocate_exact_size(vec2(width, SIZE), egui::Sense::click());
+    let size = rail_icon_size(width);
+    let (row, resp) = ui.allocate_exact_size(vec2(width, size), egui::Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     let x = if wide {
         row.left() + 12.0
     } else {
-        row.center().x - SIZE / 2.0
+        row.center().x - size / 2.0
     };
-    let rect = egui::Rect::from_min_size(egui::pos2(x, row.top()), vec2(SIZE, SIZE));
+    let rect = egui::Rect::from_min_size(egui::pos2(x, row.top()), vec2(size, size));
     let hovered = resp.hovered();
     let painter = ui.painter();
     if f.open {
@@ -4381,8 +5139,8 @@ fn folder_item(
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "📁",
-            egui::FontId::proportional(22.0),
+            icons::FOLDER,
+            icons::fill_font(24.0),
             f.color,
         );
     } else {
@@ -4392,8 +5150,8 @@ fn folder_item(
             f.color.gamma_multiply(if hovered { 0.5 } else { 0.35 }),
         );
         // 2×2 grid of mini icons.
-        let mini = 18.0;
-        let gap = 4.0;
+        let mini = 18.0 * size / 48.0;
+        let gap = 4.0 * size / 48.0;
         let start = rect.center() - vec2(mini + gap / 2.0, mini + gap / 2.0);
         for (i, g) in f.guilds.iter().take(4).enumerate() {
             let (cx, cy) = ((i % 2) as f32, (i / 2) as f32);
@@ -4471,7 +5229,7 @@ fn folder_item(
 }
 
 /// Lay out one line of text, cut off with "…" past `max_width`.
-fn truncated(
+pub(crate) fn truncated(
     ui: &egui::Ui,
     text: &str,
     font: egui::FontId,
@@ -4538,6 +5296,8 @@ struct Body<'a> {
     blocks: &'a [Block],
     /// Reply snippet as plain text.
     reply: Option<&'a str>,
+    /// Text of a forwarded message.
+    forwarded: Option<&'a [Block]>,
     lookup: &'a dyn markdown::Lookup,
 }
 
@@ -4713,7 +5473,9 @@ fn message_row(
         );
     }
 
-    egui::Popup::context_menu(&resp).show(|ui| message_menu(ui, m, rc.menu, &mut action));
+    egui::Popup::context_menu(&resp)
+        .frame(widgets::menu_frame(pal))
+        .show(|ui| message_menu(ui, m, rc.menu, &mut action, pal));
 
     if hovered {
         hover_bar(ui, m, rc.menu, rect, more_id, bar_id, &mut action, pal);
@@ -4807,16 +5569,22 @@ fn message_content(
     let edited = |ui: &mut egui::Ui| {
         if m.edited {
             ui.add_space(4.0);
-            ui.add(
+            let r = ui.add(
                 egui::Label::new(RichText::new("(edited)").size(10.5).color(pal.muted))
+                    .sense(egui::Sense::hover())
                     .selectable(false),
             );
+            if m.edited_time > 0 {
+                r.on_hover_text(format!("Edited {}", timefmt::long(m.edited_time)));
+            }
         }
     };
     if !body.blocks.is_empty() {
         let out = markdown::render_with(ui, body.blocks, &rctx, edited);
         if let Some(r) = &out.response {
-            egui::Popup::context_menu(r).show(|ui| message_menu(ui, m, rc.menu, action));
+            egui::Popup::context_menu(r)
+                .frame(widgets::menu_frame(pal))
+                .show(|ui| message_menu(ui, m, rc.menu, action, pal));
         }
         match out.action {
             Some(MarkdownAction::Link(url)) => *action = Some(MessageAction::OpenLink(url)),
@@ -4865,6 +5633,228 @@ fn message_content(
             *action = Some(MessageAction::OpenLink(url));
         }
     }
+    for st in &m.stickers {
+        sticker_ui(ui, st, config, pal);
+    }
+    if let Some(f) = &m.forwarded {
+        forwarded_ui(ui, m, f, body, config, pal, action);
+    }
+    if let Some(q) = &m.poll {
+        egui::Frame::new()
+            .fill(pal.sidebar)
+            .corner_radius(8)
+            .inner_margin(12)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(icons::label(icons::CHECKS, "Poll"))
+                        .size(12.0)
+                        .color(pal.muted),
+                );
+                ui.label(RichText::new(q).bold().size(15.0).color(pal.strong));
+                ui.label(
+                    RichText::new("Open Discord to see the answers and vote.")
+                        .size(12.0)
+                        .color(pal.muted),
+                );
+            });
+    }
+    // Never leave a message blank: say there's something we can't show.
+    let drew_something = !body.blocks.is_empty()
+        || (config.modules.embeds && !m.embeds.is_empty())
+        || !m.attachments.is_empty()
+        || !m.stickers.is_empty()
+        || m.forwarded.is_some()
+        || m.poll.is_some();
+    if !drew_something {
+        let what = if m.has_components {
+            "Buttons or menus RustCord can't show yet"
+        } else if !config.modules.embeds {
+            "Embed (the Embeds module is off)"
+        } else {
+            "Content RustCord can't show yet"
+        };
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(icons::INFO).size(14.0).color(pal.muted));
+            ui.label(RichText::new(what).italics().size(14.0).color(pal.muted));
+        });
+    }
+}
+
+/// Discord's system message line (joins, pins, calls, boosts, threads):
+/// a coloured icon in the avatar column, bold names, muted text, the time.
+fn system_row(
+    ui: &mut egui::Ui,
+    m: &Message,
+    line: &sysmsg::SystemLine,
+    pal: &Palette,
+) -> Option<MessageAction> {
+    use sysmsg::{Part, SysKind};
+    ui.add_space(GROUP_GAP - 7.0);
+    let (icon, col) = match line.kind {
+        SysKind::Join => (icons::ARROW_RIGHT, pal.online),
+        SysKind::Leave => (icons::ARROW_RIGHT, pal.danger),
+        SysKind::Pin => (icons::PUSH_PIN, pal.muted),
+        SysKind::Call => (icons::PHONE, pal.online),
+        SysKind::Boost => (icons::ROCKET, pal.accent),
+        SysKind::Thread => (icons::CHATS, pal.muted),
+        SysKind::Edit => (icons::PENCIL, pal.muted),
+        SysKind::Info => (icons::INFO, pal.muted),
+    };
+    // One wrapped text job: bold names, muted words, then the time.
+    let mut job = egui::text::LayoutJob::default();
+    for p in &line.parts {
+        let (text, font, color) = match p {
+            Part::Name(n) => (n.as_str(), theme::bold_font(15.0), pal.strong),
+            Part::Text(t) => (t.as_str(), egui::FontId::proportional(15.0), pal.muted),
+        };
+        if !text.is_empty() {
+            job.append(text, 0.0, egui::TextFormat::simple(font, color));
+        }
+    }
+    job.append(
+        &timefmt::full(m.time),
+        8.0,
+        egui::TextFormat::simple(egui::FontId::proportional(12.0), pal.muted),
+    );
+    let width = ui.available_width() - MSG_GUTTER - 48.0;
+    job.wrap = egui::text::TextWrapping {
+        max_width: width.max(60.0),
+        ..Default::default()
+    };
+    let galley = ui.painter().layout_job(job);
+    let h = galley.size().y.max(22.0);
+    let (rect, resp) =
+        ui.allocate_exact_size(vec2(ui.available_width(), h + 4.0), egui::Sense::hover());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 0, pal.msg_hover);
+    }
+    ui.painter().text(
+        egui::pos2(
+            rect.left() + MSG_PAD + MSG_AVATAR / 2.0,
+            rect.top() + 2.0 + 11.0,
+        ),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        icons::font(18.0),
+        col,
+    );
+    ui.painter().galley(
+        egui::pos2(rect.left() + MSG_GUTTER, rect.top() + 2.0),
+        galley,
+        pal.muted,
+    );
+    resp.on_hover_text(timefmt::long(m.time));
+    ui.add_space(2.0);
+    None
+}
+
+/// A sticker: its picture (PNG/APNG/GIF, 160 px) or, for Lottie stickers
+/// and with the Images module off, a card with its name.
+fn sticker_ui(ui: &mut egui::Ui, st: &sysmsg::Sticker, config: &Config, pal: &Palette) {
+    match st
+        .image_url(STICKER_SIZE as u32)
+        .filter(|_| config.modules.images)
+    {
+        Some(url) => {
+            ui.add(
+                egui::Image::from_uri(url)
+                    .fit_to_exact_size(vec2(STICKER_SIZE, STICKER_SIZE))
+                    .show_loading_spinner(true),
+            )
+            .on_hover_text(format!("Sticker: {}", st.name));
+        }
+        None => {
+            egui::Frame::new()
+                .fill(pal.sidebar)
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(icons::STICKER).size(20.0).color(pal.muted));
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            ui.label(RichText::new(&st.name).bold().color(pal.strong));
+                            ui.label(
+                                RichText::new(if st.format == 3 {
+                                    "Animated sticker"
+                                } else {
+                                    "Sticker"
+                                })
+                                .size(12.0)
+                                .color(pal.muted),
+                            );
+                        });
+                    });
+                });
+        }
+    }
+}
+
+/// Size stickers are shown at (Discord: 160).
+const STICKER_SIZE: f32 = 160.0;
+
+/// A forwarded message: "Forwarded" header and the original content behind
+/// a quote bar.
+fn forwarded_ui(
+    ui: &mut egui::Ui,
+    m: &Message,
+    f: &sysmsg::Forwarded,
+    body: &Body,
+    config: &Config,
+    pal: &Palette,
+    action: &mut Option<MessageAction>,
+) {
+    let start = ui.cursor().min;
+    egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: 12,
+            right: 0,
+            top: 2,
+            bottom: 2,
+        })
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(icons::label(icons::ARROW_SQUARE_OUT, "Forwarded"))
+                    .italics()
+                    .size(13.0)
+                    .color(pal.muted),
+            );
+            if let Some(blocks) = body.forwarded {
+                let key = format!("{}:fwd", m.id);
+                let mut rctx = markdown::RenderCtx::new(pal, body.lookup, &key);
+                rctx.emoji_images = config.modules.emoji_images;
+                rctx.bold_family = Some(theme::bold_family());
+                if let Some(MarkdownAction::Link(url)) = markdown::render(ui, blocks, &rctx).action
+                {
+                    *action = Some(MessageAction::OpenLink(url));
+                }
+            }
+            for a in &f.attachments {
+                if let Some(url) = attachment_ui(ui, a, config, pal) {
+                    *action = Some(MessageAction::OpenLink(url));
+                }
+            }
+            for st in &f.stickers {
+                sticker_ui(ui, st, config, pal);
+            }
+            if f.embeds > 0 {
+                ui.label(
+                    RichText::new(format!(
+                        "{} embed{} in the original message",
+                        f.embeds,
+                        if f.embeds == 1 { "" } else { "s" }
+                    ))
+                    .size(12.0)
+                    .color(pal.muted),
+                );
+            }
+        });
+    let end = ui.min_rect().bottom();
+    ui.painter().rect_filled(
+        egui::Rect::from_min_max(start, egui::pos2(start.x + 4.0, end)),
+        2,
+        pal.divider,
+    );
 }
 
 /// "N blocked messages — Show". Returns true if Show was clicked.
@@ -4873,7 +5863,7 @@ fn blocked_row(ui: &mut egui::Ui, n: usize, pal: &Palette) -> bool {
     let mut show = false;
     ui.horizontal(|ui| {
         ui.add_space(MSG_GUTTER);
-        ui.label(RichText::new("⛔").size(14.0).color(pal.muted));
+        ui.label(RichText::new(icons::PROHIBIT).size(15.0).color(pal.muted));
         let text = if n == 1 {
             "1 blocked message".to_string()
         } else {
@@ -4923,8 +5913,8 @@ fn reply_preview(
         ui.painter().text(
             egui::pos2(x, y),
             egui::Align2::LEFT_CENTER,
-            "↪",
-            egui::FontId::proportional(13.0),
+            icons::REPLY,
+            icons::font(14.0),
             line,
         );
         x += 18.0;
@@ -5017,11 +6007,13 @@ fn hover_bar(
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
-                        if icon_button(ui, "↪", "Reply", false, true, pal).clicked() {
+                        if icon_button(ui, icons::REPLY, "Reply", false, true, pal).clicked() {
                             *action =
                                 Some(MessageAction::Reply(m.id.clone(), m.author.name.clone()));
                         }
-                        if mine && icon_button(ui, "✏", "Edit", false, true, pal).clicked() {
+                        if mine
+                            && icon_button(ui, icons::PENCIL, "Edit", false, true, pal).clicked()
+                        {
                             *action = Some(MessageAction::Edit(m.id.clone(), m.content.clone()));
                         }
                         let (r, _) = ui.allocate_exact_size(vec2(32.0, 32.0), egui::Sense::hover());
@@ -5030,11 +6022,11 @@ fn hover_bar(
                         if more.hovered() || open {
                             ui.painter().rect_filled(r.shrink(2.0), 4, pal.hover);
                         }
-                        ui.painter().text(
-                            r.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "⋯",
-                            egui::FontId::proportional(18.0),
+                        icons::paint(
+                            ui,
+                            r,
+                            icons::DOTS,
+                            icons::font(20.0),
                             if more.hovered() || open {
                                 pal.strong
                             } else {
@@ -5044,7 +6036,8 @@ fn hover_bar(
                         let more = more.on_hover_text("More");
                         egui::Popup::menu(&more)
                             .align(egui::RectAlign::BOTTOM_END)
-                            .show(|ui| message_menu(ui, m, menu, action));
+                            .frame(widgets::menu_frame(pal))
+                            .show(|ui| message_menu(ui, m, menu, action, pal));
                     });
                 });
         });
@@ -5078,68 +6071,113 @@ fn message_menu(
     m: &Message,
     menu: &MenuCtx,
     action: &mut Option<MessageAction>,
+    pal: &Palette,
 ) {
-    let mut pick = |ui: &mut egui::Ui, label: &str, a: MessageAction| {
-        if ui.button(label).clicked() {
+    ui.set_min_width(200.0);
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let mut pick = |ui: &mut egui::Ui, icon: &str, label: &str, tone: Tone, a: MessageAction| {
+        if widgets::menu_item(ui, Some(icon), label, tone, pal).clicked() {
             *action = Some(a);
         }
     };
-    pick(
-        ui,
-        "↪ Reply",
-        MessageAction::Reply(m.id.clone(), m.author.name.clone()),
-    );
+    let n = Tone::Normal;
     if menu.mine {
         pick(
             ui,
-            "✏ Edit",
+            icons::PENCIL,
+            "Edit Message",
+            n,
             MessageAction::Edit(m.id.clone(), m.content.clone()),
         );
     }
+    pick(
+        ui,
+        icons::REPLY,
+        "Reply",
+        n,
+        MessageAction::Reply(m.id.clone(), m.author.name.clone()),
+    );
     if menu.can_pin {
         if m.pinned {
             pick(
                 ui,
-                "📌 Unpin message",
+                icons::PUSH_PIN_SLASH,
+                "Unpin Message",
+                n,
                 MessageAction::Pin(m.id.clone(), false),
             );
         } else {
-            pick(ui, "📌 Pin message", MessageAction::Pin(m.id.clone(), true));
+            pick(
+                ui,
+                icons::PUSH_PIN,
+                "Pin Message",
+                n,
+                MessageAction::Pin(m.id.clone(), true),
+            );
         }
     }
-    pick(ui, "👁 Mark unread", MessageAction::MarkUnread(m.id.clone()));
-    ui.separator();
+    widgets::menu_separator(ui, pal);
     if !m.content.is_empty() {
-        pick(ui, "📋 Copy text", MessageAction::Copy(m.content.clone()));
+        pick(
+            ui,
+            icons::COPY,
+            "Copy Text",
+            n,
+            MessageAction::Copy(m.content.clone()),
+        );
     }
     pick(
         ui,
-        "🔗 Copy message link",
+        icons::EYE_SLASH,
+        "Mark Unread",
+        n,
+        MessageAction::MarkUnread(m.id.clone()),
+    );
+    pick(
+        ui,
+        icons::LINK,
+        "Copy Message Link",
+        n,
         MessageAction::Copy(m.link(menu.guild_id.as_deref())),
     );
     for a in m.attachments.iter().filter(|a| a.is_image()) {
         let label = if m.attachments.len() == 1 {
-            "💾 Save image".to_string()
+            "Save Image".to_string()
         } else {
-            format!("💾 Save {}", a.filename)
+            format!("Save {}", a.filename)
         };
         pick(
             ui,
+            icons::DOWNLOAD,
             &label,
+            n,
             MessageAction::SaveImage(a.url.clone(), a.filename.clone()),
         );
     }
-    ui.separator();
-    pick(ui, "🆔 Copy message ID", MessageAction::Copy(m.id.clone()));
+    if menu.mine {
+        pick(
+            ui,
+            icons::TRASH,
+            "Delete Message",
+            Tone::Danger,
+            MessageAction::Delete(m.id.clone()),
+        );
+    }
+    widgets::menu_separator(ui, pal);
     pick(
         ui,
-        "👤 Copy user ID",
+        icons::USER,
+        "Copy User ID",
+        n,
         MessageAction::Copy(m.author.id.clone()),
     );
-    if menu.mine {
-        ui.separator();
-        pick(ui, "🗑 Delete", MessageAction::Delete(m.id.clone()));
-    }
+    pick(
+        ui,
+        icons::ID,
+        "Copy Message ID",
+        n,
+        MessageAction::Copy(m.id.clone()),
+    );
 }
 
 /// An image (click: open full size) or a file card. Returns a link the user
@@ -5176,7 +6214,7 @@ fn attachment_ui(
             .inner_margin(10)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("📄").size(20.0));
+                    ui.label(RichText::new(icons::FILE_TEXT).size(30.0).color(pal.muted));
                     ui.vertical(|ui| {
                         let link = ui
                             .add(

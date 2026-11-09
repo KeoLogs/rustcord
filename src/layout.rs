@@ -53,26 +53,29 @@ impl Pane {
     }
 
     pub fn icon(self) -> &'static str {
+        use crate::icons;
         match self {
-            Pane::Servers => "🏠",
-            Pane::Profile => "👤",
-            Pane::Channels => "#",
-            Pane::Messages => "💬",
-            Pane::Composer => "✏",
-            Pane::Members => "👥",
+            Pane::Servers => icons::SQUARES_FOUR,
+            Pane::Profile => icons::USER_CIRCLE,
+            Pane::Channels => icons::HASH,
+            Pane::Messages => icons::CHATS,
+            Pane::Composer => icons::PENCIL,
+            Pane::Members => icons::USERS,
         }
     }
 }
 
-/// The default layout (Leo's sketch):
+/// The default layout (Discord's: the user panel spans the bottom of the
+/// server rail and channel list):
 ///
 /// ```text
 /// ┌────────┬──────────┬─────────────────────────┬─────────┐
 /// │Servers │ Channels │ Messages                │ Members │
 /// │        │          │                         │         │
-/// ├────────┤          ├─────────────────────────┤         │
-/// │Profile │          │ Message box             │         │
-/// └────────┴──────────┴─────────────────────────┴─────────┘
+/// │        │          ├─────────────────────────┤         │
+/// ├────────┴──────────┤ Message box             │         │
+/// │ Profile           │                         │         │
+/// └───────────────────┴─────────────────────────┴─────────┘
 /// ```
 pub fn default_tree() -> Tree<Pane> {
     let mut tiles = Tiles::default();
@@ -90,21 +93,50 @@ pub fn default_tree() -> Tree<Pane> {
     let composer = tab(&mut tiles, Pane::Composer);
     let members = tab(&mut tiles, Pane::Members);
 
-    let left = tiles.insert_vertical_tile(vec![servers, profile]);
-    set_shares(&mut tiles, left, &[(servers, 11.0), (profile, 1.5)]);
+    // The server rail is icon-only like Discord's (~72 px at the default
+    // window size); drag its edge wider to show server names.
+    let lists = tiles.insert_horizontal_tile(vec![servers, channels]);
+    set_shares(&mut tiles, lists, &[(servers, 0.72), (channels, 2.1)]);
+    let left = tiles.insert_vertical_tile(vec![lists, profile]);
+    set_shares(&mut tiles, left, &[(lists, 12.5), (profile, 1.0)]);
 
     let chat = tiles.insert_vertical_tile(vec![messages, composer]);
     set_shares(&mut tiles, chat, &[(messages, 9.0), (composer, 1.5)]);
 
-    // The server rail is icon-only like Discord's (~72 px at the default
-    // window size); drag its edge wider to show server names.
-    let root = tiles.insert_horizontal_tile(vec![left, channels, chat, members]);
+    let root = tiles.insert_horizontal_tile(vec![left, chat, members]);
     set_shares(
         &mut tiles,
         root,
-        &[(left, 0.72), (channels, 2.1), (chat, 7.0), (members, 2.0)],
+        &[(left, 2.82), (chat, 7.0), (members, 2.0)],
     );
 
+    Tree::new(egui::Id::unique("rustcord_layout"), root, tiles)
+}
+
+/// Demo mode only (`RUSTCORD_DEMO_LAYOUT=alt`): a custom arrangement like
+/// Leo's (wide server list over the channels, members over the profile
+/// bar in the middle, chat on the right), to check the UI in layouts other
+/// than the default.
+pub fn alt_tree() -> Tree<Pane> {
+    let mut tiles = Tiles::default();
+    let tab = |tiles: &mut Tiles<Pane>, pane| {
+        let id = tiles.insert_pane(pane);
+        tiles.insert_tab_tile(vec![id])
+    };
+    let servers = tab(&mut tiles, Pane::Servers);
+    let profile = tab(&mut tiles, Pane::Profile);
+    let channels = tab(&mut tiles, Pane::Channels);
+    let messages = tab(&mut tiles, Pane::Messages);
+    let composer = tab(&mut tiles, Pane::Composer);
+    let members = tab(&mut tiles, Pane::Members);
+    let left = tiles.insert_vertical_tile(vec![servers, channels]);
+    set_shares(&mut tiles, left, &[(servers, 1.0), (channels, 1.0)]);
+    let middle = tiles.insert_vertical_tile(vec![members, profile]);
+    set_shares(&mut tiles, middle, &[(members, 11.0), (profile, 1.0)]);
+    let chat = tiles.insert_vertical_tile(vec![messages, composer]);
+    set_shares(&mut tiles, chat, &[(messages, 9.0), (composer, 1.2)]);
+    let root = tiles.insert_horizontal_tile(vec![left, middle, chat]);
+    set_shares(&mut tiles, root, &[(left, 2.5), (middle, 2.9), (chat, 6.8)]);
     Tree::new(egui::Id::unique("rustcord_layout"), root, tiles)
 }
 
@@ -122,18 +154,19 @@ pub fn is_complete(tree: &Tree<Pane>) -> bool {
     Pane::ALL.iter().all(|p| present.contains(p))
 }
 
-/// Is the Members panel shown? (The 👥 button in the chat header hides it.)
-pub fn members_visible(tree: &Tree<Pane>) -> bool {
+/// Is this panel shown? (The members button in the chat header hides the
+/// Members panel, « / » the Channels panel.)
+pub fn pane_visible(tree: &Tree<Pane>, pane: Pane) -> bool {
     tree.tiles
-        .find_pane(&Pane::Members)
+        .find_pane(&pane)
         .is_none_or(|id| tree.tiles.is_visible(id))
 }
 
-/// Show / hide the Members panel. Hidden tiles keep their place in the
-/// tree, so showing it again puts it back where it was (and the choice is
-/// saved with the layout).
-pub fn toggle_members(tree: &mut Tree<Pane>) {
-    let Some(id) = tree.tiles.find_pane(&Pane::Members) else {
+/// Show / hide a panel (Members, Channels). Hidden tiles keep their place in
+/// the tree, so showing it again puts it back where it was (and the choice
+/// is saved with the layout).
+pub fn toggle_pane(tree: &mut Tree<Pane>, pane: Pane) {
+    let Some(id) = tree.tiles.find_pane(&pane) else {
         return;
     };
     let show = !tree.tiles.is_visible(id);
@@ -168,13 +201,8 @@ fn pane_margin(pane: Pane) -> egui::Margin {
             top: 0,
             bottom: 0,
         },
-        Pane::Members => egui::Margin {
-            left: 8,
-            right: 4,
-            top: 12,
-            bottom: 0,
-        },
-        Pane::Profile => egui::Margin::symmetric(8, 6),
+        Pane::Members => egui::Margin::ZERO,
+        Pane::Profile => egui::Margin::symmetric(8, 0),
     }
 }
 
@@ -289,7 +317,7 @@ impl Behavior<Pane> for LayoutBehavior<'_> {
     fn drag_ui(&mut self, tiles: &Tiles<Pane>, ui: &mut egui::Ui, tile_id: TileId) {
         let (icon, title) = match tiles.get(tile_id) {
             Some(Tile::Pane(p)) => (p.icon(), p.title()),
-            _ => ("▦", "Panels"),
+            _ => (crate::icons::SQUARES_FOUR, "Panels"),
         };
         let now = ui.input(|i| i.time);
         let started = ui

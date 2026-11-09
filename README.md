@@ -22,15 +22,30 @@ Usable day to day. It has:
   - channel list: collapsible categories (▾ / ▸), hover and selected rows,
     DMs with avatars and status; voice / stage channels listed (greyed out,
     joining comes later)
-  - chat header with the channel topic, 🔔 inbox, 📌 pinned messages and
-    👥 to hide / show the member list
+  - monochrome line icons everywhere (bundled Phosphor icon font), tinted
+    with the theme's colours like Discord's
+  - chat header with the channel topic, inbox, pinned messages and a
+    button to hide / show the member list; « / » collapses the channel list
+    (from Discord Messenger)
+  - user panel like Discord's: avatar with status ring, name and custom
+    status, gear; collapses to avatar + gear when narrow
   - messages: local-time timestamps ("Today at 19:05"), date lines between
     days, hover highlight, a floating Reply / Edit / ⋯ bar, Discord-style
     reply previews, mentions of you highlighted
-  - message box with ⊕ upload button and an animated "is typing…" row
+  - message box with ⊕ upload button, GIF and emoji buttons and an animated
+    "is typing…" row; files to upload show as cards with a spoiler toggle
+    (`SPOILER_` file names) and remove button; the message text is the comment
+  - stickers, forwarded messages, polls and system messages (joins, pins,
+    calls, boosts, threads…) in Discord's style; anything RustCord can't
+    draw yet says so instead of showing a blank message
+  - full Unicode: bundled Noto Sans Symbols / Symbols 2 / Math / Mono subsets
+    for symbols, "fancy text", Braille, box drawing and kaomoji, system fonts
+    for other scripts (RTL and complex scripts are shaped)
 - servers (with icons), DMs and group DMs, channels grouped by category
 - live messages, edits and deletes; send, reply, edit, delete, copy
-- images, file attachments and **uploads** (➕ button or drag files onto the window)
+- images, file attachments and **uploads** (⊕ button or drag files onto the window)
+- **GIF picker** (module): trending + Tenor search through Discord, like
+  Discord's GIF button (user accounts)
 - **emoji** in colour (Twemoji + custom server emoji); other scripts (CJK,
   Arabic, Cyrillic…) via system fonts
 - typing indicators
@@ -41,7 +56,7 @@ Usable day to day. It has:
 - **mutes** from your Discord account: muted channels/servers are greyed out and
   don't badge or notify
 - **notifications**: desktop notifications for mentions and DMs, taskbar flash,
-  and a 🔔 inbox of recent mentions (Settings → Notifications)
+  and an inbox of recent mentions (Settings → Notifications)
 - **member list** like Discord's: grouped by hoisted role ("ONLINE — 12"),
   names in role colours, status dots (online / idle / do not disturb /
   offline), custom status or "Playing …" under the name, loads more as you
@@ -53,8 +68,13 @@ Usable day to day. It has:
   **note** (editable; saved only when you press Save)
 - gateway **resume**: short disconnects pick up where they left off instead of
   reloading everything
-- **Settings** (⚙ in the profile bar): account, appearance, privacy & login,
-  modules, layout, performance (live RAM usage), about
+- **Settings** (gear in the profile bar, or Ctrl+,): account, appearance,
+  privacy & login, modules, layout, performance (live RAM usage), about.
+  Changes wait in a draft until **Save Changes** (or Ctrl+S) on Discord's
+  "Careful — you have unsaved changes!" bar; leaving with unsaved changes
+  shakes the bar. The UI scale is applied on save, not while dragging.
+- **keyboard shortcuts** (Ctrl+/ lists them): Alt+↑/↓ channels,
+  Alt+Shift+↑/↓ unread channels, Ctrl+Alt+↑/↓ servers, Ctrl+K, Ctrl+,
 - **Layout editor** (Settings → Layout → Edit layout): panels glow on hover,
   hold and drag to move (they grow as you pick them up), drag gaps to resize.
   Saved between runs.
@@ -72,7 +92,7 @@ Usable day to day. It has:
   embeds* in Settings → Chat (Embeds module)
 - **link warnings**: links outside Discord ask first ("Leaving RustCord"),
   with "Trust this domain"; trusted domains are listed in Settings → Chat
-- **pinned messages**: 📌 popup with Jump and Unpin; *Pin message* in the
+- **pinned messages**: pins popup with Jump and Unpin; *Pin message* in the
   message menu where you're allowed to (DMs, or Manage Messages)
 - **status picker**: click your avatar → Online / Idle / Do Not Disturb /
   Invisible and *Set custom status* (with "clear after"); synced with your
@@ -163,6 +183,10 @@ On Linux you may need GUI dev packages first:
 | `src/gateway.rs` | WebSocket connection to Discord's gateway (identify / resume, zlib-stream) |
 | `src/api.rs` | REST calls: history, send / edit / delete, typing, acks, profiles, notes, pins, settings, leave server |
 | `src/types.rs` | Guild / Channel / Message types and UI↔backend messages |
+| `src/icons.rs` | Phosphor icon codepoints (monochrome icon font) |
+| `src/widgets.rs` | Shared Discord-style widgets: menu rows, icon buttons, menu frame |
+| `src/sysmsg.rs` | System messages, stickers and forwarded messages |
+| `src/gif_picker.rs` | GIF picker popup and Discord's GIF endpoints' parsing |
 
 The UI and the network never block each other: the backend sends `ToUi`
 events over a channel and calls `request_repaint()`, and the UI sends
@@ -181,9 +205,11 @@ events over a channel and calls `request_repaint()`, and the UI sends
 
 Feature reference: [Discord Messenger](https://github.com/DiscordMessenger/dm)
 by iProgramInCpp (MIT). Emoji graphics: [Twemoji](https://github.com/jdecked/twemoji)
-(CC-BY 4.0). Font: [Noto Sans](https://github.com/notofonts/latin-greek-cyrillic)
-by the Noto Project Authors, under the SIL Open Font License 1.1
-(`assets/fonts/OFL.txt`).
+(CC-BY 4.0). Fonts: [Noto Sans](https://github.com/notofonts/latin-greek-cyrillic)
+and subsets of Noto Sans Symbols, Symbols 2, Math and Mono by the Noto Project
+Authors, under the SIL Open Font License 1.1 (`assets/fonts/OFL.txt`). Icons:
+[Phosphor Icons](https://phosphoricons.com) (MIT, `assets/fonts/Phosphor-LICENSE.txt`).
+See `assets/fonts/README.md` for how the subsets were made.
 
 ## Licence
 

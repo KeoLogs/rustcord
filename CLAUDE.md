@@ -14,7 +14,9 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   one `Inflater` per connection (new one on every reconnect / resume); a
   message is complete when the bytes end in `00 00 FF FF`.
   `Session` (session_id, resume_gateway_url, seq) lives in the backend across
-  connections; op 9 / close codes 4007/4009 reset it.
+  connections; op 9 / close codes 4007/4009 reset it. When the UI drops its
+  sender (log out, "Show as" restart) the gateway closes with code 1000
+  (`SessionEnd::Shutdown`) so Discord ends that session at once.
 - `src/api.rs` is the REST client (reqwest).
 - `src/app.rs` is the UI. It never blocks: it drains `ToUi` events in
   `App::logic` and sends `ToBackend` requests. `State::pane_ui` draws each
@@ -46,8 +48,34 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   `rail_item` (icon-only below `RAIL_NAMES_WIDTH`). Messages: `message_row`
   (hover background via a placeholder shape, the hover bar is an `Area`
   whose rect is kept in egui memory), `reply_preview`, `date_divider`.
-  The 👥 header button hides the Members tile with egui_tiles visibility
-  (`layout::toggle_members`); hidden state is saved with the layout.
+  The members header button hides the Members tile with egui_tiles
+  visibility (`layout::toggle_pane`), « in the channel header hides the
+  Channels tile (» in the chat header brings it back); hidden state is saved
+  with the layout. Members draws the same 48 px `header_bar` as the chat.
+- Icons: `src/icons.rs` (Phosphor icon font, MIT, bundled; regular weight
+  is a fallback of the proportional + bold families, filled weight via
+  `icons::fill_font`). Never use emoji as UI icons (they render coloured).
+  Shared widgets in `src/widgets.rs`: `menu_item` / `dot_item` /
+  `menu_separator` / `menu_frame` for every context menu and popup
+  (`egui::Popup::menu(..).frame(widgets::menu_frame(pal))`), `icon_button`.
+  Colours only from `Palette` (a theme system will replace it);
+  `Palette::menu_bg()` is the menu/tooltip/modal surface.
+- Symbol fonts: `theme::SYMBOL_FONTS` (Noto Sans Symbols / Symbols 2 / Math /
+  Mono-box subsets, see `assets/fonts/README.md`) come before egui's fonts;
+  scripts come from eframe's system font fallback. #showcase in the demo is
+  the Unicode test.
+- Settings (`src/settings.rs`): edits go into `SettingsPage::draft` and are
+  applied by the app on `SettingsAction::Save` (Save Changes / Ctrl+S) with
+  the synced changes to PATCH. Never apply config or PATCH Discord while
+  the user is still editing. Zoom applies on save; the theme previews live.
+  Changing "Show as" restarts the session (fresh IDENTIFY, never RESUME).
+- Messages that aren't plain text: `src/sysmsg.rs` (system lines by message
+  `type`, stickers, forwards); `message_content` ends with an "unsupported
+  content" line so no message renders blank.
+- GIF picker module: `src/gif_picker.rs`, `ToBackend::LoadGifs` →
+  `api.gifs` (Discord's `/gifs/trending` and `/gifs/search`, Tenor) →
+  `ToUi::Gifs`. Textures are freed when the popup closes. The emoji button
+  is a hook (`ComposerAction::OpenEmojiPicker`) for `src/emoji_picker.rs`.
   Careful: never call `ui`/`ctx` methods inside a `ctx.memory(|m| …)`
   closure — it deadlocks the UI thread.
 - `src/read_state.rs`: per-channel unread/mention counts (`ReadState`).
@@ -77,7 +105,7 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   `links::check` (trusted domains in `Config::trusted_domains`, the "Leaving
   RustCord" modal otherwise). Never call `ctx.open_url` on message data
   directly.
-- Pins: `src/pins.rs` popup under the 📌 button (`State::pins`), `perms.rs`
+- Pins: `src/pins.rs` popup under the pin button (`State::pins`), `perms.rs`
   decides who may pin (DM, or Manage Messages from roles + overwrites).
   `State::jump_to` scrolls to a message (or loads `messages?around=`).
 - Synced settings: `src/settings_proto.rs` (`UserSettings`, from READY or
@@ -146,8 +174,10 @@ release build for RAM numbers. Images show as red warning icons offline;
 that's expected. The demo has two people start typing in #general after 4 s
 and Sam mentions you after 6 s. #welcome has the Batch C showcase (markdown,
 embeds, links, an image, pins, blocked messages); the profile bar avatar
-opens the status picker; Ctrl+K opens the switcher. Then tell Leo exactly
-what to check when he runs it locally against Discord.
+opens the status picker; Ctrl+K opens the switcher; #showcase has the
+Unicode / stickers / system message tests. `RUSTCORD_DEMO_LAYOUT=alt` starts
+the demo in a custom arrangement (like Leo's) to check other layouts. Then
+tell Leo exactly what to check when he runs it locally against Discord.
 
 ## Hard rules
 

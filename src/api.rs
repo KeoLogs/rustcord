@@ -58,6 +58,43 @@ impl Api {
         Ok(messages)
     }
 
+    /// Close a DM (`DELETE channels/{id}`, what Discord's × on a DM does; the
+    /// conversation comes back when either side writes). Only from the
+    /// user's click.
+    pub async fn close_dm(&self, channel_id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .delete(format!("{API_BASE}/channels/{channel_id}"))
+            .header("Authorization", &self.auth)
+            .send()
+            .await
+            .context("close DM request failed")?;
+        Self::check(resp, "Closing DM").await?;
+        Ok(())
+    }
+
+    /// Discord's GIF search (Tenor): trending (`None`) or search results.
+    /// Undocumented endpoints; the response is parsed leniently by
+    /// `gif_picker::parse`.
+    pub async fn gifs(&self, query: Option<&str>) -> Result<Value> {
+        let common = "provider=tenor&locale=en-US&media_format=gif";
+        let url = match query {
+            Some(q) => format!(
+                "{API_BASE}/gifs/search?q={}&{common}",
+                crate::gif_picker::url_encode(q)
+            ),
+            None => format!("{API_BASE}/gifs/trending?{common}"),
+        };
+        let resp = self
+            .http
+            .get(url)
+            .header("Authorization", &self.auth)
+            .send()
+            .await
+            .context("GIF request failed")?;
+        Ok(Self::check(resp, "Loading GIFs").await?.json().await?)
+    }
+
     /// Leave a server (`DELETE users/@me/guilds/{id}`, like Discord Messenger
     /// DI:1647). Only called after the user confirmed.
     pub async fn leave_guild(&self, guild_id: &str) -> Result<()> {
@@ -114,6 +151,7 @@ impl Api {
         reply_to: Option<&str>,
         reply_ping: bool,
         files: &[PathBuf],
+        spoilers: &[bool],
     ) -> Result<()> {
         let mut body = json!({ "content": content });
         if let Some(id) = reply_to {
@@ -139,10 +177,14 @@ impl Api {
                 let bytes = tokio::fs::read(path)
                     .await
                     .with_context(|| format!("couldn't read {}", path.display()))?;
-                let name = path
+                let mut name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| format!("file{i}"));
+                // Discord marks spoiler attachments by their file name.
+                if spoilers.get(i).copied().unwrap_or(false) && !name.starts_with("SPOILER_") {
+                    name = format!("SPOILER_{name}");
+                }
                 meta.push(json!({ "id": i, "filename": name }));
                 let mime = mime_for(&name);
                 let part = reqwest::multipart::Part::bytes(bytes)

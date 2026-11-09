@@ -1,9 +1,11 @@
 //! Full-window settings page, laid out like Discord's: a list of sections on
-//! the left, the selected section on the right, ✕ / Esc to close.
+//! the left, the selected section on the right, ✕ / Esc to close. Edits
+//! are kept in a draft until Save Changes (see `SettingsPage`).
 
 use eframe::egui::{self, RichText, vec2};
 
 use crate::config::{ClientIdentity, Config, MODULES};
+use crate::icons;
 use crate::settings_proto::{ExplicitFilter, UserSettings};
 use crate::theme::{Bold, Palette, ThemeChoice};
 use crate::types::User;
@@ -22,24 +24,29 @@ pub enum Section {
     About,
 }
 
-const SECTIONS: &[(&str, &[(Section, &str)])] = &[
-    ("USER SETTINGS", &[(Section::Account, "My Account")]),
+type NavItem = (Section, &'static str, &'static str);
+
+const SECTIONS: &[(&str, &[NavItem])] = &[
+    (
+        "USER SETTINGS",
+        &[(Section::Account, "My Account", icons::USER_CIRCLE)],
+    ),
     (
         "APP SETTINGS",
         &[
-            (Section::Appearance, "Appearance"),
-            (Section::Chat, "Chat"),
-            (Section::Notifications, "Notifications"),
-            (Section::Privacy, "Privacy & Safety"),
+            (Section::Appearance, "Appearance", icons::PALETTE),
+            (Section::Chat, "Chat", icons::CHAT_CIRCLE),
+            (Section::Notifications, "Notifications", icons::BELL),
+            (Section::Privacy, "Privacy & Safety", icons::SHIELD),
         ],
     ),
     (
         "RUSTCORD",
         &[
-            (Section::Modules, "Modules"),
-            (Section::Layout, "Layout"),
-            (Section::Performance, "Performance"),
-            (Section::About, "About"),
+            (Section::Modules, "Modules", icons::PUZZLE),
+            (Section::Layout, "Layout", icons::LAYOUT),
+            (Section::Performance, "Performance", icons::GAUGE),
+            (Section::About, "About", icons::INFO),
         ],
     ),
 ];
@@ -49,33 +56,144 @@ pub enum SettingsAction {
     EditLayout,
     ResetLayout,
     LogOut,
-    /// Change a setting synced with Discord (user accounts).
-    Sync(SyncChange),
+    /// "Save Changes" (or Ctrl+S): the new config, plus synced settings to
+    /// PATCH (user accounts). Nothing is applied or sent before this.
+    Save {
+        config: Box<Config>,
+        sync: Vec<SyncChange>,
+    },
 }
 
 /// A synced (settings-proto) setting the user changed.
+#[derive(Debug, Clone, PartialEq)]
 pub enum SyncChange {
     ExplicitFilter(ExplicitFilter),
     AllowGuildDms(bool),
     Compact(bool),
 }
 
-#[derive(Default)]
+/// Synced settings edited but not saved yet (None = unchanged).
+#[derive(Default, Clone, PartialEq)]
+struct SyncedDraft {
+    explicit_filter: Option<ExplicitFilter>,
+    allow_guild_dms: Option<bool>,
+}
+
+impl SyncedDraft {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The settings page. Edits go into `draft` (a copy of the config) and are
+/// only applied when the user presses Save Changes, like Discord: a bar
+/// "Careful — you have unsaved changes!" floats at the bottom meanwhile.
 pub struct SettingsPage {
     pub section: Section,
+    /// Edited copy of the config (theme previews live from it; zoom and
+    /// everything else apply on Save).
+    pub draft: Config,
+    /// The config the draft started from.
+    base: Config,
+    synced: SyncedDraft,
+    /// When the unsaved-changes bar started shaking (tried to leave).
+    shake_at: Option<f64>,
 }
 
 impl SettingsPage {
+    pub fn new(config: &Config) -> Self {
+        Self {
+            section: Section::default(),
+            draft: config.clone(),
+            base: config.clone(),
+            synced: SyncedDraft::default(),
+            shake_at: None,
+        }
+    }
+
+    /// Unsaved changes?
+    pub fn dirty(&self) -> bool {
+        self.draft != self.base || !self.synced.is_empty()
+    }
+
+    /// Throw the edits away.
+    pub fn reset(&mut self) {
+        self.draft = self.base.clone();
+        self.synced = SyncedDraft::default();
+    }
+
+    /// Build the Save action (and treat the draft as saved).
+    fn save(&mut self, synced: Option<&UserSettings>) -> SettingsAction {
+        let mut sync = Vec::new();
+        if synced.is_some() {
+            if let Some(f) = self.synced.explicit_filter {
+                sync.push(SyncChange::ExplicitFilter(f));
+            }
+            if let Some(on) = self.synced.allow_guild_dms {
+                sync.push(SyncChange::AllowGuildDms(on));
+            }
+            if self.draft.compact_messages != self.base.compact_messages {
+                sync.push(SyncChange::Compact(self.draft.compact_messages));
+            }
+        }
+        if !self.draft.remember_login {
+            self.draft.saved_token = None;
+        }
+        self.base = self.draft.clone();
+        self.synced = SyncedDraft::default();
+        self.shake_at = None;
+        SettingsAction::Save {
+            config: Box::new(self.draft.clone()),
+            sync,
+        }
+    }
+
+    /// Trying to leave with unsaved changes: shake the bar instead.
+    fn block_leave(&mut self, ui: &egui::Ui) -> bool {
+        if self.dirty() {
+            self.shake_at = Some(ui.input(|i| i.time));
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
-        config: &mut Config,
+        config: &Config,
         me: Option<&User>,
         synced: Option<&UserSettings>,
         pal: &Palette,
     ) -> Option<SettingsAction> {
+        // The real config changed underneath (e.g. synced compact mode from
+        // another device): follow it unless the user is editing.
+        if *config != self.base {
+            if self.draft == self.base {
+                self.draft = config.clone();
+            }
+            self.base = config.clone();
+        }
         let mut action = None;
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        let save_key = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
+        if ui.input_mut(|i| i.consume_shortcut(&save_key)) && self.dirty() {
+            action = Some(self.save(synced));
+        }
+        // Raw events: a focused widget (e.g. the slider just dragged) may
+        // have consumed Escape to drop its focus.
+        let esc = ui.input(|i| {
+            i.raw.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Key {
+                        key: egui::Key::Escape,
+                        pressed: true,
+                        ..
+                    }
+                )
+            })
+        });
+        if esc && !self.block_leave(ui) {
             action = Some(SettingsAction::Close);
         }
 
@@ -103,9 +221,9 @@ impl SettingsPage {
                             ui.label(pal.section_label(header));
                         });
                         ui.add_space(2.0);
-                        for (section, label) in *items {
+                        for (section, label, icon) in *items {
                             let selected = self.section == *section;
-                            if nav_item(ui, label, selected, pal.text, pal).clicked() {
+                            if nav_item(ui, icon, label, selected, pal.text, pal).clicked() {
                                 self.section = *section;
                             }
                         }
@@ -121,13 +239,13 @@ impl SettingsPage {
                         );
                         ui.add_space(8.0);
                     }
-                    if nav_item(ui, "Log Out", false, pal.danger, pal).clicked() {
+                    if nav_item(ui, icons::SIGN_OUT, "Log Out", false, pal.danger, pal).clicked() {
                         action = Some(SettingsAction::LogOut);
                     }
                 });
             });
 
-        egui::CentralPanel::default()
+        let central = egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(pal.chat)
@@ -135,14 +253,14 @@ impl SettingsPage {
                         left: 40,
                         right: 40,
                         top: 60,
-                        bottom: 20,
+                        bottom: 0,
                     }),
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                         let close = close_button(ui, pal);
-                        if close.clicked() {
+                        if close.clicked() && !self.block_leave(ui) {
                             action = Some(SettingsAction::Close);
                         }
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
@@ -156,43 +274,185 @@ impl SettingsPage {
                     .show(ui, |ui| {
                         ui.set_max_width(680.0);
                         ui.spacing_mut().item_spacing.y = 6.0;
-                        if let Some(a) = self.section_ui(ui, config, me, synced, pal) {
+                        if let Some(a) = self.section_ui(ui, me, synced, pal) {
                             action = Some(a);
                         }
+                        // Room so the unsaved-changes bar never covers the end.
+                        ui.add_space(96.0);
                     });
             });
 
+        if matches!(action, Some(SettingsAction::EditLayout)) && self.block_leave(ui) {
+            action = None;
+        }
+        if let Some(a) = self.unsaved_bar(ui, central.response.rect, synced, pal) {
+            action = Some(a);
+        }
+        action
+    }
+
+    /// Discord's floating "Careful — you have unsaved changes!" bar with
+    /// Reset and Save Changes. Slides up when there are changes; shakes and
+    /// turns red when the user tries to leave without saving.
+    fn unsaved_bar(
+        &mut self,
+        ui: &egui::Ui,
+        area: egui::Rect,
+        synced: Option<&UserSettings>,
+        pal: &Palette,
+    ) -> Option<SettingsAction> {
+        let ctx = ui.ctx().clone();
+        let dirty = self.dirty();
+        let t = ctx.animate_bool_with_time(egui::Id::unique("rc_unsaved_bar"), dirty, 0.15);
+        if t <= 0.0 {
+            self.shake_at = None;
+            return None;
+        }
+        let now = ui.input(|i| i.time);
+        let (dx, alarm) = match self.shake_at {
+            Some(at) if now - at < 0.6 => {
+                ctx.request_repaint();
+                let k = (now - at) as f32;
+                ((k * 45.0).sin() * 10.0 * (1.0 - k / 0.6), true)
+            }
+            Some(at) if now - at < 2.5 => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                (0.0, true)
+            }
+            _ => (0.0, false),
+        };
+        let w = (area.width() - 40.0).clamp(280.0, 700.0);
+        let h = 52.0;
+        let y = area.bottom() - (h + 20.0) * t;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(area.left() + 40.0 + dx, y),
+            vec2(w.min(area.width() - 60.0), h),
+        );
+        let mut action = None;
+        egui::Area::new(egui::Id::unique("rc_unsaved_bar_area"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .show(&ctx, |ui| {
+                let fill = if alarm { pal.danger } else { pal.menu_bg() };
+                egui::Frame::new()
+                    .fill(fill)
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(16, 10))
+                    .shadow(egui::Shadow {
+                        offset: [0, 4],
+                        blur: 16,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(if pal.dark { 120 } else { 50 }),
+                    })
+                    .show(ui, |ui| {
+                        ui.set_width(rect.width() - 32.0);
+                        ui.horizontal_centered(|ui| {
+                            let text_col = if alarm {
+                                egui::Color32::WHITE
+                            } else {
+                                pal.strong
+                            };
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new("Careful — you have unsaved changes!")
+                                        .size(15.0)
+                                        .color(text_col),
+                                )
+                                .truncate()
+                                .selectable(false),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let save = ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("Save Changes")
+                                                    .color(egui::Color32::WHITE)
+                                                    .bold(),
+                                            )
+                                            .fill(pal.positive())
+                                            .corner_radius(4)
+                                            .min_size(vec2(112.0, 32.0)),
+                                        )
+                                        .on_hover_text("Ctrl+S");
+                                    if save.clicked() {
+                                        action = Some(self.save(synced));
+                                    }
+                                    let reset = ui.add(
+                                        egui::Label::new(
+                                            RichText::new("Reset").size(14.0).color(text_col),
+                                        )
+                                        .sense(egui::Sense::click())
+                                        .selectable(false),
+                                    );
+                                    let reset =
+                                        reset.on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    if reset.hovered() {
+                                        let r = reset.rect;
+                                        ui.painter().hline(
+                                            r.x_range(),
+                                            r.bottom(),
+                                            egui::Stroke::new(1.0, text_col),
+                                        );
+                                    }
+                                    if reset.clicked() {
+                                        self.reset();
+                                    }
+                                },
+                            );
+                        });
+                    });
+            });
         action
     }
 
     fn section_ui(
         &mut self,
         ui: &mut egui::Ui,
-        config: &mut Config,
         me: Option<&User>,
         synced: Option<&UserSettings>,
         pal: &Palette,
     ) -> Option<SettingsAction> {
         let mut action = None;
+        let config = &mut self.draft;
         match self.section {
             Section::Account => account(ui, me, pal),
             Section::Appearance => {
                 label(ui, pal, "THEME");
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 16.0;
                     for t in ThemeChoice::ALL {
-                        ui.selectable_value(&mut config.theme, t, t.label());
+                        if theme_swatch(ui, t, config.theme == t, pal).clicked() {
+                            config.theme = t;
+                        }
                     }
                 });
                 ui.add_space(12.0);
                 label(ui, pal, "UI SCALE");
-                ui.add(
-                    egui::Slider::new(&mut config.zoom, 0.75..=1.75)
-                        .step_by(0.05)
-                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().slider_width = 420.0;
+                    ui.add(
+                        egui::Slider::new(&mut config.zoom, 0.75..=1.75)
+                            .step_by(0.05)
+                            .show_value(false)
+                            .trailing_fill(true)
+                            .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.5 }),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!("{:.0}%", config.zoom * 100.0))
+                            .bold()
+                            .color(pal.strong),
+                    );
+                });
+                hint(
+                    ui,
+                    pal,
+                    "The new size is applied when you press Save Changes (Ctrl+S).",
                 );
                 ui.add_space(12.0);
                 label(ui, pal, "MESSAGE DISPLAY");
-                let before = config.compact_messages;
                 ui.radio_value(
                     &mut config.compact_messages,
                     false,
@@ -203,11 +463,6 @@ impl SettingsPage {
                     true,
                     "Compact: fit more messages on screen at one time.",
                 );
-                if config.compact_messages != before && synced.is_some() {
-                    action = Some(SettingsAction::Sync(SyncChange::Compact(
-                        config.compact_messages,
-                    )));
-                }
                 if synced.is_some() {
                     hint(ui, pal, "Synced with your Discord account.");
                 }
@@ -234,16 +489,16 @@ impl SettingsPage {
             Section::Chat => chat(ui, config, pal),
             Section::Notifications => notifications(ui, config, pal),
             Section::Privacy => {
-                if let Some(a) = privacy_synced(ui, synced, pal) {
-                    action = Some(a);
-                }
+                privacy_synced(ui, synced, &mut self.synced, pal);
                 ui.add_space(12.0);
                 label(ui, pal, "SHOW AS");
                 hint(
                     ui,
                     pal,
                     "Which app Discord thinks you're using (the icon friends see next to \
-                     your status). User accounts only; takes effect the next time you log in.",
+                     your status). User accounts only. Saving a change reconnects with a fresh \
+                     login so Discord sees it; if the official app or a browser tab is also \
+                     open, Discord may keep showing that one's icon.",
                 );
                 for id in ClientIdentity::ALL {
                     ui.radio_value(&mut config.client_identity, id, id.label());
@@ -268,9 +523,6 @@ impl SettingsPage {
                      Turn off to log in each time.",
                     pal,
                 );
-                if !config.remember_login {
-                    config.saved_token = None;
-                }
             }
             Section::Modules => {
                 hint(
@@ -316,12 +568,15 @@ impl SettingsPage {
                 ui.horizontal(|ui| {
                     let edit = ui.add_enabled(
                         config.modules.layout_editor,
-                        pal.primary_button("✏ Edit layout"),
+                        pal.primary_button(&icons::label(icons::MOVE, "Edit layout")),
                     );
                     if edit.clicked() {
                         action = Some(SettingsAction::EditLayout);
                     }
-                    if ui.button("↺ Reset to default").clicked() {
+                    if ui
+                        .button(icons::label(icons::RESET, "Reset to default"))
+                        .clicked()
+                    {
                         action = Some(SettingsAction::ResetLayout);
                     }
                 });
@@ -389,8 +644,10 @@ impl SettingsPage {
                     ui,
                     pal,
                     "Licensed under GPL-3.0. Feature ideas from Discord Messenger by \
-                     iProgramInCpp (MIT). Emoji graphics by Twemoji (CC-BY 4.0). Font: \
-                     Noto Sans by the Noto Project Authors (SIL Open Font License 1.1).",
+                     iProgramInCpp (MIT). Emoji graphics by Twemoji (CC-BY 4.0). Fonts: \
+                     Noto Sans, Noto Sans Symbols / Symbols 2 / Math / Mono by the Noto \
+                     Project Authors (SIL Open Font License 1.1). Icons: Phosphor Icons \
+                     (MIT).",
                 );
                 hint(
                     ui,
@@ -475,7 +732,7 @@ fn chat(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(d).color(pal.text));
                 if ui
-                    .small_button("✕")
+                    .small_button(icons::X)
                     .on_hover_text("Stop trusting")
                     .clicked()
                 {
@@ -490,11 +747,13 @@ fn chat(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
 }
 
 /// Privacy & Safety settings synced with Discord (user accounts only).
+/// Changes stay in `draft` until Save.
 fn privacy_synced(
     ui: &mut egui::Ui,
     synced: Option<&UserSettings>,
+    draft: &mut SyncedDraft,
     pal: &Palette,
-) -> Option<SettingsAction> {
+) {
     let Some(s) = synced else {
         label(ui, pal, "SAFE DIRECT MESSAGING");
         hint(
@@ -503,9 +762,8 @@ fn privacy_synced(
             "These settings are stored on your Discord account. They show up here once \
              RustCord has loaded them (user accounts only).",
         );
-        return None;
+        return;
     };
-    let mut action = None;
     label(ui, pal, "SAFE DIRECT MESSAGING");
     hint(
         ui,
@@ -513,7 +771,7 @@ fn privacy_synced(
         "Automatically scan and delete direct messages you receive that contain \
          explicit media content.",
     );
-    let current = s.explicit_content_filter;
+    let current = draft.explicit_filter.or(s.explicit_content_filter);
     for (f, text) in [
         (
             ExplicitFilter::Everyone,
@@ -528,32 +786,32 @@ fn privacy_synced(
             "Do not scan — direct messages will not be scanned",
         ),
     ] {
-        if ui.radio(current == Some(f), text).clicked() && current != Some(f) {
-            action = Some(SettingsAction::Sync(SyncChange::ExplicitFilter(f)));
+        if ui.radio(current == Some(f), text).clicked() {
+            draft.explicit_filter = (s.explicit_content_filter != Some(f)).then_some(f);
         }
     }
     ui.add_space(12.0);
     label(ui, pal, "SERVER PRIVACY DEFAULTS");
-    let mut allow = s.allow_dms_from_guild_members;
+    let mut allow = draft
+        .allow_guild_dms
+        .unwrap_or(s.allow_dms_from_guild_members);
     switch_row(
         ui,
         &mut allow,
         "Allow direct messages from server members",
-        "Applies to servers you join from now on. Changing it saves it to your account.",
+        "Applies to servers you join from now on. Saved to your account when you \
+         press Save Changes.",
         pal,
     );
-    if allow != s.allow_dms_from_guild_members {
-        action = Some(SettingsAction::Sync(SyncChange::AllowGuildDms(allow)));
-    }
-    action
+    draft.allow_guild_dms = (allow != s.allow_dms_from_guild_members).then_some(allow);
 }
 
 fn section_title(s: Section) -> &'static str {
     SECTIONS
         .iter()
         .flat_map(|(_, items)| items.iter())
-        .find(|(sec, _)| *sec == s)
-        .map(|(_, l)| *l)
+        .find(|(sec, _, _)| *sec == s)
+        .map(|(_, l, _)| *l)
         .unwrap_or("Settings")
 }
 
@@ -660,7 +918,7 @@ fn notifications(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
         pal,
         "Notification levels and mutes come from your Discord account (set them in \
          the official client for now). Bot accounts only notify on mentions and DMs. \
-         Recent mentions are listed under 🔔 in the chat header.",
+         Recent mentions are listed under the bell in the chat header.",
     );
 }
 
@@ -695,6 +953,7 @@ fn switch_row(ui: &mut egui::Ui, on: &mut bool, title: &str, desc: &str, pal: &P
 /// A settings sidebar entry: hover / selected backgrounds like Discord's.
 fn nav_item(
     ui: &mut egui::Ui,
+    icon: &str,
     text: &str,
     selected: bool,
     color: egui::Color32,
@@ -717,6 +976,13 @@ fn nav_item(
     ui.painter().text(
         rect.left_center() + vec2(10.0, 0.0),
         egui::Align2::LEFT_CENTER,
+        icon,
+        icons::font(18.0),
+        col,
+    );
+    ui.painter().text(
+        rect.left_center() + vec2(36.0, 0.0),
+        egui::Align2::LEFT_CENTER,
         text,
         egui::FontId::proportional(15.0),
         col,
@@ -738,8 +1004,8 @@ fn close_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
     ui.painter().text(
         c,
         egui::Align2::CENTER_CENTER,
-        "✕",
-        egui::FontId::proportional(16.0),
+        icons::X,
+        icons::font(18.0),
         col,
     );
     ui.painter().text(
@@ -755,6 +1021,51 @@ fn close_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
 
 fn hint(ui: &mut egui::Ui, pal: &Palette, text: &str) {
     ui.label(RichText::new(text).size(13.0).color(pal.muted));
+}
+
+/// A theme choice: a round swatch of the theme's colours, its name under
+/// it, an accent ring and check when selected (Discord's theme picker).
+fn theme_swatch(
+    ui: &mut egui::Ui,
+    t: ThemeChoice,
+    selected: bool,
+    pal: &Palette,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(64.0, 86.0), egui::Sense::click());
+    let c = egui::pos2(rect.center().x, rect.top() + 30.0);
+    let tp = t.palette();
+    if selected {
+        ui.painter().circle_filled(c, 30.0, pal.accent);
+    } else if resp.hovered() {
+        ui.painter().circle_filled(c, 30.0, pal.muted);
+    }
+    ui.painter().circle_filled(c, 27.0, tp.chat);
+    ui.painter()
+        .circle_stroke(c, 27.0, egui::Stroke::new(1.0, pal.divider));
+    // Half moon of the sidebar colour, like a mini preview.
+    ui.painter()
+        .circle_filled(c + vec2(-8.0, 0.0), 12.0, tp.sidebar);
+    ui.painter()
+        .circle_filled(c + vec2(10.0, 0.0), 7.0, tp.accent);
+    if selected {
+        let b = c + vec2(20.0, -20.0);
+        ui.painter().circle_filled(b, 9.0, pal.accent);
+        ui.painter().text(
+            b,
+            egui::Align2::CENTER_CENTER,
+            icons::CHECK,
+            icons::font(12.0),
+            egui::Color32::WHITE,
+        );
+    }
+    ui.painter().text(
+        egui::pos2(rect.center().x, rect.bottom() - 8.0),
+        egui::Align2::CENTER_CENTER,
+        t.label(),
+        egui::FontId::proportional(13.0),
+        if selected { pal.strong } else { pal.muted },
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// iOS/Discord-style on/off switch.
