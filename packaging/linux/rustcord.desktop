@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=RustCord
+GenericName=Chat client
+Comment=A native, customisable Discord client written in Rust
+Exec=rustcord
+Icon=rustcord
+Terminal=false
+Categories=Network;InstantMessaging;Chat;

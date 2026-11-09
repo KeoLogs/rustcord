@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  RustCord app icon (original artwork, GPL-3.0-only like the rest of the repo).
+  A rounded indigo tile with a speech bubble holding a cog: chat you can
+  customise. Not derived from any Discord artwork.
+  Edit this file, then run assets/icon/generate.py to rebuild the PNG / ICO / ICNS.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6470F5"/>
+      <stop offset="1" stop-color="#4338B8"/>
+    </linearGradient>
+    <linearGradient id="cog" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5A63E8"/>
+      <stop offset="1" stop-color="#3F35AE"/>
+    </linearGradient>
+  </defs>
+
+  <!-- tile -->
+  <rect x="32" y="32" width="960" height="960" rx="216" fill="url(#bg)"/>
+
+  <!-- speech bubble with a tail at the bottom left -->
+  <path fill="#FFFFFF" d="
+    M 330 210
+    H 694
+    A 150 150 0 0 1 844 360
+    V 590
+    A 150 150 0 0 1 694 740
+    H 420
+    L 252 852
+    Q 230 866 236 840
+    L 262 724
+    A 150 150 0 0 1 180 590
+    V 360
+    A 150 150 0 0 1 330 210
+    Z"/>
+
+  <!-- cog: teeth are a thick dashed ring, then the body and the hole -->
+  <g transform="translate(512 475)">
+    <circle r="138" fill="none" stroke="url(#cog)" stroke-width="76"
+            stroke-dasharray="62 46.39" transform="rotate(-12.87)"/>
+    <circle r="128" fill="url(#cog)"/>
+    <circle r="54" fill="#FFFFFF"/>
+  </g>
+</svg>

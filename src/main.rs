@@ -1,5 +1,8 @@
 //! RustCord — a native, customisable Discord client written in Rust.
 
+// Release builds on Windows are GUI apps: no console window behind them.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod api;
 mod app;
 mod autocomplete;
@@ -28,6 +31,12 @@ mod theme;
 mod timefmt;
 mod types;
 
+/// The app icon for the title bar / taskbar (assets/icon, see generate.py).
+fn window_icon() -> eframe::egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/png/rustcord-256.png"))
+        .unwrap_or_default()
+}
+
 fn main() -> eframe::Result {
     // Two dependencies enable different rustls crypto backends (aws-lc-rs via
     // reqwest, ring via tokio-tungstenite/ehttp). With both present rustls
@@ -46,7 +55,8 @@ fn main() -> eframe::Result {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("RustCord")
             .with_inner_size([1200.0, 760.0])
-            .with_min_inner_size([640.0, 420.0]),
+            .with_min_inner_size([640.0, 420.0])
+            .with_icon(window_icon()),
         // OpenGL renderer: noticeably less RAM than wgpu for a 2D chat UI.
         renderer: eframe::Renderer::Glow,
         ..Default::default()

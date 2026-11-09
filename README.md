@@ -94,7 +94,23 @@ Usable day to day. It has:
 What's left: see [docs/PORTING.md](docs/PORTING.md) — reactions, search,
 threads / forums, voice (comes last).
 
-## Running
+## Download
+
+Ready-made builds are on the
+[Releases page](https://github.com/KeoLogs/rustcord/releases/latest):
+
+- **Windows**: `RustCord-<version>-windows-x86_64-setup.exe` installs it with a
+  Start-menu shortcut (no admin needed); the `.zip` is a portable copy.
+- **macOS**: `RustCord-<version>-macos-universal.zip`, unzip and move
+  `RustCord.app` to Applications (Apple Silicon and Intel).
+- **Linux**: `RustCord-<version>-linux-x86_64.tar.gz`, unpack and run
+  `./rustcord`, or `./install.sh` for a menu entry.
+
+The builds aren't code-signed yet, so Windows SmartScreen and macOS
+Gatekeeper ask once before the first launch. How releases are made:
+[docs/RELEASING.md](docs/RELEASING.md).
+
+## Running from source
 
 You need [Rust](https://rustup.rs) (stable).
 
@@ -163,6 +179,10 @@ On Linux you may need GUI dev packages first:
 | `src/gateway.rs` | WebSocket connection to Discord's gateway (identify / resume, zlib-stream) |
 | `src/api.rs` | REST calls: history, send / edit / delete, typing, acks, profiles, notes, pins, settings, leave server |
 | `src/types.rs` | Guild / Channel / Message types and UI↔backend messages |
+| `build.rs` | Embeds the icon and version info into the Windows .exe |
+| `assets/icon/` | App icon: `rustcord.svg` source, `generate.py` makes the PNG / ICO / ICNS |
+| `packaging/` | Windows installer (Inno Setup), macOS `.app` bundle, Linux `.desktop` + installer |
+| `.github/workflows/` | `build.yml` (CI) and `release.yml` (builds and publishes releases) |
 
 The UI and the network never block each other: the backend sends `ToUi`
 events over a channel and calls `request_repaint()`, and the UI sends

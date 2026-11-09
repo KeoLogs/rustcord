@@ -1,0 +1,235 @@
+# Builds RustCord for Windows, macOS and Linux and publishes a GitHub Release.
+#
+# Two ways to start it (see docs/RELEASING.md):
+#   * push a tag like v0.2.0 (or v0.2.0-beta.1 for a pre-release), or
+#   * Actions -> Release -> Run workflow, and type the version (e.g. 0.2.0).
+#     The tag v<version> is then created on the commit the workflow ran on.
+#
+# If the version differs from Cargo.toml, the build uses the release version
+# (About page, Windows file properties, macOS Info.plist all match the tag).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.2.0 (or 0.2.0-beta.1 for a pre-release). No leading v."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  meta:
+    name: version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - name: Work out the version
+        id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then raw=$INPUT_VERSION; else raw=$REF_NAME; fi
+          raw=$(printf '%s' "$raw" | tr -d '[:space:]')
+          version=${raw#v}
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$raw' is not a version like 0.2.0 or 0.2.0-beta.1"
+            exit 1
+          fi
+          case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing RustCord $version (tag v$version, prerelease: $prerelease)"
+
+  build:
+    name: build (${{ matrix.name }})
+    needs: meta
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-latest
+            targets: x86_64-pc-windows-msvc
+          - name: linux-x86_64
+            # Older Ubuntu = older glibc, so the binary runs on more distros.
+            os: ubuntu-22.04
+            targets: x86_64-unknown-linux-gnu
+          - name: macos-universal
+            os: macos-latest
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      # Fail the Windows build if the icon / version info can't be embedded.
+      RUSTCORD_REQUIRE_WINRES: "1"
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+
+      - name: Install Linux GUI deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.name }}
+
+      - name: Use the release version in Cargo.toml
+        run: |
+          # Replaces only the first `version = "..."` line ([package]).
+          perl -0pi -e 's/^version = "[^"]*"/version = "$ENV{VERSION}"/m' Cargo.toml
+          grep -m1 '^version' Cargo.toml
+
+      - name: Build (Windows / Linux)
+        if: runner.os != 'macOS'
+        run: cargo build --release
+
+      - name: Build (macOS, universal)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p target/release
+          lipo -create -output target/release/rustcord \
+            target/aarch64-apple-darwin/release/rustcord \
+            target/x86_64-apple-darwin/release/rustcord
+          lipo -info target/release/rustcord
+
+      # Only the binary, LICENSE, README (and per-OS launch files) are shipped:
+      # examples/ (themes, plugins) never go into a release.
+      - name: Package (Windows .zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = Get-Item target/release/rustcord.exe
+          "File version:    $($exe.VersionInfo.FileVersion)"
+          "Product version: $($exe.VersionInfo.ProductVersion)"
+          if (-not $exe.VersionInfo.ProductName) { throw "rustcord.exe has no version info (winresource)" }
+          $name = "RustCord-$env:VERSION-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path "stage/$name", dist | Out-Null
+          Copy-Item target/release/rustcord.exe "stage/$name/"
+          Copy-Item LICENSE "stage/$name/LICENSE.txt"
+          Copy-Item README.md "stage/$name/"
+          Compress-Archive -Path "stage/$name" -DestinationPath "dist/$name.zip"
+
+      - name: Installer (Windows, Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DAppVersion=$env:VERSION" "/DSourceDir=$PWD" "/DOutputDir=$PWD\dist" packaging\windows\rustcord.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+      - name: Package (Linux .tar.gz)
+        if: runner.os == 'Linux'
+        run: |
+          name="RustCord-$VERSION-linux-x86_64"
+          mkdir -p "stage/$name" dist
+          install -m 755 target/release/rustcord "stage/$name/rustcord"
+          cp LICENSE README.md packaging/linux/rustcord.desktop "stage/$name/"
+          install -m 755 packaging/linux/install.sh "stage/$name/install.sh"
+          cp assets/icon/png/rustcord-256.png "stage/$name/rustcord.png"
+          tar -C stage -czf "dist/$name.tar.gz" "$name"
+          tar -tzf "dist/$name.tar.gz"
+
+      - name: Package (macOS .app in .zip)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p stage dist
+          packaging/macos/make-app.sh target/release/rustcord "$VERSION" stage
+          # ditto keeps the bundle's signature and permissions intact.
+          ditto -c -k --keepParent stage/RustCord.app "dist/RustCord-$VERSION-macos-universal.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: publish
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Release notes header
+        run: |
+          cat > notes.md <<EOF
+          ## Downloads
+
+          | System | File |
+          | --- | --- |
+          | Windows (installer, recommended) | \`RustCord-$VERSION-windows-x86_64-setup.exe\` |
+          | Windows (portable) | \`RustCord-$VERSION-windows-x86_64.zip\` |
+          | macOS (Apple Silicon + Intel) | \`RustCord-$VERSION-macos-universal.zip\` |
+          | Linux x86_64 | \`RustCord-$VERSION-linux-x86_64.tar.gz\` |
+
+          The builds are not code-signed: Windows SmartScreen may say "Windows protected your PC" (click **More info → Run anyway**), and macOS asks before the first launch (right-click the app → **Open**, or System Settings → Privacy & Security → **Open Anyway**). \`SHA256SUMS.txt\` has the checksums.
+
+          > Third-party clients are against Discord's Terms of Service. Use a bot token or an alt account.
+          EOF
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.meta.outputs.tag }}
+          name: RustCord ${{ needs.meta.outputs.version }}
+          # Used only when the tag doesn't exist yet (Run workflow from the website).
+          target_commitish: ${{ github.sha }}
+          draft: false
+          prerelease: ${{ needs.meta.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.meta.outputs.prerelease == 'true' && 'false' || 'true' }}
+          body_path: notes.md
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*-setup.exe
+            dist/SHA256SUMS.txt
