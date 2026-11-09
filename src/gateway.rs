@@ -15,7 +15,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+use tokio_tungstenite::{
+    connect_async_with_config,
+    tungstenite::{Message as WsMessage, protocol::WebSocketConfig},
+};
 
 use crate::members::{self, ListUpdate, Member, Role};
 use crate::notify::GuildSettings;
@@ -114,7 +117,7 @@ pub async fn run_session(
         }
         .into(),
     ));
-    let (ws, _) = connect_async(session.url())
+    let (ws, _) = connect_async_with_config(session.url(), Some(ws_config()), false)
         .await
         .context("gateway connect failed")?;
     let (mut write, mut read) = ws.split();
@@ -557,4 +560,12 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
     }
+}
+
+/// WebSocket limits. The default 16 MB frame / 64 MB message caps are too
+/// small for accounts in many servers: their READY payload alone can be 18 MB+.
+fn ws_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_frame_size(Some(256 << 20))
+        .max_message_size(Some(256 << 20))
 }
