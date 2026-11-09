@@ -9,7 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
-use crate::types::{Guild, Message, ToUi};
+use crate::types::{Channel, Guild, Message, MessagePatch, ToUi, User};
 
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 
@@ -22,8 +22,9 @@ const OP_INVALID_SESSION: u64 = 9;
 const OP_HELLO: u64 = 10;
 const OP_HEARTBEAT_ACK: u64 = 11;
 
-// Intents (only used for bot accounts): GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT
-const BOT_INTENTS: u64 = (1 << 0) | (1 << 9) | (1 << 15);
+// Intents (only used for bot accounts): GUILDS | GUILD_MESSAGES |
+// GUILD_MESSAGE_TYPING | DIRECT_MESSAGES | DIRECT_MESSAGE_TYPING | MESSAGE_CONTENT
+const BOT_INTENTS: u64 = (1 << 0) | (1 << 9) | (1 << 11) | (1 << 12) | (1 << 14) | (1 << 15);
 
 /// Close codes that mean "don't bother reconnecting".
 const FATAL_CLOSE_CODES: &[u16] = &[4004, 4010, 4011, 4012, 4013, 4014];
@@ -139,12 +140,6 @@ pub async fn run_session(
 fn handle_dispatch(event: &str, d: &Value) -> Option<ToUi> {
     match event {
         "READY" => {
-            let user = &d["user"];
-            let username = user["global_name"]
-                .as_str()
-                .or_else(|| user["username"].as_str())
-                .unwrap_or("you")
-                .to_string();
             // User accounts get full guilds here; bots get unavailable stubs
             // and receive the real data via GUILD_CREATE afterwards.
             let guilds = d["guilds"]
@@ -156,10 +151,41 @@ fn handle_dispatch(event: &str, d: &Value) -> Option<ToUi> {
                         .collect()
                 })
                 .unwrap_or_default();
-            Some(ToUi::Ready { username, guilds })
+            // DMs and group DMs (user accounts only; bots get them lazily).
+            let dms = d["private_channels"]
+                .as_array()
+                .map(|arr| arr.iter().map(Channel::from_json).collect())
+                .unwrap_or_default();
+            Some(ToUi::Ready {
+                me: User::from_json(&d["user"]),
+                guilds,
+                dms,
+            })
         }
         "GUILD_CREATE" => Some(ToUi::GuildAdded(Guild::from_json(d))),
+        "CHANNEL_CREATE" | "CHANNEL_UPDATE" => Some(ToUi::ChannelUpserted {
+            guild_id: d["guild_id"].as_str().map(str::to_string),
+            channel: Channel::from_json(d),
+        }),
         "MESSAGE_CREATE" => Some(ToUi::NewMessage(Message::from_json(d))),
+        "MESSAGE_UPDATE" => Some(ToUi::MessageUpdated(MessagePatch::from_json(d))),
+        "MESSAGE_DELETE" => Some(ToUi::MessageDeleted {
+            channel_id: d["channel_id"].as_str().unwrap_or_default().to_string(),
+            message_id: d["id"].as_str().unwrap_or_default().to_string(),
+        }),
+        "TYPING_START" => {
+            let member = &d["member"];
+            let name = member["nick"]
+                .as_str()
+                .or_else(|| member["user"]["global_name"].as_str())
+                .or_else(|| member["user"]["username"].as_str())
+                .map(str::to_string);
+            Some(ToUi::Typing {
+                channel_id: d["channel_id"].as_str().unwrap_or_default().to_string(),
+                user_id: d["user_id"].as_str().unwrap_or_default().to_string(),
+                name,
+            })
+        }
         _ => None,
     }
 }

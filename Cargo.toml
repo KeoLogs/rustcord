@@ -7,8 +7,11 @@ description = "A native, customisable Discord client written in Rust"
 
 [dependencies]
 anyhow = "1.0.104"
-eframe = "0.37.0"
+eframe = { version = "0.37.0", features = ["persistence"] }
+egui_extras = { version = "0.37", features = ["all_loaders", "http"] }
+egui_tiles = { version = "0.18", features = ["serde"] }
 futures-util = "0.3.34"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

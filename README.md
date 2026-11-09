@@ -10,14 +10,21 @@ entirely ours to change.
 
 ## Status
 
-Early scaffold. Currently it can:
+Early but usable. It can:
 
-- connect to the Discord gateway (heartbeat, identify, auto-reconnect with backoff)
-- list your servers along the top, and text channels as tabs below them
-- load the last 50 messages of a channel and show new ones live
-- send messages
+- connect as a bot or user account, auto-reconnect with backoff
+- show servers (with icons), DMs and group DMs, channels grouped by category
+- load history, show new messages live, plus live edits and deletes
+- send, reply to, edit and delete messages; copy message text
+- show images and attachments inline (click an image for full size), avatars
+- typing indicators, both ways
+- **movable, resizable layout**: Discord-style by default. Drag the lines
+  between panels to resize. Turn on **✏ Edit layout** to drag panels by their
+  title bar (drop on an edge to dock, or on another panel to stack as tabs).
+  The layout is saved; **↺ Reset layout** restores the default.
 
-Not yet: DMs, categories, markdown, embeds, attachments, emoji, replies, voice.
+Not yet: markdown, mentions, custom emoji, embeds, member list, pins,
+settings, plugins, voice.
 
 ## Running
 
@@ -32,6 +39,13 @@ DISCORD_TOKEN="Bot <your-bot-token>" cargo run
 DISCORD_TOKEN="<your-user-token>" cargo run
 ```
 
+Offline demo with fake data (no token, no Discord connection):
+
+```sh
+RUSTCORD_DEMO=1 cargo run
+```
+
+On Windows Command Prompt use `set "DISCORD_TOKEN=Bot <token>"` then `cargo run`.
 On Windows PowerShell:
 
 ```powershell
@@ -48,7 +62,9 @@ On Linux you may need GUI dev packages first:
 | File | What it does |
 | --- | --- |
 | `src/main.rs` | Reads the token, opens the window, wires up channels |
-| `src/app.rs` | The egui UI: server bar, channel tabs, messages, composer |
+| `src/app.rs` | The UI state and the four panels: servers, channels, messages, message box |
+| `src/layout.rs` | Movable/resizable panel layout (egui_tiles), default layout, saving |
+| `src/demo.rs` | Offline demo mode with fake data |
 | `src/backend.rs` | Tokio runtime thread; runs the gateway and handles UI requests |
 | `src/gateway.rs` | WebSocket connection to Discord's gateway |
 | `src/api.rs` | REST calls: channel history, send message |

@@ -12,7 +12,14 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   Hello -> Identify -> heartbeat loop, reconnect with backoff.
 - `src/api.rs` is the REST client (reqwest).
 - `src/app.rs` is the UI. It never blocks: it drains `ToUi` events in
-  `App::logic` and sends `ToBackend` requests.
+  `App::logic` and sends `ToBackend` requests. `State::pane_ui` draws each
+  panel (`Pane` enum).
+- `src/layout.rs` is the egui_tiles layout: `Pane` enum, `default_tree()`
+  (Discord-style), `LayoutBehavior`. The tree is saved via eframe storage.
+  A new panel = new `Pane` variant + a case in `State::pane_ui` + a spot in
+  `default_tree()`. Changing `Pane` can invalidate saved layouts (they fall
+  back to the default if they fail to deserialize).
+- `src/demo.rs` fakes the backend when `RUSTCORD_DEMO=1`.
 - `src/types.rs` holds Guild/Channel/Message plus the `ToUi` / `ToBackend` enums.
   Payloads are parsed leniently from `serde_json::Value` because bot and user
   payloads differ.
@@ -41,9 +48,18 @@ Windows and macOS. Keep it green.
 
 ## Testing limits in cloud sessions
 
-Cloud sessions cannot open the GUI window and usually cannot reach Discord.
-Make sure the code compiles and passes clippy, then tell Leo exactly what to
-check when he runs it locally with `DISCORD_TOKEN="Bot <token>" cargo run`.
+Cloud sessions usually cannot reach Discord. They can still check the UI
+with demo mode in a virtual display:
+
+```sh
+RUSTCORD_DEMO=1 LIBGL_ALWAYS_SOFTWARE=1 HOME=/tmp/rc-home \
+  xvfb-run -s "-screen 0 1280x800x24" bash -c \
+  './target/debug/rustcord & sleep 12; xdotool mousemove 70 85 click 1; sleep 2; import -window root /tmp/shot.png'
+```
+
+(`xdotool` drives clicks; drag slowly with small `mousemove` steps.) Images
+show as red warning icons offline; that's expected. Then tell Leo exactly
+what to check when he runs it locally against Discord.
 
 ## Hard rules
 

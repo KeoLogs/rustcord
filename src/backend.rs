@@ -12,13 +12,19 @@ use crate::types::{ToBackend, ToUi};
 
 pub fn spawn(
     raw_token: String,
+    demo: bool,
     tx: Sender<ToUi>,
     rx: UnboundedReceiver<ToBackend>,
     egui_ctx: eframe::egui::Context,
 ) {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
-        rt.block_on(run(raw_token, tx, rx, egui_ctx));
+        if demo {
+            let ctx = egui_ctx.clone();
+            rt.block_on(crate::demo::run(tx, rx, move || ctx.request_repaint()));
+        } else {
+            rt.block_on(run(raw_token, tx, rx, egui_ctx));
+        }
     });
 }
 
@@ -92,7 +98,31 @@ async fn run(
                 ToBackend::Send {
                     channel_id,
                     content,
-                } => api.send_message(&channel_id, &content).await.map(|_| None),
+                    reply_to,
+                } => api
+                    .send_message(&channel_id, &content, reply_to.as_deref())
+                    .await
+                    .map(|_| None),
+                ToBackend::Edit {
+                    channel_id,
+                    message_id,
+                    content,
+                } => api
+                    .edit_message(&channel_id, &message_id, &content)
+                    .await
+                    .map(|_| None),
+                ToBackend::Delete {
+                    channel_id,
+                    message_id,
+                } => api
+                    .delete_message(&channel_id, &message_id)
+                    .await
+                    .map(|_| None),
+                ToBackend::Typing { channel_id } => {
+                    // Typing failures aren't worth bothering the user with.
+                    let _ = api.trigger_typing(&channel_id).await;
+                    Ok(None)
+                }
             };
             match result {
                 Ok(Some(ev)) => {
