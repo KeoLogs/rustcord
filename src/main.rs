@@ -21,6 +21,9 @@ mod presence;
 mod profile;
 mod quick_switcher;
 mod read_state;
+// Server admin windows; wired into app.rs / backend.rs by the integrator.
+#[allow(dead_code)]
+mod server;
 mod settings;
 mod settings_proto;
 mod status;

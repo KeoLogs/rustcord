@@ -384,6 +384,41 @@ impl Api {
         Ok(Self::check(resp, "Saving settings").await?.json().await?)
     }
 
+    /// Generic JSON request for modules with their own endpoint wrappers
+    /// (e.g. `server::rest`). `path` starts with `/` (relative to the API
+    /// base); `what` names the action in error messages. 204 / empty bodies
+    /// give `Value::Null`.
+    pub async fn json_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+        what: &str,
+    ) -> Result<Value> {
+        let needs_length = matches!(
+            method,
+            reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH
+        );
+        let mut request = self
+            .http
+            .request(method, format!("{API_BASE}{path}"))
+            .header("Authorization", &self.auth);
+        request = match body {
+            Some(b) => request.json(b),
+            None if needs_length => request.header("Content-Length", "0"),
+            None => request,
+        };
+        let resp = request
+            .send()
+            .await
+            .with_context(|| format!("{what} request failed"))?;
+        let text = Self::check(resp, what).await?.text().await?;
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
     /// Show the typing indicator to others for ~10 seconds.
     pub async fn trigger_typing(&self, channel_id: &str) -> Result<()> {
         let resp = self
