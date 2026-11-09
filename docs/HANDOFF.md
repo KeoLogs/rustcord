@@ -14,7 +14,12 @@ Read CLAUDE.md first, then this.
   + clean close (code 1000) + fuller properties, sysmsg/stickers, GIF picker,
   Unicode/symbol fonts, rail icons shrink when narrow. Release A integration
   should be built on top of feat/polish-2.
-- wip/voice (voice groundwork: docs/VOICE.md, src/voice/ protocol/state/widgets).
+- wip/voice DONE @2188b26 (base messenger-complete): docs/VOICE.md (design, [V]/[R]/[A] tags,
+  estimates), src/voice/{protocol,state,panel,icons}.rs (pure + tested), spike.rs behind
+  `--features voice` (davey 0.2 MIT, opus2, RustCrypto AEADs, cpal; needs cmake + C compiler,
+  libasound2-dev on Linux). Stage 1 wiring: ToUi::VoiceStates{guild_id,list}, ToUi::VoiceStateUpdate;
+  VoiceStates in app, voice_channel_row + channel_members in channel list, connected_bar above
+  profile; Voice module. Join only from user click. Estimate: listen 4-7 days, speak 2-4, polish 3-5.
 - wip/release DONE @173c144 (base feat/messenger-complete): .github/workflows/release.yml
   (Run workflow with a version → builds Win zip + Inno setup.exe, Linux tar.gz, macOS
   universal .app zip, SHA256SUMS, GitHub Release), build.yml actions bumped to node24
