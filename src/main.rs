@@ -10,6 +10,8 @@ mod embed;
 mod emoji;
 mod gateway;
 mod layout;
+#[allow(dead_code)]
+mod layout_presets;
 mod links;
 mod login;
 mod markdown;
