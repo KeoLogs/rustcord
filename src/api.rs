@@ -384,6 +384,40 @@ impl Api {
         Ok(Self::check(resp, "Saving settings").await?.json().await?)
     }
 
+    /// Generic REST call for the server-admin pages (`guild_admin::execute`).
+    /// `path` is relative to the API base and may carry a query string;
+    /// `audit_reason` must already be percent-encoded (it goes into the
+    /// `X-Audit-Log-Reason` header). 204 / empty bodies give `Value::Null`.
+    pub async fn admin_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+        audit_reason: Option<&str>,
+        what: &str,
+    ) -> Result<Value> {
+        let mut request = self
+            .http
+            .request(method, format!("{API_BASE}{path}"))
+            .header("Authorization", &self.auth);
+        if let Some(reason) = audit_reason.filter(|r| !r.is_empty()) {
+            request = request.header("X-Audit-Log-Reason", reason);
+        }
+        request = match body {
+            Some(b) => request.json(b),
+            None => request.header("Content-Length", "0"),
+        };
+        let resp = request
+            .send()
+            .await
+            .with_context(|| format!("{what} request failed"))?;
+        let text = Self::check(resp, what).await?.text().await?;
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
     /// Show the typing indicator to others for ~10 seconds.
     pub async fn trigger_typing(&self, channel_id: &str) -> Result<()> {
         let resp = self

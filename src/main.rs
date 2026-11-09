@@ -2,25 +2,37 @@
 
 mod api;
 mod app;
+#[allow(dead_code)]
+mod audit_log;
 mod autocomplete;
 mod backend;
 mod config;
 mod demo;
 mod embed;
 mod emoji;
+#[allow(dead_code)]
+mod emoji_manage;
 mod gateway;
+#[allow(dead_code)]
+mod guild_admin;
 mod layout;
 mod links;
 mod login;
 mod markdown;
+#[allow(dead_code)]
+mod moderation;
 mod members;
 mod notify;
 mod perms;
+#[allow(dead_code)]
+mod permissions_table;
 mod pins;
 mod presence;
 mod profile;
 mod quick_switcher;
 mod read_state;
+#[allow(dead_code)]
+mod server_roles;
 mod settings;
 mod settings_proto;
 mod status;
