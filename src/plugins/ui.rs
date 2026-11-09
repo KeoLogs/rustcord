@@ -324,7 +324,7 @@ fn plugin_card(
             }
             if ui
                 .add(
-                    egui::Button::new(RichText::new("Uninstall").small().color(pal.danger)).small(),
+                    egui::Button::new(RichText::new("Uninstall").color(pal.danger)).small(),
                 )
                 .clicked()
             {

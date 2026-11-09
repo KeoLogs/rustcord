@@ -862,8 +862,14 @@ impl Runtime {
         let Some(f) = self.hooks.borrow().display.clone() else {
             return Ok(None);
         };
-        self.guarded(|| f.call::<Option<String>>(msg))
-            .map(|r| r.map(|s| truncate(s, MAX_TEXT)))
+        // Storage writes made while displaying don't count as changes,
+        // or a display function that writes would re-run forever.
+        let changed_before = self.hooks.borrow().storage_changed;
+        let r = self
+            .guarded(|| f.call::<Option<String>>(msg))
+            .map(|r| r.map(|s| truncate(s, MAX_TEXT)));
+        self.hooks.borrow_mut().storage_changed = changed_before;
+        r
     }
 
     pub fn panel_titles(&self) -> Vec<String> {
