@@ -9,18 +9,24 @@ mod demo;
 mod embed;
 mod emoji;
 mod gateway;
+#[allow(dead_code)]
+mod invites;
 mod layout;
 mod links;
 mod login;
 mod markdown;
 mod members;
 mod notify;
+#[allow(dead_code)]
+mod onboarding;
 mod perms;
 mod pins;
 mod presence;
 mod profile;
 mod quick_switcher;
 mod read_state;
+#[allow(dead_code)]
+mod screening;
 mod settings;
 mod settings_proto;
 mod status;
