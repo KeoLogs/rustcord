@@ -118,6 +118,18 @@ fn twemoji_code(g: &str) -> String {
         .join("-")
 }
 
+/// Twemoji image URL for one Unicode emoji (same URL the message view uses,
+/// so the texture is shared).
+pub fn twemoji_url(emoji: &str) -> String {
+    format!("{TWEMOJI_BASE}/{}.png", twemoji_code(emoji))
+}
+
+/// Discord CDN URL for a custom emoji (same URL the message view uses).
+pub fn custom_emoji_url(id: &str, animated: bool) -> String {
+    let ext = if animated { "gif" } else { "png" };
+    format!("https://cdn.discordapp.com/emojis/{id}.{ext}?size=48")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

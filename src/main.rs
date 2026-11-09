@@ -6,6 +6,8 @@ mod backend;
 mod config;
 mod demo;
 mod emoji;
+#[allow(dead_code)] // wired into the UI later
+mod emoji_picker;
 mod gateway;
 mod layout;
 mod login;
@@ -13,11 +15,15 @@ mod members;
 mod notify;
 mod presence;
 mod profile;
+#[allow(dead_code)] // wired into the UI later
+mod reactions;
 mod read_state;
 mod settings;
 mod theme;
 mod timefmt;
 mod types;
+#[allow(dead_code)] // wired into the UI later
+mod unicode_symbols;
 
 fn main() -> eframe::Result {
     // Two dependencies enable different rustls crypto backends (aws-lc-rs via
