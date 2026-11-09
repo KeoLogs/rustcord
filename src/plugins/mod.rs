@@ -8,12 +8,16 @@
 //!
 //! # Integration (app.rs)
 //!
-//! Own one `PluginHost` (`PluginHost::new()`, cheap: nothing is read until
-//! the Plugins module is on) next to `config` in `RustCordApp`, then:
+//! Add `plugins: bool` (default **false**) to `config::Modules` and a
+//! `MODULES` entry ("Plugins", "Run Luau plugins you install (Settings →
+//! Plugins). Each runs sandboxed with only the permissions you approve. Off =
+//! no plugin is loaded."). Own one `PluginHost` (`PluginHost::new()`, cheap:
+//! nothing is read until the module is on) next to `config` in
+//! `RustCordApp`, then:
 //!
 //! | Where | Call |
 //! |---|---|
-//! | `App::logic`, every frame (Main screen) | `host.update(ctx, &mut self.config)` |
+//! | `App::logic`, every frame (Main screen) | `host.update(ctx, self.config.modules.plugins)` (also on the login screen is fine; off = drops every VM) |
 //! | `ToUi::Ready` | `host.on_ready(&me)` |
 //! | `ToUi::NewMessage` | `host.on_message(&msg)` |
 //! | `ToUi::MessageUpdated` | `host.on_message_update(&patch)` |
@@ -23,7 +27,7 @@
 //! | autocomplete (optional) | `host.commands()` for `/` suggestions |
 //! | a `Pane::Plugins` tile | `host.draw_panels(ui, &pal)` (or `draw_panel` per `host.panels()`) |
 //! | each frame | `for n in host.drain_notifications()` → show as a toast |
-//! | Settings → Plugins section | `host.settings_ui(ui, &mut config, &pal)`; show `PluginsAction::Notice` as a toast |
+//! | Settings → Plugins section | `host.settings_ui(ui, draft.modules.plugins, &pal)`; `PluginsAction::Notice` → toast, `PluginsAction::SetModule(on)` → set `modules.plugins` and save |
 //! | `App::save` / on exit | `host.save()` |
 
 // TODO(integration): remove once app.rs calls the host.
@@ -49,7 +53,6 @@ use eframe::egui;
 use mlua::{Lua, Table, Value};
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
 use crate::theme::Palette;
 use crate::types::{Message, MessagePatch, User};
 
@@ -64,7 +67,8 @@ const FRAME_BUDGET: Duration = Duration::from_millis(100);
 const DISPLAY_CACHE_CAP: usize = 4000;
 
 /// A plugin the user enabled, with the permissions they approved. Saved in
-/// `Config::enabled_plugins`. A plugin only runs if its manifest asks for no
+/// `<data>/plugin-data/_enabled.json` (the host owns this list, so
+/// `Config` only needs the `Modules::plugins` switch). A plugin only runs if its manifest asks for no
 /// more than `permissions` (an update asking for more needs re-approval).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginGrant {
@@ -124,6 +128,9 @@ pub struct PluginNotification {
 pub enum PluginsAction {
     /// Show this as a toast (install / uninstall results).
     Notice(String),
+    /// The page's module switch was flipped: set `Modules::plugins` to this
+    /// and save the config. (The same switch is in Settings → Modules.)
+    SetModule(bool),
 }
 
 pub struct PluginHost {
@@ -138,6 +145,9 @@ pub struct PluginHost {
     picker: Option<mpsc::Receiver<Option<PathBuf>>>,
     selected_panel: Option<PanelId>,
     ui: ui::PageState,
+    /// Enabled plugins + approved permissions (None = not read yet).
+    grants: Option<Vec<PluginGrant>>,
+    grants_path: PathBuf,
 }
 
 /// RustCord's data folder (`eframe::storage_dir`), e.g.
@@ -162,6 +172,8 @@ impl PluginHost {
 
     pub fn with_dirs(plugins_dir: PathBuf, data_dir: PathBuf) -> Self {
         PluginHost {
+            grants: None,
+            grants_path: data_dir.join("_enabled.json"),
             mgr: Manager::new(plugins_dir, data_dir),
             active: false,
             me: None,
@@ -185,12 +197,14 @@ impl PluginHost {
         self.active
     }
 
-    /// Once per frame (from `App::logic`): follow the module switch and the
-    /// enabled list, finish installs, apply auto-disables, save storage.
-    pub fn update(&mut self, ctx: &egui::Context, config: &mut Config) {
+    /// Once per frame (from `App::logic`), with `config.modules.plugins`:
+    /// follow the module switch and the enabled list, finish installs,
+    /// apply auto-disables, save storage.
+    pub fn update(&mut self, ctx: &egui::Context, module_on: bool) {
         self.frame_spent = Duration::ZERO;
-        if !config.modules.plugins {
+        if !module_on {
             if self.active {
+                self.save();
                 self.shutdown_vms();
                 self.active = false;
             }
@@ -203,22 +217,74 @@ impl PluginHost {
         }
         self.poll_picker();
         // Auto-disabled plugins lose their grant (the user re-approves).
-        for e in &self.mgr.entries {
-            if e.auto_disabled.is_some() {
-                config.enabled_plugins.retain(|g| g.id != e.id);
+        let off: Vec<String> = self
+            .mgr
+            .entries
+            .iter()
+            .filter(|e| e.auto_disabled.is_some())
+            .map(|e| e.id.clone())
+            .collect();
+        for id in off {
+            if self.grant(&id).is_some() {
+                self.revoke(&id);
             }
         }
-        self.sync(&config.enabled_plugins);
+        self.sync();
         self.forget_images(ctx);
         if self.last_flush.elapsed() > Duration::from_secs(5) {
             self.save();
         }
     }
 
+    fn grants_mut(&mut self) -> &mut Vec<PluginGrant> {
+        let path = &self.grants_path;
+        self.grants.get_or_insert_with(|| {
+            std::fs::read(path)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default()
+        })
+    }
+
+    /// The approved permissions of plugin `id`, if it's enabled.
+    pub fn grant(&mut self, id: &str) -> Option<PluginGrant> {
+        self.grants_mut().iter().find(|g| g.id == id).cloned()
+    }
+
+    /// Enable `id` with these permissions (saved at once).
+    fn set_grant(&mut self, grant: PluginGrant) {
+        let grants = self.grants_mut();
+        grants.retain(|g| g.id != grant.id);
+        grants.push(grant);
+        self.save_grants();
+    }
+
+    /// Disable `id` (saved at once).
+    fn revoke(&mut self, id: &str) {
+        self.grants_mut().retain(|g| g.id != id);
+        self.save_grants();
+    }
+
+    fn save_grants(&mut self) {
+        let Some(grants) = &self.grants else {
+            return;
+        };
+        if let Some(dir) = self.grants_path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_vec_pretty(grants) {
+            let tmp = self.grants_path.with_extension("json.tmp");
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(&tmp, &self.grants_path);
+            }
+        }
+    }
+
     /// Load / unload to match `grants`, deliver `ready` to new VMs, and
     /// invalidate cached display text if anything changed.
-    fn sync(&mut self, grants: &[PluginGrant]) {
-        let loaded = self.mgr.reconcile(grants);
+    fn sync(&mut self) {
+        let grants = self.grants_mut().clone();
+        let loaded = self.mgr.reconcile(&grants);
         if let Some(me) = self.me.clone() {
             for i in loaded {
                 self.fire_one(i, Event::Ready, |lua| user_table(lua, &me));
@@ -597,10 +663,10 @@ impl PluginHost {
     pub fn settings_ui(
         &mut self,
         ui: &mut egui::Ui,
-        config: &mut Config,
+        module_on: bool,
         pal: &Palette,
     ) -> Option<PluginsAction> {
-        ui::settings_page(self, ui, config, pal)
+        ui::settings_page(self, ui, module_on, pal)
     }
 
     /// Open the system file picker on a thread (a `.zip` or a folder).
@@ -654,7 +720,7 @@ impl PluginHost {
         }
     }
 
-    fn finish_install(&mut self, p: PendingInstall, config: &mut Config, enable: bool) -> String {
+    fn finish_install(&mut self, p: PendingInstall, enable: bool) -> String {
         let name = p.manifest.name.clone();
         let grant = PluginGrant {
             id: p.manifest.id.clone(),
@@ -662,11 +728,12 @@ impl PluginHost {
         };
         match self.mgr.finish_install(p) {
             Ok(id) => {
-                config.enabled_plugins.retain(|g| g.id != id);
                 if enable {
-                    config.enabled_plugins.push(grant);
+                    self.set_grant(grant);
+                } else {
+                    self.revoke(&id);
                 }
-                self.sync(&config.enabled_plugins);
+                self.sync();
                 format!("Installed {name}")
             }
             Err(e) => e,

@@ -58,7 +58,6 @@ pub struct RustCordApp {
     applied: Option<(ThemeChoice, f32)>,
     /// Status bar module's RAM reading.
     ram: RamSampler,
-    plugins: crate::plugins::PluginHost,
 }
 
 impl RustCordApp {
@@ -74,7 +73,6 @@ impl RustCordApp {
             .unwrap_or_else(layout::default_tree);
 
         let mut app = Self {
-            plugins: crate::plugins::PluginHost::new(),
             screen: Screen::Login(LoginForm::new(config.remember_login, None)),
             config,
             tree,
@@ -221,21 +219,6 @@ impl RamSampler {
 
 impl eframe::App for RustCordApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if std::env::var("RC_PLUGINS_ON").is_ok() && !self.config.modules.plugins {
-            use crate::plugins::{Permission as P, PluginGrant};
-            self.config.modules.plugins = true;
-            for (id, perms) in [
-                ("hello", vec![P::Commands]),
-                ("word-filter", vec![P::MessageDisplay, P::Ui, P::Storage]),
-                ("channel-notes", vec![P::Ui, P::Storage]),
-            ] {
-                self.config.enabled_plugins.push(PluginGrant { id: id.into(), permissions: perms });
-            }
-        }
-        if std::env::var("RC_PLUGINS_OFF").is_ok() {
-            self.config.modules.plugins = false;
-        }
-        self.plugins.update(ctx, &mut self.config);
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
@@ -312,16 +295,6 @@ impl eframe::App for RustCordApp {
 
         // Settings page replaces the main UI while open.
         if let Some(page) = &mut self.settings {
-            if std::env::var("RC_PLUGIN_PAGE").is_ok() {
-                egui::CentralPanel::default().show(ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.set_max_width(680.0);
-                        ui.heading("Plugins");
-                        self.plugins.settings_ui(ui, &mut self.config, &pal);
-                    });
-                });
-                return;
-            }
             let Screen::Main(state) = &mut self.screen else {
                 return;
             };
@@ -350,12 +323,6 @@ impl eframe::App for RustCordApp {
             self.editing_layout = false;
         }
         self.top_bar(ui, &pal, &status, connected);
-        if std::env::var("RC_PLUGIN_WINDOW").is_ok() {
-            let host = &mut self.plugins;
-            egui::Window::new("Plugin panels").default_pos([700.0, 120.0]).show(&ctx, |ui| {
-                host.draw_panels(ui, &pal);
-            });
-        }
 
         let Screen::Main(state) = &mut self.screen else {
             return;

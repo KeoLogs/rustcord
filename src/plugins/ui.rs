@@ -7,7 +7,6 @@ use super::manager::PendingInstall;
 use super::manifest::{Manifest, Permission};
 use super::runtime::{Runtime, UiTarget, Widget};
 use super::{PluginGrant, PluginHost, PluginsAction, open_folder};
-use crate::config::Config;
 use crate::theme::{Bold, Palette};
 
 /// Dialog / status state of the Settings → Plugins page.
@@ -110,7 +109,7 @@ struct Row {
 pub fn settings_page(
     host: &mut PluginHost,
     ui: &mut egui::Ui,
-    config: &mut Config,
+    module_on: bool,
     pal: &Palette,
 ) -> Option<PluginsAction> {
     let mut action = None;
@@ -134,12 +133,15 @@ pub fn settings_page(
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                toggle(ui, &mut config.modules.plugins, pal)
+                let mut on = module_on;
+                if toggle(ui, &mut on, pal).clicked() {
+                    action = Some(PluginsAction::SetModule(on));
+                }
             });
         });
     });
-    if !config.modules.plugins {
-        return None;
+    if !module_on {
+        return action;
     }
     if !host.active {
         // The module was just switched on; `update` scans next frame.
@@ -161,11 +163,10 @@ pub fn settings_page(
         {
             host.pick_install_source(ui.ctx(), false);
         }
-        if ui.button("📁 Open plugins folder").clicked() {
+        if icon_button(ui, Icon::Folder, "Open plugins folder", pal).clicked() {
             open_folder(&host.mgr.plugins_dir);
         }
-        if ui
-            .button("↻ Reload all")
+        if icon_button(ui, Icon::Reload, "Reload all", pal)
             .on_hover_text("Re-read the plugins folder and restart every plugin")
             .clicked()
         {
@@ -174,7 +175,7 @@ pub fn settings_page(
                 host.mgr.reload(&id);
             }
             host.mgr.scan();
-            host.sync(&config.enabled_plugins);
+            host.sync();
         }
     });
     if host.picker.is_some() {
@@ -210,28 +211,18 @@ pub fn settings_page(
         );
     }
     for row in &rows {
-        plugin_card(host, ui, config, pal, row);
+        plugin_card(host, ui, pal, row);
         ui.add_space(6.0);
     }
 
-    if let Some(a) = dialogs(host, ui.ctx(), config, pal) {
+    if let Some(a) = dialogs(host, ui.ctx(), pal) {
         action = Some(a);
     }
     action
 }
 
-fn plugin_card(
-    host: &mut PluginHost,
-    ui: &mut egui::Ui,
-    config: &mut Config,
-    pal: &Palette,
-    row: &Row,
-) {
-    let grant = config
-        .enabled_plugins
-        .iter()
-        .find(|g| g.id == row.id)
-        .cloned();
+fn plugin_card(host: &mut PluginHost, ui: &mut egui::Ui, pal: &Palette, row: &Row) {
+    let grant = host.grant(&row.id);
     card(ui, pal, |ui| {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -270,8 +261,8 @@ fn plugin_card(
                     if on {
                         host.ui.approve_enable = Some(m.id.clone());
                     } else {
-                        config.enabled_plugins.retain(|g| g.id != row.id);
-                        host.sync(&config.enabled_plugins);
+                        host.revoke(&row.id);
+                        host.sync();
                     }
                 }
             });
@@ -312,22 +303,17 @@ fn plugin_card(
         }
 
         ui.horizontal_wrapped(|ui| {
-            if ui.small_button("↻ Reload").clicked() {
+            if icon_button(ui, Icon::Reload, "Reload", pal).clicked() {
                 host.mgr.reload(&row.id);
-                host.sync(&config.enabled_plugins);
+                host.sync();
             }
-            if ui.small_button("📄 Log").clicked() {
+            if icon_button(ui, Icon::Log, "Log", pal).clicked() {
                 host.ui.log_view = Some(row.id.clone());
             }
-            if ui.small_button("📁 Folder").clicked() {
+            if icon_button(ui, Icon::Folder, "Folder", pal).clicked() {
                 open_folder(&host.mgr.plugins_dir.join(&row.id));
             }
-            if ui
-                .add(
-                    egui::Button::new(RichText::new("Uninstall").color(pal.danger)).small(),
-                )
-                .clicked()
-            {
+            if icon_button(ui, Icon::Trash, "Uninstall", pal).clicked() {
                 host.ui.confirm_uninstall = Some(row.id.clone());
             }
         });
@@ -343,12 +329,7 @@ fn plugin_card(
 }
 
 /// The modal dialogs: install approval, enable approval, uninstall, log.
-fn dialogs(
-    host: &mut PluginHost,
-    ctx: &egui::Context,
-    config: &mut Config,
-    pal: &Palette,
-) -> Option<PluginsAction> {
+fn dialogs(host: &mut PluginHost, ctx: &egui::Context, pal: &Palette) -> Option<PluginsAction> {
     let mut action = None;
 
     if let Some(p) = &host.ui.pending {
@@ -371,7 +352,7 @@ fn dialogs(
             match choice {
                 Approve::Cancel => host.mgr.cancel_install(p),
                 Approve::Yes | Approve::KeepOff => {
-                    let msg = host.finish_install(p, config, choice == Approve::Yes);
+                    let msg = host.finish_install(p, choice == Approve::Yes);
                     let ok = msg.starts_with("Installed");
                     host.ui.status = Some((msg.clone(), !ok));
                     action = Some(PluginsAction::Notice(msg));
@@ -399,13 +380,12 @@ fn dialogs(
                 if let Some(choice) = choice {
                     host.ui.approve_enable = None;
                     if choice == Approve::Yes {
-                        config.enabled_plugins.retain(|g| g.id != id);
-                        config.enabled_plugins.push(PluginGrant {
+                        host.set_grant(PluginGrant {
                             id: id.clone(),
                             permissions: m.permissions.clone(),
                         });
                         host.mgr.reset(&id);
-                        host.sync(&config.enabled_plugins);
+                        host.sync();
                     }
                 }
             }
@@ -440,12 +420,12 @@ fn dialogs(
             });
         });
         if confirm {
-            config.enabled_plugins.retain(|g| g.id != id);
+            host.revoke(&id);
             let msg = match host.mgr.uninstall(&id) {
                 Ok(()) => format!("Uninstalled {name}"),
                 Err(e) => e,
             };
-            host.sync(&config.enabled_plugins);
+            host.sync();
             host.ui.status = Some((msg.clone(), false));
             action = Some(PluginsAction::Notice(msg));
             close = true;
@@ -590,6 +570,128 @@ fn chip(ui: &mut egui::Ui, pal: &Palette, text: &str) -> egui::Response {
             ui.label(RichText::new(text).small().color(pal.text));
         })
         .response
+}
+
+/// Vector icons for the plugins page (painted, never emoji).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Icon {
+    Folder,
+    Reload,
+    Log,
+    Trash,
+}
+
+/// Paint `icon` into `rect` (square) with `color`.
+pub fn paint_icon(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color32) {
+    use egui::{Shape, Stroke, pos2};
+    let s = rect.width();
+    let p = |x: f32, y: f32| pos2(rect.left() + x * s, rect.top() + y * s);
+    let stroke = Stroke::new((s / 10.0).max(1.2), color);
+    match icon {
+        Icon::Folder => {
+            let pts = vec![
+                p(0.08, 0.22),
+                p(0.40, 0.22),
+                p(0.50, 0.34),
+                p(0.92, 0.34),
+                p(0.92, 0.82),
+                p(0.08, 0.82),
+            ];
+            painter.add(Shape::closed_line(pts, stroke));
+        }
+        Icon::Reload => {
+            let c = rect.center();
+            let r = s * 0.34;
+            let n = 20;
+            // Three-quarter circle from the top, clockwise, gap top-right.
+            let pts: Vec<_> = (0..=n)
+                .map(|i| {
+                    let a = -std::f32::consts::FRAC_PI_4 * 0.5
+                        - (i as f32 / n as f32) * std::f32::consts::PI * 1.6;
+                    pos2(c.x + r * a.cos(), c.y + r * a.sin())
+                })
+                .collect();
+            let end = pts[0];
+            painter.add(Shape::line(pts, stroke));
+            // Arrow head at the start of the arc.
+            painter.add(Shape::line(
+                vec![
+                    pos2(end.x - s * 0.20, end.y - s * 0.02),
+                    end,
+                    pos2(end.x + s * 0.02, end.y - s * 0.22),
+                ],
+                stroke,
+            ));
+        }
+        Icon::Log => {
+            let pts = vec![
+                p(0.20, 0.08),
+                p(0.64, 0.08),
+                p(0.82, 0.26),
+                p(0.82, 0.92),
+                p(0.20, 0.92),
+            ];
+            painter.add(Shape::closed_line(pts, stroke));
+            for y in [0.42, 0.58, 0.74] {
+                painter.line_segment([p(0.34, y), p(0.68, y)], stroke);
+            }
+        }
+        Icon::Trash => {
+            painter.line_segment([p(0.12, 0.24), p(0.88, 0.24)], stroke);
+            painter.add(Shape::line(
+                vec![p(0.38, 0.24), p(0.40, 0.10), p(0.60, 0.10), p(0.62, 0.24)],
+                stroke,
+            ));
+            painter.add(Shape::line(
+                vec![p(0.22, 0.24), p(0.28, 0.90), p(0.72, 0.90), p(0.78, 0.24)],
+                stroke,
+            ));
+            for x in [0.42, 0.58] {
+                painter.line_segment([p(x, 0.40), p(x, 0.76)], stroke);
+            }
+        }
+    }
+}
+
+/// A small flat button: vector icon + label. Trash is drawn in danger red.
+fn icon_button(ui: &mut egui::Ui, icon: Icon, text: &str, pal: &Palette) -> egui::Response {
+    let color = if icon == Icon::Trash {
+        pal.danger
+    } else {
+        pal.text
+    };
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text.to_string(), egui::FontId::proportional(13.0), color);
+    let icon_size = 14.0;
+    let pad = vec2(8.0, 4.0);
+    let size = vec2(
+        pad.x * 2.0 + icon_size + 6.0 + galley.size().x,
+        (galley.size().y.max(icon_size) + pad.y * 2.0).max(24.0),
+    );
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let fill = if resp.is_pointer_button_down_on() {
+            pal.selected
+        } else if resp.hovered() {
+            pal.hover
+        } else {
+            pal.input
+        };
+        painter.rect_filled(rect, 4, fill);
+        let icon_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + pad.x + icon_size / 2.0, rect.center().y),
+            vec2(icon_size, icon_size),
+        );
+        paint_icon(painter, icon_rect, icon, color);
+        let text_pos = egui::pos2(
+            icon_rect.right() + 6.0,
+            rect.center().y - galley.size().y / 2.0,
+        );
+        painter.galley(text_pos, galley, color);
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn hint(ui: &mut egui::Ui, pal: &Palette, text: &str) {

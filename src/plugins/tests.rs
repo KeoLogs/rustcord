@@ -10,13 +10,12 @@ use serde_json::json;
 
 use super::runtime::{UiTarget, Widget};
 use super::*;
-use crate::config::Config;
 use crate::types::Message;
 
 struct Env {
     root: PathBuf,
     host: PluginHost,
-    config: Config,
+    module_on: bool,
     ctx: egui::Context,
 }
 
@@ -26,12 +25,10 @@ impl Env {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let host = PluginHost::with_dirs(root.join("plugins"), root.join("data"));
-        let mut config = Config::default();
-        config.modules.plugins = true;
         Env {
             root,
             host,
-            config,
+            module_on: true,
             ctx: egui::Context::default(),
         }
     }
@@ -62,15 +59,14 @@ impl Env {
     }
 
     fn grant(&mut self, id: &str, permissions: Vec<Permission>) {
-        self.config.enabled_plugins.retain(|g| g.id != id);
-        self.config.enabled_plugins.push(PluginGrant {
+        self.host.set_grant(PluginGrant {
             id: id.into(),
             permissions,
         });
     }
 
     fn update(&mut self) {
-        self.host.update(&self.ctx, &mut self.config);
+        self.host.update(&self.ctx, self.module_on);
     }
 
     fn entry(&self, id: &str) -> &manager::PluginEntry {
@@ -417,7 +413,7 @@ fn repeated_errors_auto_disable() {
     assert!(env.entry("bad").auto_disabled.is_some());
     env.update();
     // Its approval is withdrawn: the user has to switch it on again.
-    assert!(env.config.enabled_plugins.iter().all(|g| g.id != "bad"));
+    assert!(env.host.grant("bad").is_none());
     assert_eq!(env.run("boom", ""), None);
     let log = env.entry("bad").log.borrow();
     assert!(
@@ -483,16 +479,16 @@ fn module_off_loads_nothing() {
         &["commands"],
         r#"rustcord.command("a", "", function() return "a" end)"#,
     );
-    env.config.modules.plugins = false;
+    env.module_on = false;
     env.update();
     assert!(!env.host.is_active());
     assert!(env.host.mgr.entries.is_empty(), "nothing scanned");
     assert_eq!(env.run("a", ""), None);
-    env.config.modules.plugins = true;
+    env.module_on = true;
     env.update();
     assert_eq!(draft(env.run("a", "")), "a");
     // Switching off again drops the VMs.
-    env.config.modules.plugins = false;
+    env.module_on = false;
     env.update();
     assert!(env.host.mgr.running().next().is_none());
     assert!(env.host.commands().is_empty());
@@ -520,7 +516,7 @@ fn install_from_zip_and_uninstall() {
     env.host.begin_install(&zip_path);
     let pending = env.host.ui.pending.take().expect("staged");
     assert_eq!(pending.manifest.permissions, vec![Permission::Commands]);
-    let msg = env.host.finish_install(pending, &mut env.config, true);
+    let msg = env.host.finish_install(pending, true);
     assert_eq!(msg, "Installed Greet");
     env.update();
     assert_eq!(draft(env.run("hi", "")), "hello!");
@@ -668,7 +664,7 @@ fn settings_page_renders() {
     env.host.ui.approve_enable = Some("word-filter".into());
     for _ in 0..2 {
         let mut out = env.ctx.run_ui(Default::default(), |ui| {
-            let action = env.host.settings_ui(ui, &mut env.config, &pal);
+            let action = env.host.settings_ui(ui, env.module_on, &pal);
             assert_eq!(action, None);
         });
         out.textures_delta.clear();
@@ -677,11 +673,38 @@ fn settings_page_renders() {
     let pending = env.host.ui.pending.take().unwrap();
     staging_env.host.mgr.cancel_install(pending);
     // Module off: the page only offers the switch.
-    env.config.modules.plugins = false;
+    env.module_on = false;
     env.update();
     let mut out = env.ctx.run_ui(Default::default(), |ui| {
-        env.host.settings_ui(ui, &mut env.config, &pal);
+        env.host.settings_ui(ui, env.module_on, &pal);
     });
     out.textures_delta.clear();
     assert!(!env.host.is_active());
+}
+
+#[test]
+fn enabled_list_persists_and_needs_the_module() {
+    let mut env = Env::new("grants");
+    env.add(
+        "g",
+        &["commands"],
+        r#"rustcord.command("g", "", function() return "hi" end)"#,
+    );
+    env.update();
+    assert!(env.entry("g").is_running());
+    // A fresh host (next app start) reads the saved list.
+    let mut host = PluginHost::with_dirs(env.root.join("plugins"), env.root.join("data"));
+    host.update(&env.ctx, false);
+    assert!(host.grants.is_none(), "module off: nothing read");
+    host.update(&env.ctx, true);
+    assert!(host.grant("g").is_some());
+    assert_eq!(
+        host.run_command("g", "", "1", None),
+        Some(CommandOutcome::Draft("hi".into()))
+    );
+    host.revoke("g");
+    host.update(&env.ctx, true);
+    assert!(host.run_command("g", "", "1", None).is_none());
+    let mut host = PluginHost::with_dirs(env.root.join("plugins"), env.root.join("data"));
+    assert!(host.grant("g").is_none());
 }

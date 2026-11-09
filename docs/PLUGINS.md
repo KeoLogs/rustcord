@@ -29,6 +29,9 @@ Plugins live in RustCord's data folder:
 | Linux | `~/.local/share/rustcord/plugins` | `~/.local/share/rustcord/plugin-data` |
 | macOS | `~/Library/Application Support/RustCord/plugins` | `…/plugin-data` |
 
+Which plugins are enabled, and the permissions you approved, are saved in
+`plugin-data/_enabled.json`.
+
 Each installed plugin has: an on/off switch, its permissions, version and
 author, **Reload**, **Log**, **Folder** and **Uninstall** (deletes the folder
 and its data after asking). **Reload all** re-reads the plugins folder, so
@@ -205,4 +208,7 @@ data to other servers), local notices, and its own storage and log.
 `on_channel_open` from events, `transform_display` + `display_generation`
 in the message pane, `parse_command` / `run_command` in the composer,
 `draw_panels` for a plugins tile, `drain_notifications` for toasts,
-`settings_ui` for Settings → Plugins, and `save` from `App::save`.
+`settings_ui` for Settings → Plugins (returns `PluginsAction::Notice` /
+`SetModule`), and `save` from `App::save`. The module switch itself is
+`Modules::plugins` (default off), passed in as a bool; the enabled list is
+owned by the host, not `Config`.
