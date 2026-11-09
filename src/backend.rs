@@ -198,7 +198,7 @@ async fn run(
                         query,
                     },
                     Err(e) => ToUi::GifsFailed {
-                        error: e.to_string(),
+                        error: crate::ratelimit::user_message(&e),
                     },
                 })),
                 ToBackend::PickFiles => {
@@ -280,7 +280,7 @@ async fn run(
                         Ok(pins) => ToUi::Pins { channel_id, pins },
                         Err(e) => ToUi::PinsFailed {
                             channel_id,
-                            error: e.to_string(),
+                            error: crate::ratelimit::user_message(&e),
                         },
                     }))
                 }
@@ -303,7 +303,7 @@ async fn run(
                         Err(e) => ToUi::PinFailed {
                             channel_id,
                             message_id,
-                            error: e.to_string(),
+                            error: crate::ratelimit::user_message(&e),
                         },
                     }))
                 }
@@ -364,7 +364,11 @@ async fn run(
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    let _ = tx.send(ToUi::Status(format!("Error: {e}")));
+                    let ev = match crate::ratelimit::rate_limited(&e) {
+                        Some(rl) => ToUi::RateLimited(rl),
+                        None => ToUi::Status(format!("Error: {e}")),
+                    };
+                    let _ = tx.send(ev);
                 }
             }
             ctx.request_repaint();

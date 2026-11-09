@@ -22,6 +22,7 @@ mod pins;
 mod presence;
 mod profile;
 mod quick_switcher;
+mod ratelimit;
 mod read_state;
 mod settings;
 mod settings_proto;

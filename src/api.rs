@@ -1,10 +1,13 @@
 //! Minimal Discord REST client.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use crate::ratelimit::{self, Limiter, RateLimited};
 use crate::types::Message;
 
 const API_BASE: &str = "https://discord.com/api/v10";
@@ -14,6 +17,8 @@ pub struct Api {
     http: reqwest::Client,
     /// Value for the Authorization header ("Bot xxx" for bots, raw token for users).
     auth: String,
+    /// Shared 429 state (per-route buckets + global lock).
+    limiter: Arc<Limiter>,
 }
 
 impl Api {
@@ -21,7 +26,71 @@ impl Api {
         let http = reqwest::Client::builder()
             .user_agent(concat!("RustCord/", env!("CARGO_PKG_VERSION")))
             .build()?;
-        Ok(Self { http, auth })
+        Ok(Self {
+            http,
+            auth,
+            limiter: Arc::default(),
+        })
+    }
+
+    /// Every Discord API request goes through here (the shared 429 layer).
+    ///
+    /// GETs wait for a known reset and retry once after a 429; writes are
+    /// never retried and fail with a typed [`RateLimited`] instead.
+    async fn send(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        let req = rb.build()?;
+        let is_get = req.method() == reqwest::Method::GET;
+        let (route, major) = ratelimit::route_key(req.method().as_str(), req.url().path());
+        let max_wait = if is_get {
+            ratelimit::MAX_GET_WAIT
+        } else {
+            ratelimit::MAX_WRITE_WAIT
+        };
+        let mut retried = false;
+        let mut next = Some(req);
+        while let Some(req) = next.take() {
+            if let Some(wait) = self.limiter.wait_for(&route, Instant::now()) {
+                if wait > max_wait {
+                    return Err(RateLimited {
+                        retry_after: wait,
+                        global: false,
+                    }
+                    .into());
+                }
+                tokio::time::sleep(wait).await;
+            }
+            // Keep a copy for the single GET retry (GETs have no body).
+            let spare = if is_get && !retried {
+                req.try_clone()
+            } else {
+                None
+            };
+            let resp = self.http.execute(req).await?;
+            let headers = ratelimit::Headers::from_map(resp.headers());
+            if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+                self.limiter
+                    .update(&route, &major, &headers, Instant::now());
+                return Ok(resp);
+            }
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            let rl = self.limiter.on_429(
+                &route,
+                &major,
+                &headers,
+                body["retry_after"].as_f64(),
+                body["global"].as_bool().unwrap_or(false),
+                Instant::now(),
+            );
+            match spare {
+                Some(again) if rl.retry_after <= ratelimit::MAX_GET_WAIT => {
+                    retried = true;
+                    tokio::time::sleep(rl.retry_after).await;
+                    next = Some(again);
+                }
+                _ => return Err(rl.into()),
+            }
+        }
+        bail!("request could not be sent")
     }
 
     async fn check(resp: reqwest::Response, what: &str) -> Result<reqwest::Response> {
@@ -43,10 +112,7 @@ impl Api {
     pub async fn history_around(&self, channel_id: &str, message_id: &str) -> Result<Vec<Message>> {
         let url = format!("{API_BASE}/channels/{channel_id}/messages?around={message_id}&limit=50");
         let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", &self.auth)
-            .send()
+            .send(self.http.get(&url).header("Authorization", &self.auth))
             .await
             .context("history request failed")?;
         let body: Value = Self::check(resp, "Loading messages").await?.json().await?;
@@ -63,10 +129,11 @@ impl Api {
     /// user's click.
     pub async fn close_dm(&self, channel_id: &str) -> Result<()> {
         let resp = self
-            .http
-            .delete(format!("{API_BASE}/channels/{channel_id}"))
-            .header("Authorization", &self.auth)
-            .send()
+            .send(
+                self.http
+                    .delete(format!("{API_BASE}/channels/{channel_id}"))
+                    .header("Authorization", &self.auth),
+            )
             .await
             .context("close DM request failed")?;
         Self::check(resp, "Closing DM").await?;
@@ -86,10 +153,7 @@ impl Api {
             None => format!("{API_BASE}/gifs/trending?{common}"),
         };
         let resp = self
-            .http
-            .get(url)
-            .header("Authorization", &self.auth)
-            .send()
+            .send(self.http.get(url).header("Authorization", &self.auth))
             .await
             .context("GIF request failed")?;
         Ok(Self::check(resp, "Loading GIFs").await?.json().await?)
@@ -99,11 +163,12 @@ impl Api {
     /// DI:1647). Only called after the user confirmed.
     pub async fn leave_guild(&self, guild_id: &str) -> Result<()> {
         let resp = self
-            .http
-            .delete(format!("{API_BASE}/users/@me/guilds/{guild_id}"))
-            .header("Authorization", &self.auth)
-            .json(&json!({ "lurking": false }))
-            .send()
+            .send(
+                self.http
+                    .delete(format!("{API_BASE}/users/@me/guilds/{guild_id}"))
+                    .header("Authorization", &self.auth)
+                    .json(&json!({ "lurking": false })),
+            )
             .await
             .context("leave request failed")?;
         Self::check(resp, "Leaving server").await?;
@@ -125,10 +190,7 @@ impl Api {
     pub async fn channel_history(&self, channel_id: &str, limit: u8) -> Result<Vec<Message>> {
         let url = format!("{API_BASE}/channels/{channel_id}/messages?limit={limit}");
         let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", &self.auth)
-            .send()
+            .send(self.http.get(&url).header("Authorization", &self.auth))
             .await
             .context("history request failed")?;
         let body: Value = Self::check(resp, "Loading messages").await?.json().await?;
@@ -200,7 +262,7 @@ impl Api {
             request.multipart(form)
         };
 
-        let resp = request.send().await.context("send request failed")?;
+        let resp = self.send(request).await.context("send request failed")?;
         Self::check(resp, "Sending message").await?;
         Ok(())
     }
@@ -212,13 +274,14 @@ impl Api {
         content: &str,
     ) -> Result<()> {
         let resp = self
-            .http
-            .patch(format!(
-                "{API_BASE}/channels/{channel_id}/messages/{message_id}"
-            ))
-            .header("Authorization", &self.auth)
-            .json(&json!({ "content": content }))
-            .send()
+            .send(
+                self.http
+                    .patch(format!(
+                        "{API_BASE}/channels/{channel_id}/messages/{message_id}"
+                    ))
+                    .header("Authorization", &self.auth)
+                    .json(&json!({ "content": content })),
+            )
             .await
             .context("edit request failed")?;
         Self::check(resp, "Editing message").await?;
@@ -227,12 +290,13 @@ impl Api {
 
     pub async fn delete_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
         let resp = self
-            .http
-            .delete(format!(
-                "{API_BASE}/channels/{channel_id}/messages/{message_id}"
-            ))
-            .header("Authorization", &self.auth)
-            .send()
+            .send(
+                self.http
+                    .delete(format!(
+                        "{API_BASE}/channels/{channel_id}/messages/{message_id}"
+                    ))
+                    .header("Authorization", &self.auth),
+            )
             .await
             .context("delete request failed")?;
         Self::check(resp, "Deleting message").await?;
@@ -264,13 +328,14 @@ impl Api {
 
     async fn post_ack(&self, channel_id: &str, message_id: &str, body: Value) -> Result<()> {
         let resp = self
-            .http
-            .post(format!(
-                "{API_BASE}/channels/{channel_id}/messages/{message_id}/ack"
-            ))
-            .header("Authorization", &self.auth)
-            .json(&body)
-            .send()
+            .send(
+                self.http
+                    .post(format!(
+                        "{API_BASE}/channels/{channel_id}/messages/{message_id}/ack"
+                    ))
+                    .header("Authorization", &self.auth)
+                    .json(&body),
+            )
             .await
             .context("ack request failed")?;
         Self::check(resp, "Marking as read").await?;
@@ -284,11 +349,12 @@ impl Api {
             .map(|(c, m)| json!({ "channel_id": c, "message_id": m, "read_state_type": 0 }))
             .collect();
         let resp = self
-            .http
-            .post(format!("{API_BASE}/read-states/ack-bulk"))
-            .header("Authorization", &self.auth)
-            .json(&json!({ "read_states": read_states }))
-            .send()
+            .send(
+                self.http
+                    .post(format!("{API_BASE}/read-states/ack-bulk"))
+                    .header("Authorization", &self.auth)
+                    .json(&json!({ "read_states": read_states })),
+            )
             .await
             .context("ack-bulk request failed")?;
         Self::check(resp, "Marking server as read").await?;
@@ -306,10 +372,7 @@ impl Api {
             url.push_str(&format!("&guild_id={g}"));
         }
         let resp = self
-            .http
-            .get(&url)
-            .header("Authorization", &self.auth)
-            .send()
+            .send(self.http.get(&url).header("Authorization", &self.auth))
             .await
             .context("profile request failed")?;
         Ok(Self::check(resp, "Loading profile").await?.json().await?)
@@ -318,10 +381,11 @@ impl Api {
     /// My note on a user. 404 means there's no note.
     pub async fn note(&self, user_id: &str) -> Result<String> {
         let resp = self
-            .http
-            .get(format!("{API_BASE}/users/@me/notes/{user_id}"))
-            .header("Authorization", &self.auth)
-            .send()
+            .send(
+                self.http
+                    .get(format!("{API_BASE}/users/@me/notes/{user_id}"))
+                    .header("Authorization", &self.auth),
+            )
             .await
             .context("note request failed")?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -334,11 +398,12 @@ impl Api {
     /// Set my note on a user (empty clears it, like Discord's client).
     pub async fn set_note(&self, user_id: &str, note: &str) -> Result<()> {
         let resp = self
-            .http
-            .put(format!("{API_BASE}/users/@me/notes/{user_id}"))
-            .header("Authorization", &self.auth)
-            .json(&json!({ "note": note }))
-            .send()
+            .send(
+                self.http
+                    .put(format!("{API_BASE}/users/@me/notes/{user_id}"))
+                    .header("Authorization", &self.auth)
+                    .json(&json!({ "note": note })),
+            )
             .await
             .context("note request failed")?;
         Self::check(resp, "Saving note").await?;
@@ -354,10 +419,11 @@ impl Api {
     /// message.
     pub async fn get_pins(&self, channel_id: &str) -> Result<Vec<Value>> {
         let resp = self
-            .http
-            .get(format!("{API_BASE}/channels/{channel_id}/pins"))
-            .header("Authorization", &self.auth)
-            .send()
+            .send(
+                self.http
+                    .get(format!("{API_BASE}/channels/{channel_id}/pins"))
+                    .header("Authorization", &self.auth),
+            )
             .await
             .context("pins request failed")?;
         let body: Value = Self::check(resp, "Loading pinned messages")
@@ -370,13 +436,14 @@ impl Api {
     /// Pin a message. Only called when the user picks "Pin".
     pub async fn pin_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
         let resp = self
-            .http
-            .put(format!(
-                "{API_BASE}/channels/{channel_id}/messages/pins/{message_id}"
-            ))
-            .header("Authorization", &self.auth)
-            .header("Content-Length", "0")
-            .send()
+            .send(
+                self.http
+                    .put(format!(
+                        "{API_BASE}/channels/{channel_id}/messages/pins/{message_id}"
+                    ))
+                    .header("Authorization", &self.auth)
+                    .header("Content-Length", "0"),
+            )
             .await
             .context("pin request failed")?;
         Self::check(resp, "Pinning message").await?;
@@ -386,12 +453,13 @@ impl Api {
     /// Unpin a message. Only called when the user picks "Unpin".
     pub async fn unpin_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
         let resp = self
-            .http
-            .delete(format!(
-                "{API_BASE}/channels/{channel_id}/messages/pins/{message_id}"
-            ))
-            .header("Authorization", &self.auth)
-            .send()
+            .send(
+                self.http
+                    .delete(format!(
+                        "{API_BASE}/channels/{channel_id}/messages/pins/{message_id}"
+                    ))
+                    .header("Authorization", &self.auth),
+            )
             .await
             .context("unpin request failed")?;
         Self::check(resp, "Unpinning message").await?;
@@ -402,10 +470,11 @@ impl Api {
     /// User accounts only; see `settings_proto::UserSettings::from_rest`.
     pub async fn settings_proto(&self) -> Result<Value> {
         let resp = self
-            .http
-            .get(format!("{API_BASE}/users/@me/settings-proto/1"))
-            .header("Authorization", &self.auth)
-            .send()
+            .send(
+                self.http
+                    .get(format!("{API_BASE}/users/@me/settings-proto/1"))
+                    .header("Authorization", &self.auth),
+            )
             .await
             .context("settings request failed")?;
         Ok(Self::check(resp, "Loading settings").await?.json().await?)
@@ -416,11 +485,12 @@ impl Api {
     /// from a user action). Returns `{"settings": "<full b64>"}`.
     pub async fn patch_settings_proto(&self, settings_b64: &str) -> Result<Value> {
         let resp = self
-            .http
-            .patch(format!("{API_BASE}/users/@me/settings-proto/1"))
-            .header("Authorization", &self.auth)
-            .json(&json!({ "settings": settings_b64 }))
-            .send()
+            .send(
+                self.http
+                    .patch(format!("{API_BASE}/users/@me/settings-proto/1"))
+                    .header("Authorization", &self.auth)
+                    .json(&json!({ "settings": settings_b64 })),
+            )
             .await
             .context("settings request failed")?;
         Ok(Self::check(resp, "Saving settings").await?.json().await?)
@@ -429,11 +499,12 @@ impl Api {
     /// Show the typing indicator to others for ~10 seconds.
     pub async fn trigger_typing(&self, channel_id: &str) -> Result<()> {
         let resp = self
-            .http
-            .post(format!("{API_BASE}/channels/{channel_id}/typing"))
-            .header("Authorization", &self.auth)
-            .header("Content-Length", "0")
-            .send()
+            .send(
+                self.http
+                    .post(format!("{API_BASE}/channels/{channel_id}/typing"))
+                    .header("Authorization", &self.auth)
+                    .header("Content-Length", "0"),
+            )
             .await
             .context("typing request failed")?;
         Self::check(resp, "Typing indicator").await?;

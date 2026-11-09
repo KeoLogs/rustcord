@@ -829,6 +829,9 @@ pub enum ToUi {
     UserSettingsUpdate(serde_json::Value),
     /// A short message for the user (shown briefly), e.g. "Saved …".
     Notice(String),
+    /// A user action hit Discord's rate limit (it is not retried): show
+    /// "Slow down, try again in Ns" and hold write controls until then.
+    RateLimited(crate::ratelimit::RateLimited),
     /// RELATIONSHIP_ADD / RELATIONSHIP_REMOVE for blocked users.
     Blocked {
         user_id: String,

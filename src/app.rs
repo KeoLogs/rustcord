@@ -622,6 +622,9 @@ pub struct State {
     ac: Autocomplete,
     /// Short notice at the bottom of the chat ("Saved …").
     toast: Option<(String, Instant)>,
+    /// A write action was rate limited: user write controls stay disabled
+    /// and the toast counts down until then (never auto-retried).
+    slow_down_until: Option<Instant>,
     /// Config changes for the app to apply.
     pub config_updates: Vec<ConfigUpdate>,
 }
@@ -691,6 +694,7 @@ impl State {
             visited: VecDeque::new(),
             ac: Autocomplete::default(),
             toast: None,
+            slow_down_until: None,
             config_updates: Vec::new(),
         }
     }
@@ -1109,7 +1113,25 @@ impl State {
                 }
             }
             ToUi::Notice(text) => self.toast = Some((text, Instant::now())),
+            ToUi::RateLimited(rl) => self.rate_limited(rl),
         }
+    }
+
+    /// Show the quiet "Slow down" notice and hold write controls until the
+    /// wait is over.
+    fn rate_limited(&mut self, rl: crate::ratelimit::RateLimited) {
+        let now = Instant::now();
+        let until = now + rl.retry_after;
+        self.slow_down_until = Some(self.slow_down_until.map_or(until, |u| u.max(until)));
+        self.toast = Some((rl.to_string(), now));
+    }
+
+    /// Seconds left while user write actions are rate limited.
+    fn slow_down_secs(&self) -> Option<u64> {
+        let left = self
+            .slow_down_until?
+            .checked_duration_since(Instant::now())?;
+        Some(left.as_secs_f64().ceil().max(1.0) as u64)
     }
 
     /// New synced settings (full message from READY / GET / PATCH).
@@ -2685,6 +2707,12 @@ impl State {
         }
 
         // Toast ("Saved …") over the bottom of the chat.
+        // While rate limited the toast counts down instead of fading.
+        if let Some(secs) = self.slow_down_secs() {
+            self.toast = Some((format!("Slow down, try again in {secs}s"), Instant::now()));
+        } else if self.slow_down_until.take().is_some() {
+            self.toast = None;
+        }
         if let Some((text, at)) = &self.toast {
             if at.elapsed() > Duration::from_secs(4) {
                 self.toast = None;
