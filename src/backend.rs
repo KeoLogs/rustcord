@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::api::Api;
-use crate::gateway::{self, GatewayConfig, SessionEnd};
+use crate::gateway::{self, GatewayConfig, Session, SessionEnd};
 use crate::types::{ToBackend, ToUi};
 
 pub fn spawn(
@@ -60,9 +60,11 @@ async fn run(
         tokio::spawn(async move {
             let cfg = GatewayConfig { token, is_bot };
             let repaint = || ctx.request_repaint();
+            // Kept across connections so we can RESUME instead of re-identifying.
+            let mut session = Session::default();
             let mut backoff = 1u64;
             loop {
-                match gateway::run_session(&cfg, &tx, &repaint).await {
+                match gateway::run_session(&cfg, &mut session, &tx, &repaint).await {
                     Ok(SessionEnd::Fatal(reason)) => {
                         let _ = tx.send(ToUi::Fatal(reason));
                         repaint();
@@ -131,6 +133,41 @@ async fn run(
                 ToBackend::Typing { channel_id } => {
                     // Typing failures aren't worth bothering the user with.
                     let _ = api.trigger_typing(&channel_id).await;
+                    Ok(None)
+                }
+                // Bots have no read state on Discord's side: keep it local.
+                ToBackend::Ack { .. } | ToBackend::MarkUnread { .. } | ToBackend::AckBulk(_)
+                    if is_bot =>
+                {
+                    Ok(None)
+                }
+                ToBackend::Ack {
+                    channel_id,
+                    message_id,
+                } => api.ack(&channel_id, &message_id).await.map(|_| None),
+                ToBackend::MarkUnread {
+                    channel_id,
+                    message_id,
+                    mention_count,
+                } => api
+                    .mark_unread(&channel_id, &message_id, mention_count)
+                    .await
+                    .map(|_| None),
+                ToBackend::AckBulk(acks) => {
+                    let mut result = Ok(None);
+                    for chunk in acks.chunks(100) {
+                        if let Err(e) = api.ack_bulk(chunk).await {
+                            result = Err(e);
+                            break;
+                        }
+                    }
+                    result
+                }
+                ToBackend::Notify { title, body } => {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::notify::show_desktop(&title, &body)
+                    })
+                    .await;
                     Ok(None)
                 }
             };

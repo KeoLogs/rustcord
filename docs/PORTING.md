@@ -12,14 +12,24 @@ DMs · history · send / reply / edit / delete · typing · attachments + upload
 avatars · token login screen (DM: `windows/LogonDialog.cpp` — token-only;
 email/password/QR are unimplemented there too).
 
-## Batch A — read state & notifications
+**Batch A — read state & notifications** (`src/read_state.rs`, `src/notify.rs`):
 - READY `read_state`, `MESSAGE_ACK` (DI:2710), `PASSIVE_UPDATE_V1` (DI:3036)
-- `POST channels/{c}/messages/{m}/ack` (DI:1474, manual=true for mark unread 1503),
-  `POST read-states/ack-bulk` (DI:1543)
-- Mute: `USER_GUILD_SETTINGS_UPDATE` (DI:2719, `core/state/UserGuildSettings.cpp`)
-- Mentions + desktop notifications (`core/state/NotificationManager.cpp`)
-- Settings: EnableNotifications, FlashOnNotification (OD:499-510)
-- Gateway RESUME (op 6) — DM doesn't do this; we should.
+- `POST channels/{c}/messages/{m}/ack` with `{"token": null}` on view (DI:1487),
+  `{"manual": true, "mention_count": n}` for mark unread (DI:1459/1503),
+  `POST read-states/ack-bulk` for "Mark as read" on a server (DI:1543)
+- Mute + notification levels: READY `user_guild_settings`,
+  `USER_GUILD_SETTINGS_UPDATE` (DI:2719, `core/state/UserGuildSettings.cpp`);
+  category overrides cover their channels
+- Mentions (user, role via READY `merged_members` / GUILD_CREATE `members`,
+  @everyone with suppress settings, DMs) + desktop notifications
+  (`core/state/NotificationManager.cpp`), via `notify-rust`
+- Settings: EnableNotifications, FlashOnNotification (OD:499-510) in
+  Settings → Notifications; 🔔 mentions inbox. All of it is the Notifications
+  module except unread markers.
+- Gateway RESUME (op 6), RESUMED, op 9 with the resumable flag — DM doesn't do this.
+
+Not done from Batch A: changing mute / notification levels from RustCord (needs
+`PATCH users/@me/guilds/{id}/settings`; read-only for now), notification sound.
 
 ## Batch B — member list & presence
 - Op 14 subscribe `{guild_id, typing, activities, threads, channels:{id:[[0,99]]}}` (DI:1596-1637)

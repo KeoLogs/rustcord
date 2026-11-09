@@ -21,6 +21,16 @@ Usable day to day. It has:
 - **emoji** in colour (Twemoji + custom server emoji); other scripts (CJK,
   Arabic, Cyrillic…) via system fonts
 - typing indicators
+- **unread markers**: bold channels with a white pill, red mention badges on
+  channels and servers, a red "NEW" line in the chat; opening a channel marks it
+  read, right-click a message → *Mark unread*, right-click a server → *Mark as
+  read*; syncs with your other devices (user accounts)
+- **mutes** from your Discord account: muted channels/servers are greyed out and
+  don't badge or notify
+- **notifications**: desktop notifications for mentions and DMs, taskbar flash,
+  and a 🔔 inbox of recent mentions (Settings → Notifications)
+- gateway **resume**: short disconnects pick up where they left off instead of
+  reloading everything
 - **Settings** (⚙ in the profile bar): account, appearance, privacy & login,
   modules, layout, performance (live RAM usage), about
 - **Layout editor** (Settings → Layout → Edit layout): panels glow on hover,
@@ -28,8 +38,8 @@ Usable day to day. It has:
   Saved between runs.
 - **Modules**: switch optional parts off to save memory (Settings → Modules)
 
-Next up: see [docs/PORTING.md](docs/PORTING.md) — notifications, member list,
-markdown, embeds, pins, settings sync. Voice comes last.
+Next up: see [docs/PORTING.md](docs/PORTING.md) — member list, markdown,
+embeds, pins, settings sync. Voice comes last.
 
 ## Running
 
@@ -81,9 +91,11 @@ On Linux you may need GUI dev packages first:
 | `src/config.rs` | Saved settings and the module list |
 | `src/theme.rs` | Discord colours |
 | `src/emoji.rs` | Splits text into text + emoji images |
+| `src/read_state.rs` | Unread / mention counts per channel |
+| `src/notify.rs` | Mutes, mention detection, notification rules, inbox, desktop popups |
 | `src/backend.rs` | Tokio runtime thread; runs the gateway and handles UI requests |
-| `src/gateway.rs` | WebSocket connection to Discord's gateway |
-| `src/api.rs` | REST calls: channel history, send message |
+| `src/gateway.rs` | WebSocket connection to Discord's gateway (identify / resume) |
+| `src/api.rs` | REST calls: history, send / edit / delete, typing, acks |
 | `src/types.rs` | Guild / Channel / Message types and UI↔backend messages |
 
 The UI and the network never block each other: the backend sends `ToUi`

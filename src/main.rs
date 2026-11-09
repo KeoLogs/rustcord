@@ -9,6 +9,8 @@ mod emoji;
 mod gateway;
 mod layout;
 mod login;
+mod notify;
+mod read_state;
 mod settings;
 mod theme;
 mod types;

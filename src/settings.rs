@@ -12,6 +12,7 @@ pub enum Section {
     #[default]
     Account,
     Appearance,
+    Notifications,
     Privacy,
     Modules,
     Layout,
@@ -25,6 +26,7 @@ const SECTIONS: &[(&str, &[(Section, &str)])] = &[
         "APP SETTINGS",
         &[
             (Section::Appearance, "Appearance"),
+            (Section::Notifications, "Notifications"),
             (Section::Privacy, "Privacy & Login"),
         ],
     ),
@@ -161,6 +163,7 @@ impl SettingsPage {
                         .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
                 );
             }
+            Section::Notifications => notifications(ui, config, pal),
             Section::Privacy => {
                 ui.checkbox(&mut config.remember_login, "Remember me on this PC");
                 hint(
@@ -355,6 +358,69 @@ fn account(ui: &mut egui::Ui, me: Option<&User>, pal: &Palette) {
                 }
             });
         });
+}
+
+fn notifications(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
+    if !config.modules.notifications {
+        hint(
+            ui,
+            pal,
+            "The Notifications module is off, so RustCord shows no desktop notifications \
+             and keeps no mentions inbox. Unread markers and mention badges still work.",
+        );
+        ui.add_space(8.0);
+        if ui
+            .add(pal.primary_button("Turn on Notifications module"))
+            .clicked()
+        {
+            config.modules.notifications = true;
+        }
+        return;
+    }
+    let row = |ui: &mut egui::Ui, on: &mut bool, title: &str, desc: &str| {
+        egui::Frame::new()
+            .fill(pal.sidebar)
+            .corner_radius(8)
+            .inner_margin(12)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        // Leave room for the switch on the right.
+                        ui.set_max_width(ui.available_width() - 60.0);
+                        ui.label(RichText::new(title).strong());
+                        ui.label(RichText::new(desc).small().color(pal.muted));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        toggle(ui, on, pal)
+                    });
+                });
+            });
+        ui.add_space(6.0);
+    };
+    row(
+        ui,
+        &mut config.desktop_notifications,
+        "Enable desktop notifications",
+        "Pop up a notification for mentions and DMs (and, in servers set to \
+         \"All messages\", every message) when the window isn't focused or the \
+         channel isn't open. Muted servers and channels never notify.",
+    );
+    row(
+        ui,
+        &mut config.flash_taskbar,
+        "Flash taskbar",
+        "Flash RustCord's taskbar / dock icon when a notification arrives and the \
+         window isn't focused.",
+    );
+    ui.add_space(6.0);
+    hint(
+        ui,
+        pal,
+        "Notification levels and mutes come from your Discord account (set them in \
+         the official client for now). Bot accounts only notify on mentions and DMs. \
+         Recent mentions are listed under 🔔 in the chat header.",
+    );
 }
 
 fn label(ui: &mut egui::Ui, pal: &Palette, text: &str) {

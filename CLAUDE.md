@@ -9,7 +9,9 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
 - `src/backend.rs` runs a Tokio runtime on its own thread. It owns the gateway
   task and handles `ToBackend` requests from the UI.
 - `src/gateway.rs` is a hand-written gateway client (tokio-tungstenite):
-  Hello -> Identify -> heartbeat loop, reconnect with backoff.
+  Hello -> Identify (or op 6 Resume) -> heartbeat loop, reconnect with backoff.
+  `Session` (session_id, resume_gateway_url, seq) lives in the backend across
+  connections; op 9 / close codes 4007/4009 reset it.
 - `src/api.rs` is the REST client (reqwest).
 - `src/app.rs` is the UI. It never blocks: it drains `ToUi` events in
   `App::logic` and sends `ToBackend` requests. `State::pane_ui` draws each
@@ -26,6 +28,13 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
 - `src/settings.rs` is the settings page, `src/login.rs` the login screen,
   `src/theme.rs` the Discord palette (use `Palette` colours, not hard-coded
   ones), `src/emoji.rs` text/emoji segmentation (has unit tests).
+- `src/read_state.rs`: per-channel unread/mention counts (`ReadState`).
+  `src/notify.rs`: mutes (`Mutes`), `mentions_me`, `should_notify`, the
+  mentions `Inbox`, and `show_desktop` (notify-rust; called from the backend
+  on a blocking thread via `ToBackend::Notify`). Both are pure logic with
+  unit tests; `app.rs` wires them up (`track_new_message`, `ack_open_channel`).
+  Acks only ever happen because the user opened/is viewing a channel or
+  picked a menu item; bots skip ack requests (no read state on Discord).
 - `docs/PORTING.md` is the roadmap of features to port from Discord
   Messenger (MIT, credit kept in README/About).
 

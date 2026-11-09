@@ -9,6 +9,9 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::notify::GuildSettings;
+use crate::read_state::ReadStateEntry;
+
 /// Discord channel types we care about.
 pub const CHANNEL_TEXT: u64 = 0;
 pub const CHANNEL_DM: u64 = 1;
@@ -93,6 +96,10 @@ pub struct Guild {
     pub name: String,
     pub icon_url: Option<String>,
     pub channels: Vec<Channel>,
+    /// default_message_notifications: 0 all messages, 1 only mentions.
+    pub default_notifications: u8,
+    /// My role ids in this server (for role mentions). Filled in by the gateway.
+    pub my_roles: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,10 +139,19 @@ impl Guild {
             .or_else(|| v.pointer("/properties/icon").and_then(Value::as_str))
             .map(|hash| format!("{CDN}/icons/{id}/{hash}.png?size=64"));
 
+        let default_notifications = v
+            .get("default_message_notifications")
+            .or_else(|| v.pointer("/properties/default_message_notifications"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(1) as u8;
+
         let mut guild = Self {
             id,
             name,
             icon_url,
+            default_notifications,
+            my_roles: Vec::new(),
             channels: v
                 .get("channels")
                 .and_then(Value::as_array)
@@ -152,6 +168,8 @@ impl Guild {
             id: DM_GUILD_ID.into(),
             name: "Direct Messages".into(),
             icon_url: None,
+            default_notifications: 0,
+            my_roles: Vec::new(),
             channels,
         };
         guild.sort_channels();
@@ -374,6 +392,13 @@ pub struct Message {
     pub edited: bool,
     pub attachments: Vec<Attachment>,
     pub reply: Option<ReplyPreview>,
+    /// Server the message is in (gateway events only; None for DMs/history).
+    pub guild_id: Option<String>,
+    /// Ids of mentioned users.
+    pub mentions: Vec<String>,
+    pub mention_roles: Vec<String>,
+    /// @everyone / @here.
+    pub mention_everyone: bool,
 }
 
 impl Message {
@@ -402,6 +427,34 @@ impl Message {
             edited: v.get("edited_timestamp").is_some_and(|t| !t.is_null()),
             attachments: parse_attachments(v).unwrap_or_default(),
             reply,
+            guild_id: v
+                .get("guild_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            mentions: v
+                .get("mentions")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|u| u.get("id").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            mention_roles: v
+                .get("mention_roles")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            mention_everyone: v
+                .get("mention_everyone")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }
     }
 
@@ -467,7 +520,19 @@ pub enum ToUi {
         me: User,
         guilds: Vec<Guild>,
         dms: Vec<Channel>,
+        /// User accounts only (bots get an empty list).
+        read_state: Vec<ReadStateEntry>,
+        /// Mute / notification settings (user accounts only).
+        guild_settings: Vec<GuildSettings>,
     },
+    /// The gateway resumed the old session; missed events are replayed.
+    Resumed,
+    /// A channel was read (MESSAGE_ACK), e.g. on another device.
+    MessageAck(ReadStateEntry),
+    /// New last_message_id for channels (PASSIVE_UPDATE_V1).
+    LastMessages(Vec<(String, u64)>),
+    /// USER_GUILD_SETTINGS_UPDATE: mute / notification settings changed.
+    GuildSettingsUpdated(GuildSettings),
     GuildAdded(Guild),
     /// A channel was created or changed. `guild_id` is None for DMs.
     ChannelUpserted {
@@ -521,5 +586,23 @@ pub enum ToBackend {
     /// Show "<you> is typing…" to others. Only sent while the user types.
     Typing {
         channel_id: String,
+    },
+    /// Mark a channel read up to `message_id` (user opened / is viewing it).
+    Ack {
+        channel_id: String,
+        message_id: String,
+    },
+    /// "Mark unread": manual ack of the message before the one clicked.
+    MarkUnread {
+        channel_id: String,
+        message_id: String,
+        mention_count: u32,
+    },
+    /// "Mark as read" on a server: (channel_id, message_id) pairs.
+    AckBulk(Vec<(String, String)>),
+    /// Show a desktop notification (Notifications module).
+    Notify {
+        title: String,
+        body: String,
     },
 }

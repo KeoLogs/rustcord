@@ -37,6 +37,8 @@ impl ThemeChoice {
                 accent: hex(0x5865f2),
                 online: hex(0x23a55a),
                 danger: hex(0xda373c),
+                mention: hex(0xf23f43),
+                unread: hex(0xf2f3f5),
                 dark: true,
             },
             ThemeChoice::DiscordLight => Palette {
@@ -51,6 +53,8 @@ impl ThemeChoice {
                 accent: hex(0x5865f2),
                 online: hex(0x23a55a),
                 danger: hex(0xda373c),
+                mention: hex(0xf23f43),
+                unread: hex(0x060607),
                 dark: false,
             },
         }
@@ -70,6 +74,10 @@ pub struct Palette {
     pub accent: Color32,
     pub online: Color32,
     pub danger: Color32,
+    /// Red mention-count badge.
+    pub mention: Color32,
+    /// Unread channel names and the unread pill (white in dark theme).
+    pub unread: Color32,
     pub dark: bool,
 }
 
@@ -134,6 +142,11 @@ impl Palette {
             s.spacing.item_spacing = egui::vec2(6.0, 4.0);
             s.spacing.button_padding = egui::vec2(8.0, 4.0);
         });
+    }
+
+    /// Muted channels / servers: greyed out.
+    pub fn muted_text(&self) -> Color32 {
+        self.muted.gamma_multiply(0.55)
     }
 
     /// A filled "primary" button in Discord blurple.

@@ -12,6 +12,8 @@ use crate::config::{CONFIG_KEY, Config};
 use crate::emoji::{self, Segment};
 use crate::layout::{self, LAYOUT_KEY, LayoutBehavior, Pane};
 use crate::login::{LoginAction, LoginForm};
+use crate::notify::{self, Inbox, InboxItem, Mutes, NotifyCheck};
+use crate::read_state::ReadState;
 use crate::settings::{SettingsAction, SettingsPage};
 use crate::theme::{Palette, ThemeChoice};
 use crate::types::{Attachment, DM_GUILD_ID, Guild, Message, ToBackend, ToUi, User};
@@ -21,6 +23,8 @@ const TYPING_RESEND: Duration = Duration::from_secs(8);
 const IMAGE_MAX: (f32, f32) = (400.0, 300.0);
 /// Discord's default upload limit for accounts without Nitro.
 const UPLOAD_LIMIT: u64 = 10 * 1024 * 1024;
+/// Acks for messages arriving in the open channel are sent at most this often.
+const ACK_INTERVAL: Duration = Duration::from_secs(3);
 
 // ===========================================================================
 // App shell
@@ -146,6 +150,11 @@ impl eframe::App for RustCordApp {
             return;
         };
         state.drain_events(ctx, &self.config);
+        state.ack_open_channel(ctx, self.settings.is_none());
+        if !self.config.modules.notifications && !state.inbox.items.is_empty() {
+            // Module switched off: free the inbox.
+            state.inbox = Inbox::default();
+        }
 
         // Files dropped onto the window go into the upload list.
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -271,6 +280,7 @@ enum MessageAction {
     Edit(String, String),
     Delete(String),
     Copy(String),
+    MarkUnread(String),
 }
 
 struct Typer {
@@ -308,6 +318,20 @@ pub struct State {
     pending_files: Vec<PathBuf>,
     last_typing_sent: Option<(String, Instant)>,
     confirm_delete: Option<(String, String)>,
+
+    /// Unread / mention counts per channel.
+    reads: ReadState,
+    /// Mute and notification settings.
+    mutes: Mutes,
+    /// Recent mentions (Notifications module).
+    inbox: Inbox,
+    /// Channel the user marked unread: not auto-acked until opened again.
+    held_unread: Option<String>,
+    /// Ack for the open channel waiting to be sent (rate limited).
+    ack_pending: Option<(String, u64)>,
+    last_ack_at: Option<Instant>,
+    /// (channel, last read message when opened): where the "NEW" line goes.
+    new_marker: Option<(String, u64)>,
 }
 
 impl State {
@@ -332,18 +356,26 @@ impl State {
             pending_files: Vec::new(),
             last_typing_sent: None,
             confirm_delete: None,
+            reads: ReadState::default(),
+            mutes: Mutes::default(),
+            inbox: Inbox::default(),
+            held_unread: None,
+            ack_pending: None,
+            last_ack_at: None,
+            new_marker: None,
         }
     }
 
     // ----- events --------------------------------------------------------
 
     fn drain_events(&mut self, ctx: &egui::Context, config: &Config) {
+        let focused = window_focused(ctx);
         while let Ok(ev) = self.rx.try_recv() {
-            self.handle_event(ev, ctx, config);
+            self.handle_event(ev, ctx, config, focused);
         }
     }
 
-    fn handle_event(&mut self, ev: ToUi, ctx: &egui::Context, config: &Config) {
+    fn handle_event(&mut self, ev: ToUi, ctx: &egui::Context, config: &Config, focused: bool) {
         match ev {
             ToUi::Status(s) => {
                 if !s.starts_with("Error") {
@@ -352,17 +384,59 @@ impl State {
                 self.status = s;
             }
             ToUi::Fatal(reason) => self.fatal = Some(reason),
-            ToUi::Ready { me, guilds, dms } => {
+            ToUi::Ready {
+                me,
+                guilds,
+                dms,
+                read_state,
+                guild_settings,
+            } => {
                 self.status = "Connected".into();
                 self.connected = true;
                 self.me = Some(me);
                 self.guilds = guilds;
                 self.dms = Guild::dms(dms);
+                self.reads.clear();
+                for c in self
+                    .guilds
+                    .iter()
+                    .chain([&self.dms])
+                    .flat_map(|g| &g.channels)
+                {
+                    self.reads.track(&c.id, c.last_message_id);
+                }
+                self.reads.load(&read_state);
+                self.mutes.replace_all(guild_settings);
                 if self.selected_guild.is_none() {
                     self.selected_guild = self.guilds.first().map(|g| g.id.clone());
                 }
             }
+            ToUi::Resumed => {
+                self.status = "Connected".into();
+                self.connected = true;
+            }
+            ToUi::MessageAck(entry) => {
+                self.reads
+                    .ack(&entry.channel_id, entry.last_acked, entry.mention_count);
+                if self.reads.is_unread(&entry.channel_id) {
+                    // Marked unread elsewhere: don't immediately re-ack it here.
+                    if self.selected_channel.as_ref() == Some(&entry.channel_id) {
+                        self.held_unread = Some(entry.channel_id);
+                    }
+                } else {
+                    self.inbox.mark_channel_read(&entry.channel_id);
+                }
+            }
+            ToUi::LastMessages(list) => {
+                for (cid, last) in list {
+                    self.reads.set_last(&cid, last);
+                }
+            }
+            ToUi::GuildSettingsUpdated(settings) => self.mutes.update(settings),
             ToUi::GuildAdded(guild) => {
+                for c in &guild.channels {
+                    self.reads.track(&c.id, c.last_message_id);
+                }
                 match self.guilds.iter_mut().find(|g| g.id == guild.id) {
                     Some(existing) => *existing = guild,
                     None => self.guilds.push(guild),
@@ -371,15 +445,18 @@ impl State {
                     self.selected_guild = self.guilds.first().map(|g| g.id.clone());
                 }
             }
-            ToUi::ChannelUpserted { guild_id, channel } => match guild_id {
-                Some(gid) => {
-                    if let Some(g) = self.guilds.iter_mut().find(|g| g.id == gid) {
-                        g.upsert_channel(channel);
+            ToUi::ChannelUpserted { guild_id, channel } => {
+                self.reads.set_last(&channel.id, channel.last_message_id);
+                match guild_id {
+                    Some(gid) => {
+                        if let Some(g) = self.guilds.iter_mut().find(|g| g.id == gid) {
+                            g.upsert_channel(channel);
+                        }
                     }
+                    None if channel.is_dm() => self.dms.upsert_channel(channel),
+                    None => {}
                 }
-                None if channel.is_dm() => self.dms.upsert_channel(channel),
-                None => {}
-            },
+            }
             ToUi::History {
                 channel_id,
                 messages,
@@ -391,6 +468,7 @@ impl State {
                 if let Some(typers) = self.typing.get_mut(&msg.channel_id) {
                     typers.retain(|t| t.user_id != msg.author.id);
                 }
+                self.track_new_message(&msg, ctx, config, focused);
                 if let Some(c) = self
                     .dms
                     .channels
@@ -466,6 +544,267 @@ impl State {
             .unwrap_or_else(|| "Someone".into())
     }
 
+    // ----- read state & notifications ------------------------------------
+
+    /// The server (or DM pseudo-server) and the channel for a channel id.
+    fn find_channel(&self, channel_id: &str) -> Option<(&Guild, &crate::types::Channel)> {
+        std::iter::once(&self.dms)
+            .chain(&self.guilds)
+            .find_map(|g| g.channel(channel_id).map(|c| (g, c)))
+    }
+
+    fn is_muted(&self, guild_id: &str, c: &crate::types::Channel, now: &str) -> bool {
+        self.mutes
+            .muted(guild_id, &c.id, c.parent_id.as_deref(), now)
+    }
+
+    /// Update unread/mention counts for a new message, and notify if needed.
+    fn track_new_message(
+        &mut self,
+        msg: &Message,
+        ctx: &egui::Context,
+        config: &Config,
+        focused: bool,
+    ) {
+        let Some(me) = &self.me else { return };
+        let now = notify::now_iso();
+        let (guild_id, guild_name, channel_name, parent_id, is_dm, default_lvl, roles) =
+            match self.find_channel(&msg.channel_id) {
+                Some((g, c)) => (
+                    g.id.clone(),
+                    g.name.clone(),
+                    c.name.clone(),
+                    c.parent_id.clone(),
+                    g.is_dms(),
+                    g.default_notifications,
+                    g.my_roles.clone(),
+                ),
+                // Unknown channel: a new DM if there's no guild id.
+                None => (
+                    msg.guild_id.clone().unwrap_or_else(|| DM_GUILD_ID.into()),
+                    String::new(),
+                    String::new(),
+                    None,
+                    msg.guild_id.is_none(),
+                    0,
+                    Vec::new(),
+                ),
+            };
+        let mine = msg.author.id == me.id;
+        let settings = self.mutes.get(&guild_id);
+        let mentioned = notify::mentions_me(msg, &me.id, &roles, settings)
+            || (is_dm && !mine && !self.mutes.muted(&guild_id, &msg.channel_id, None, &now));
+        let viewing = focused
+            && self.selected_channel.as_ref() == Some(&msg.channel_id)
+            && self.held_unread.as_ref() != Some(&msg.channel_id);
+        let id: u64 = msg.id.parse().unwrap_or(0);
+        self.reads
+            .on_message(&msg.channel_id, id, mentioned, mine, viewing);
+        if viewing && !mine {
+            self.ack_pending = Some((msg.channel_id.clone(), id));
+        }
+
+        if !config.modules.notifications || mine {
+            return;
+        }
+        let place = if is_dm {
+            "Direct message".to_string()
+        } else {
+            format!("#{channel_name} · {guild_name}")
+        };
+        if mentioned {
+            self.inbox.push(InboxItem {
+                guild_id: guild_id.clone(),
+                channel_id: msg.channel_id.clone(),
+                message_id: msg.id.clone(),
+                place: place.clone(),
+                author: msg.author.name.clone(),
+                preview: notify::preview(&msg.content, 140),
+                time: msg.short_time().to_string(),
+                read: viewing,
+            });
+        }
+        let check = NotifyCheck {
+            guild_id: &guild_id,
+            channel_id: &msg.channel_id,
+            parent_id: parent_id.as_deref(),
+            is_dm,
+            mine,
+            mentioned,
+            viewing,
+            guild_default: default_lvl,
+            is_bot: me.bot,
+            now: &now,
+        };
+        if !notify::should_notify(&self.mutes, &check) {
+            return;
+        }
+        if config.desktop_notifications {
+            let title = if is_dm {
+                msg.author.name.clone()
+            } else {
+                format!("{} ({place})", msg.author.name)
+            };
+            let _ = self.tx.send(ToBackend::Notify {
+                title,
+                body: notify::preview(&msg.content, 200),
+            });
+        }
+        if config.flash_taskbar && !focused {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
+    }
+
+    /// Keep the open channel read while the window is focused (new messages,
+    /// or coming back to the window), sending at most one ack per few seconds.
+    fn ack_open_channel(&mut self, ctx: &egui::Context, chat_visible: bool) {
+        if chat_visible
+            && window_focused(ctx)
+            && let Some(cid) = self.selected_channel.clone()
+            && self.held_unread.as_ref() != Some(&cid)
+            && let Some(mid) = self.reads.mark_read(&cid)
+        {
+            self.inbox.mark_channel_read(&cid);
+            self.ack_pending = Some((cid, mid));
+        }
+        let Some((cid, mid)) = self.ack_pending.clone() else {
+            return;
+        };
+        let wait = self
+            .last_ack_at
+            .map_or(Duration::ZERO, |t| ACK_INTERVAL.saturating_sub(t.elapsed()));
+        if wait.is_zero() {
+            self.send_ack(cid, mid);
+            self.ack_pending = None;
+        } else {
+            ctx.request_repaint_after(wait);
+        }
+    }
+
+    fn send_ack(&mut self, channel_id: String, message_id: u64) {
+        self.last_ack_at = Some(Instant::now());
+        let _ = self.tx.send(ToBackend::Ack {
+            channel_id,
+            message_id: message_id.to_string(),
+        });
+    }
+
+    /// Channel context menu → Mark as read.
+    fn mark_channel_read(&mut self, channel_id: &str) {
+        self.inbox.mark_channel_read(channel_id);
+        if let Some(mid) = self.reads.mark_read(channel_id) {
+            self.send_ack(channel_id.to_string(), mid);
+        }
+    }
+
+    /// Server context menu → Mark as read (one ack-bulk request).
+    fn mark_guild_read(&mut self, guild_id: &str) {
+        let guild = if guild_id == DM_GUILD_ID {
+            Some(&self.dms)
+        } else {
+            self.guilds.iter().find(|g| g.id == guild_id)
+        };
+        let ids: Vec<String> = guild
+            .map(|g| g.channels.iter().map(|c| c.id.clone()).collect())
+            .unwrap_or_default();
+        let mut acks = Vec::new();
+        for cid in ids {
+            self.inbox.mark_channel_read(&cid);
+            if let Some(mid) = self.reads.mark_read(&cid) {
+                acks.push((cid, mid.to_string()));
+            }
+        }
+        if !acks.is_empty() {
+            let _ = self.tx.send(ToBackend::AckBulk(acks));
+        }
+    }
+
+    /// Message menu → Mark unread: everything from this message on is unread.
+    fn mark_unread(&mut self, channel_id: &str, message_id: &str) {
+        let Some(me) = self.me.clone() else { return };
+        let Ok(id) = message_id.parse::<u64>() else {
+            return;
+        };
+        let (guild_id, roles, is_dm) = match self.find_channel(channel_id) {
+            Some((g, _)) => (g.id.clone(), g.my_roles.clone(), g.is_dms()),
+            None => (DM_GUILD_ID.to_string(), Vec::new(), true),
+        };
+        let list = self
+            .messages
+            .get(channel_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        // Ack the message before it (or id - 1 if it's the oldest loaded).
+        let before = list
+            .iter()
+            .filter_map(|m| m.id.parse::<u64>().ok())
+            .filter(|&m| m < id)
+            .max()
+            .unwrap_or(id - 1);
+        let settings = self.mutes.get(&guild_id);
+        let mentions = list
+            .iter()
+            .filter(|m| m.id.parse::<u64>().is_ok_and(|m| m >= id))
+            .filter(|m| {
+                notify::mentions_me(m, &me.id, &roles, settings) || (is_dm && m.author.id != me.id)
+            })
+            .count() as u32;
+        self.reads.ack(channel_id, before, mentions);
+        self.held_unread = Some(channel_id.to_string());
+        self.new_marker = Some((channel_id.to_string(), before));
+        if self
+            .ack_pending
+            .as_ref()
+            .is_some_and(|(c, _)| c == channel_id)
+        {
+            self.ack_pending = None;
+        }
+        let _ = self.tx.send(ToBackend::MarkUnread {
+            channel_id: channel_id.to_string(),
+            message_id: before.to_string(),
+            mention_count: mentions,
+        });
+    }
+
+    /// Unread pill / mention badge / muted look for a server icon.
+    fn guild_badge(&self, g: &Guild, now: &str) -> Badge {
+        if g.is_dms() {
+            // DMs: only a mention count (every unmuted DM message counts).
+            let mentions = g
+                .channels
+                .iter()
+                .filter(|c| !self.is_muted(&g.id, c, now))
+                .map(|c| self.reads.mentions(&c.id))
+                .sum();
+            return Badge {
+                unread: false,
+                mentions,
+                muted: false,
+            };
+        }
+        if self.mutes.guild_muted(&g.id, now) {
+            return Badge {
+                unread: false,
+                mentions: 0,
+                muted: true,
+            };
+        }
+        let mut badge = Badge::default();
+        for c in g.channels.iter().filter(|c| c.is_text()) {
+            if self
+                .mutes
+                .channel_muted(&g.id, &c.id, c.parent_id.as_deref(), now)
+            {
+                continue;
+            }
+            badge.unread |= self.reads.is_unread(&c.id);
+            badge.mentions += self.reads.mentions(&c.id);
+        }
+        badge
+    }
+
     /// Drop typing entries older than 10s. Returns true if anyone is still typing.
     fn expire_typing(&mut self) -> bool {
         for typers in self.typing.values_mut() {
@@ -519,7 +858,15 @@ impl State {
         if self.selected_channel.as_ref() != Some(&channel_id) {
             self.compose = Compose::New;
             self.pending_files.clear();
+            // Red "NEW" line above the first unread message.
+            self.new_marker = self
+                .reads
+                .is_unread(&channel_id)
+                .then(|| (channel_id.clone(), self.reads.last_acked(&channel_id)));
         }
+        // Opening a channel reads it (user action, so ack right away).
+        self.held_unread = None;
+        self.mark_channel_read(&channel_id);
 
         // Most-recent-first list; free the oldest channels past the limit.
         self.recent_channels.retain(|c| c != &channel_id);
@@ -554,16 +901,32 @@ impl State {
 
     fn servers_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let mut clicked = None;
+        let mut mark_read = None;
+        let now = notify::now_iso();
         egui::ScrollArea::vertical()
             .id_salt("servers")
             .auto_shrink(false)
             .show(ui, |ui| {
                 let dm_selected = self.selected_guild.as_deref() == Some(DM_GUILD_ID);
-                if server_button(ui, dm_selected, None, "💬", "Direct Messages", config, pal)
-                    .clicked()
-                {
+                let badge = self.guild_badge(&self.dms, &now);
+                let resp = server_button(
+                    ui,
+                    dm_selected,
+                    None,
+                    "💬",
+                    "Direct Messages",
+                    badge,
+                    config,
+                    pal,
+                );
+                if resp.clicked() {
                     clicked = Some(DM_GUILD_ID.to_string());
                 }
+                egui::Popup::context_menu(&resp).show(|ui| {
+                    if ui.button("✔ Mark as read").clicked() {
+                        mark_read = Some(DM_GUILD_ID.to_string());
+                    }
+                });
                 ui.separator();
                 for g in &self.guilds {
                     let selected = self.selected_guild.as_deref() == Some(g.id.as_str());
@@ -573,21 +936,37 @@ impl State {
                         .filter_map(|w| w.chars().next())
                         .take(2)
                         .collect();
-                    if server_button(
+                    let badge = self.guild_badge(g, &now);
+                    let resp = server_button(
                         ui,
                         selected,
                         g.icon_url.as_deref(),
                         &initials,
                         &g.name,
+                        badge,
                         config,
                         pal,
-                    )
-                    .clicked()
-                    {
+                    );
+                    if resp.clicked() {
                         clicked = Some(g.id.clone());
                     }
+                    egui::Popup::context_menu(&resp).show(|ui| {
+                        let any_unread = badge.unread || badge.mentions > 0;
+                        if ui
+                            .add_enabled(any_unread, egui::Button::new("✔ Mark as read"))
+                            .clicked()
+                        {
+                            mark_read = Some(g.id.clone());
+                        }
+                        if badge.muted {
+                            ui.label(RichText::new("🔕 Muted").small().color(pal.muted));
+                        }
+                    });
                 }
             });
+        if let Some(id) = mark_read {
+            self.mark_guild_read(&id);
+        }
         if let Some(id) = clicked {
             self.select_guild(id);
         }
@@ -641,6 +1020,9 @@ impl State {
 
         let mut clicked = None;
         let mut first = None;
+        let mut mark_read = None;
+        let now = notify::now_iso();
+        let guild_muted = self.mutes.guild_muted(&guild.id, &now);
         egui::ScrollArea::vertical()
             .id_salt("channels")
             .auto_shrink(false)
@@ -670,22 +1052,58 @@ impl State {
                         for c in group.channels {
                             first.get_or_insert_with(|| c.id.clone());
                             let selected = self.selected_channel.as_deref() == Some(c.id.as_str());
-                            let text = if selected {
-                                RichText::new(c.label()).color(pal.text)
+                            let muted = guild_muted || self.is_muted(&guild.id, c, &now);
+                            let unread = !muted && self.reads.is_unread(&c.id);
+                            let mentions = if muted { 0 } else { self.reads.mentions(&c.id) };
+                            let mut text = RichText::new(c.label());
+                            text = if selected {
+                                text.color(pal.text)
+                            } else if muted {
+                                text.color(pal.muted_text())
+                            } else if unread || mentions > 0 {
+                                text.color(pal.unread).strong()
                             } else {
-                                RichText::new(c.label()).color(pal.muted)
+                                text.color(pal.muted)
                             };
-                            if ui
-                                .add(egui::Button::selectable(selected, text).truncate())
-                                .clicked()
-                            {
+                            let resp = ui.add(egui::Button::selectable(selected, text).truncate());
+                            if unread && !selected {
+                                unread_pill(ui, resp.rect, 8.0, pal);
+                            }
+                            if mentions > 0 {
+                                mention_badge(
+                                    ui,
+                                    egui::pos2(resp.rect.right() - 6.0, resp.rect.center().y),
+                                    egui::Align2::RIGHT_CENTER,
+                                    mentions,
+                                    pal.sidebar,
+                                    pal,
+                                );
+                            }
+                            if resp.clicked() {
                                 clicked = Some(c.id.clone());
                             }
+                            egui::Popup::context_menu(&resp).show(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        unread || mentions > 0,
+                                        egui::Button::new("✔ Mark as read"),
+                                    )
+                                    .clicked()
+                                {
+                                    mark_read = Some(c.id.clone());
+                                }
+                                if muted {
+                                    ui.label(RichText::new("🔕 Muted").small().color(pal.muted));
+                                }
+                            });
                         }
                     }
                 });
             });
 
+        if let Some(id) = mark_read {
+            self.mark_channel_read(&id);
+        }
         let auto = if self.selected_channel.is_none() {
             first
         } else {
@@ -698,16 +1116,27 @@ impl State {
     }
 
     fn messages_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
+        // Header: channel name, 🔔 inbox on the right.
+        let title = self.channel_title();
+        if title.is_some() || config.modules.notifications {
+            ui.horizontal(|ui| {
+                if let Some(title) = &title {
+                    ui.label(RichText::new(title).strong().size(15.0));
+                }
+                if config.modules.notifications {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.inbox_button(ui, config, pal);
+                    });
+                }
+            });
+            ui.separator();
+        }
         let Some(channel_id) = self.selected_channel.clone() else {
             ui.centered_and_justified(|ui| {
                 ui.label(RichText::new("Pick a channel").color(pal.muted))
             });
             return;
         };
-        if let Some(title) = self.channel_title() {
-            ui.label(RichText::new(title).strong().size(15.0));
-            ui.separator();
-        }
         let Some(messages) = self.messages.get(&channel_id) else {
             ui.centered_and_justified(|ui| ui.spinner());
             return;
@@ -721,6 +1150,11 @@ impl State {
 
         let my_id = self.me.as_ref().map(|u| u.id.as_str()).unwrap_or_default();
         let mut action = None;
+        let mut new_after = self
+            .new_marker
+            .as_ref()
+            .filter(|(c, _)| *c == channel_id)
+            .map(|(_, acked)| *acked);
 
         egui::ScrollArea::vertical()
             .id_salt(("messages", &channel_id))
@@ -729,8 +1163,16 @@ impl State {
             .show(ui, |ui| {
                 let mut prev: Option<&Message> = None;
                 for m in messages {
-                    let grouped =
+                    let mut grouped =
                         m.reply.is_none() && prev.is_some_and(|p| p.author.id == m.author.id);
+                    if let Some(acked) = new_after
+                        && m.id.parse::<u64>().is_ok_and(|id| id > acked)
+                        && m.author.id != my_id
+                    {
+                        new_divider(ui, pal);
+                        new_after = None;
+                        grouped = false;
+                    }
                     if let Some(a) = message_row(ui, m, grouped, m.author.id == my_id, config, pal)
                     {
                         action = Some(a);
@@ -752,7 +1194,79 @@ impl State {
             }
             Some(MessageAction::Delete(id)) => self.confirm_delete = Some((channel_id, id)),
             Some(MessageAction::Copy(text)) => ui.ctx().copy_text(text),
+            Some(MessageAction::MarkUnread(id)) => self.mark_unread(&channel_id, &id),
             None => {}
+        }
+    }
+
+    /// 🔔 button with a red dot when there are unread mentions; opens the
+    /// inbox popup. Clicking a mention jumps to its channel.
+    fn inbox_button(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
+        let unread = self.inbox.unread();
+        ui.add_space(10.0);
+        let bell = ui
+            .add(egui::Button::new(RichText::new("🔔").size(16.0)).frame(false))
+            .on_hover_text("Inbox: recent mentions");
+        if unread > 0 {
+            mention_badge(
+                ui,
+                bell.rect.right_top() + vec2(10.0, -2.0),
+                egui::Align2::RIGHT_TOP,
+                unread as u32,
+                pal.chat,
+                pal,
+            );
+        }
+        let mut jump = None;
+        let mut clear = false;
+        egui::Popup::menu(&bell)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_width(340.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Inbox").strong().size(15.0));
+                    ui.label(RichText::new("Mentions").small().color(pal.muted));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !self.inbox.items.is_empty() && ui.small_button("Clear").clicked() {
+                            clear = true;
+                        }
+                    });
+                });
+                ui.separator();
+                if self.inbox.items.is_empty() {
+                    ui.add_space(12.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new("No recent mentions").color(pal.muted));
+                    });
+                    ui.add_space(12.0);
+                    return;
+                }
+                let mut rows = |ui: &mut egui::Ui| {
+                    for item in &self.inbox.items {
+                        if inbox_row(ui, item, pal).clicked() {
+                            jump = Some((item.guild_id.clone(), item.channel_id.clone()));
+                        }
+                    }
+                };
+                if self.inbox.items.len() <= 4 {
+                    rows(ui);
+                } else {
+                    // Inside a popup the available height starts tiny, so give
+                    // the scroll area an explicit height.
+                    egui::ScrollArea::vertical()
+                        .min_scrolled_height(380.0)
+                        .max_height(380.0)
+                        .show(ui, rows);
+                }
+            });
+        if clear {
+            self.inbox.items.clear();
+        }
+        if let Some((gid, cid)) = jump {
+            egui::Popup::close_all(ui.ctx());
+            self.select_guild(gid);
+            let ctx = ui.ctx().clone();
+            self.select_channel(cid, &ctx, config);
         }
     }
 
@@ -1131,49 +1645,210 @@ fn avatar(
     }
 }
 
-/// A server entry: icon (or initials) plus name.
+/// Unread / mention / muted state of a server icon.
+#[derive(Clone, Copy, Default)]
+struct Badge {
+    unread: bool,
+    mentions: u32,
+    muted: bool,
+}
+
+/// Window has keyboard focus (unknown counts as focused).
+fn window_focused(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.viewport().focused.unwrap_or(true))
+}
+
+/// Discord's little white pill on the left edge of an unread item. It sits
+/// on the clip edge so only its right half shows, like Discord.
+fn unread_pill(ui: &egui::Ui, item: egui::Rect, height: f32, pal: &Palette) {
+    let x = ui.clip_rect().left();
+    let rect = egui::Rect::from_center_size(egui::pos2(x, item.center().y), vec2(8.0, height));
+    ui.painter().rect_filled(rect, 4, pal.unread);
+}
+
+/// Red rounded badge with a count ("99+" past 99).
+fn mention_badge(
+    ui: &egui::Ui,
+    at: egui::Pos2,
+    align: egui::Align2,
+    count: u32,
+    ring: Color32,
+    pal: &Palette,
+) {
+    let text = if count > 99 {
+        "99+".to_string()
+    } else {
+        count.to_string()
+    };
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text, egui::FontId::proportional(11.0), Color32::WHITE);
+    let size = vec2((galley.size().x + 9.0).max(16.0), 16.0);
+    let rect = align.align_size_within_rect(size, egui::Rect::from_min_size(at, egui::Vec2::ZERO));
+    let rect = egui::Rect::from_min_size(rect.min, size);
+    // Ring in the panel colour so it stands out over icons.
+    ui.painter().rect_filled(rect.expand(2.0), 10, ring);
+    ui.painter().rect_filled(rect, 8, pal.mention);
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+}
+
+/// Red "NEW" line above the first unread message.
+fn new_divider(ui: &mut egui::Ui, pal: &Palette) {
+    ui.add_space(6.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 12.0), egui::Sense::hover());
+    let y = rect.center().y;
+    ui.painter().hline(
+        rect.left()..=rect.right() - 36.0,
+        y,
+        egui::Stroke::new(1.0, pal.mention),
+    );
+    let tag = egui::Rect::from_min_max(
+        egui::pos2(rect.right() - 34.0, rect.top()),
+        rect.right_bottom(),
+    );
+    ui.painter().rect_filled(tag, 3, pal.mention);
+    ui.painter().text(
+        tag.center(),
+        egui::Align2::CENTER_CENTER,
+        "NEW",
+        egui::FontId::proportional(9.5),
+        Color32::WHITE,
+    );
+}
+
+/// One mention in the inbox popup.
+fn inbox_row(ui: &mut egui::Ui, item: &InboxItem, pal: &Palette) -> egui::Response {
+    let resp = egui::Frame::new()
+        .fill(if item.read { pal.sidebar } else { pal.input })
+        .corner_radius(6)
+        .inner_margin(8)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                if !item.read {
+                    let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(r.center(), 4.0, pal.mention);
+                }
+                ui.label(RichText::new(&item.place).small().strong().color(pal.muted));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(&item.time).small().color(pal.muted));
+                });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(&item.author).strong());
+                let text = RichText::new(&item.preview);
+                ui.label(if item.read {
+                    text.color(pal.muted)
+                } else {
+                    text
+                });
+            });
+        })
+        .response;
+    let resp = ui.interact(
+        resp.rect,
+        ui.scope_id().with(("inbox", &item.message_id)),
+        egui::Sense::click(),
+    );
+    if resp.hovered() {
+        ui.painter().rect_stroke(
+            resp.rect,
+            6,
+            egui::Stroke::new(1.0, pal.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    resp.on_hover_text("Jump to message")
+}
+
+/// A server entry: icon (or initials) plus name, with an unread pill, a red
+/// mention badge, and greyed out when muted.
+#[allow(clippy::too_many_arguments)]
 fn server_button(
     ui: &mut egui::Ui,
     selected: bool,
     icon: Option<&str>,
     fallback: &str,
     name: &str,
+    badge: Badge,
     config: &Config,
     pal: &Palette,
 ) -> egui::Response {
+    let mut icon_rect = egui::Rect::NOTHING;
     let resp = ui
         .horizontal(|ui| {
             let size = vec2(32.0, 32.0);
             match icon.filter(|_| config.modules.images) {
                 Some(url) => {
-                    ui.add(
-                        egui::Image::from_uri(url)
-                            .fit_to_exact_size(size)
-                            .corner_radius(16),
-                    );
+                    let tint = if badge.muted {
+                        Color32::from_gray(110)
+                    } else {
+                        Color32::WHITE
+                    };
+                    icon_rect = ui
+                        .add(
+                            egui::Image::from_uri(url)
+                                .fit_to_exact_size(size)
+                                .corner_radius(16)
+                                .tint(tint),
+                        )
+                        .rect;
                 }
                 None => {
                     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                    icon_rect = rect;
                     let fill = if selected { pal.accent } else { pal.sidebar };
                     ui.painter().circle_filled(rect.center(), 16.0, fill);
+                    let col = if badge.muted && !selected {
+                        pal.muted_text()
+                    } else {
+                        pal.text
+                    };
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
                         fallback,
                         egui::FontId::proportional(13.0),
-                        pal.text,
+                        col,
                     );
                 }
             }
             if ui.available_width() > 30.0 {
-                ui.add(egui::Button::selectable(selected, name).truncate())
+                let mut text = RichText::new(name);
+                if badge.muted && !selected {
+                    text = text.color(pal.muted_text());
+                } else if badge.unread && !selected {
+                    text = text.color(pal.unread).strong();
+                }
+                ui.add(egui::Button::selectable(selected, text).truncate())
             } else {
                 ui.allocate_response(vec2(0.0, 0.0), egui::Sense::click())
             }
         })
         .response;
+    if selected {
+        unread_pill(ui, icon_rect, 28.0, pal);
+    } else if badge.unread {
+        unread_pill(ui, icon_rect, 8.0, pal);
+    }
+    if badge.mentions > 0 {
+        mention_badge(
+            ui,
+            icon_rect.right_bottom() + vec2(4.0, 2.0),
+            egui::Align2::RIGHT_BOTTOM,
+            badge.mentions,
+            pal.servers,
+            pal,
+        );
+    }
     let resp = ui.interact(resp.rect, resp.id.with("server"), egui::Sense::click());
-    resp.on_hover_text(name)
+    let hover = if badge.muted {
+        format!("{name} (muted)")
+    } else {
+        name.to_string()
+    };
+    resp.on_hover_text(hover)
 }
 
 /// Draw one message. Returns an action if the user picked one from its menu.
@@ -1290,6 +1965,9 @@ fn message_menu(ui: &mut egui::Ui, m: &Message, mine: bool, action: &mut Option<
     }
     if ui.button("🆔 Copy message ID").clicked() {
         *action = Some(MessageAction::Copy(m.id.clone()));
+    }
+    if ui.button("👁 Mark unread").clicked() {
+        *action = Some(MessageAction::MarkUnread(m.id.clone()));
     }
     if mine && ui.button("🗑 Delete").clicked() {
         *action = Some(MessageAction::Delete(m.id.clone()));

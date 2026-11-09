@@ -29,6 +29,12 @@ pub struct Config {
     pub cached_channels: usize,
     /// Ask before opening links in the browser.
     pub warn_before_links: bool,
+
+    /// Pop up a desktop notification for mentions / DMs (Notifications module).
+    pub desktop_notifications: bool,
+    /// Flash the taskbar entry when a notification arrives and the window
+    /// isn't focused.
+    pub flash_taskbar: bool,
 }
 
 impl Default for Config {
@@ -42,6 +48,8 @@ impl Default for Config {
             max_messages_per_channel: 200,
             cached_channels: 8,
             warn_before_links: true,
+            desktop_notifications: true,
+            flash_taskbar: true,
         }
     }
 }
@@ -59,6 +67,8 @@ pub struct Modules {
     pub typing_indicators: bool,
     /// Member list panel contents.
     pub member_list: bool,
+    /// Desktop notifications, taskbar flash and the 🔔 mentions inbox.
+    pub notifications: bool,
 }
 
 impl Default for Modules {
@@ -69,6 +79,7 @@ impl Default for Modules {
             emoji_images: true,
             typing_indicators: true,
             member_list: true,
+            notifications: true,
         }
     }
 }
@@ -105,5 +116,10 @@ pub const MODULES: &[ModuleInfo] = &[
         name: "Member list",
         description: "The panel listing people in the current DM or recently active in a channel.",
         get: |m| &mut m.member_list,
+    },
+    ModuleInfo {
+        name: "Notifications",
+        description: "Desktop notifications and taskbar flashing for mentions and DMs, plus the 🔔 mentions inbox. Unread markers work either way.",
+        get: |m| &mut m.notifications,
     },
 ];

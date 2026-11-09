@@ -145,6 +145,62 @@ impl Api {
         Ok(())
     }
 
+    /// Mark a channel read up to `message_id` (DM: `RequestAcknowledgeChannel`).
+    /// User accounts only.
+    pub async fn ack(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        self.post_ack(channel_id, message_id, json!({ "token": null }))
+            .await
+    }
+
+    /// "Mark unread": a manual ack of the message *before* the first unread
+    /// one (DM: `RequestAcknowledgeMessages(.., manual = true)`).
+    pub async fn mark_unread(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        mention_count: u32,
+    ) -> Result<()> {
+        self.post_ack(
+            channel_id,
+            message_id,
+            json!({ "manual": true, "mention_count": mention_count }),
+        )
+        .await
+    }
+
+    async fn post_ack(&self, channel_id: &str, message_id: &str, body: Value) -> Result<()> {
+        let resp = self
+            .http
+            .post(format!(
+                "{API_BASE}/channels/{channel_id}/messages/{message_id}/ack"
+            ))
+            .header("Authorization", &self.auth)
+            .json(&body)
+            .send()
+            .await
+            .context("ack request failed")?;
+        Self::check(resp, "Marking as read").await?;
+        Ok(())
+    }
+
+    /// Mark several channels read at once (DM: `RequestAcknowledgeGuild`).
+    pub async fn ack_bulk(&self, acks: &[(String, String)]) -> Result<()> {
+        let read_states: Vec<Value> = acks
+            .iter()
+            .map(|(c, m)| json!({ "channel_id": c, "message_id": m, "read_state_type": 0 }))
+            .collect();
+        let resp = self
+            .http
+            .post(format!("{API_BASE}/read-states/ack-bulk"))
+            .header("Authorization", &self.auth)
+            .json(&json!({ "read_states": read_states }))
+            .send()
+            .await
+            .context("ack-bulk request failed")?;
+        Self::check(resp, "Marking server as read").await?;
+        Ok(())
+    }
+
     /// Show the typing indicator to others for ~10 seconds.
     pub async fn trigger_typing(&self, channel_id: &str) -> Result<()> {
         let resp = self
