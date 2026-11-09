@@ -85,6 +85,17 @@ pub struct RustCordApp {
     /// The running session's token and demo flag (in memory only), to
     /// reconnect with a fresh IDENTIFY when "Show as" changes.
     session: Option<(String, bool)>,
+    /// Demo mode only (`RUSTCORD_DEMO_OPEN=view`): a view to open once the
+    /// demo data is in, for screenshots.
+    demo_open: Option<String>,
+    /// A `RUSTCORD_DEMO_OPEN` run: nothing is saved (the view may change
+    /// the config, e.g. a theme, only for the screenshot).
+    demo_shot: bool,
+    /// Demo mode only (`RUSTCORD_DEMO_SHOT=file.png`): save a screenshot of
+    /// the window after a few seconds, then quit. Works while the desktop
+    /// is locked, unlike capturing the window from outside.
+    demo_shot_path: Option<String>,
+    demo_shot_asked: bool,
 }
 
 impl RustCordApp {
@@ -104,10 +115,17 @@ impl RustCordApp {
             tree = layout::alt_tree();
         }
 
-        let theme_store = crate::themes::ThemeStore::new(
-            crate::themes::default_dir(),
-            config.modules.custom_themes,
-        );
+        // Demo screenshots (`RUSTCORD_DEMO_OPEN` / `_SHOT`) use a scratch
+        // themes folder so they never touch the user's installed themes.
+        let demo_shot = demo
+            && (std::env::var("RUSTCORD_DEMO_OPEN").is_ok()
+                || std::env::var("RUSTCORD_DEMO_SHOT").is_ok());
+        let themes_dir = if demo_shot {
+            Some(std::env::temp_dir().join("rustcord-demo-themes"))
+        } else {
+            crate::themes::default_dir()
+        };
+        let theme_store = crate::themes::ThemeStore::new(themes_dir, config.modules.custom_themes);
         let active_theme = crate::themes::ActiveTheme::builtin(config.theme);
         let mut app = Self {
             screen: Screen::Login(LoginForm::new(config.remember_login, None)),
@@ -121,6 +139,14 @@ impl RustCordApp {
             applied: None,
             ram: RamSampler::default(),
             session: None,
+            demo_open: demo
+                .then(|| std::env::var("RUSTCORD_DEMO_OPEN").ok())
+                .flatten(),
+            demo_shot,
+            demo_shot_path: demo
+                .then(|| std::env::var("RUSTCORD_DEMO_SHOT").ok())
+                .flatten(),
+            demo_shot_asked: false,
         };
 
         // Log in straight away if we can: demo, DISCORD_TOKEN, or a saved token.
@@ -148,6 +174,83 @@ impl RustCordApp {
         self.session = Some((token.clone(), demo));
         crate::backend::spawn(token, demo, options, ui_tx, be_rx, ctx.clone());
         self.screen = Screen::Main(Box::new(State::new(ui_rx, be_tx)));
+    }
+
+    /// Demo mode only: open the `RUSTCORD_DEMO_OPEN` view (`view` or
+    /// `view:arg`) once the demo data is in, for screenshots.
+    fn run_demo_open(&mut self, ctx: &egui::Context) {
+        let Screen::Main(state) = &mut self.screen else {
+            return;
+        };
+        if self.demo_open.is_none() || state.guilds.is_empty() || ctx.input(|i| i.time) < 1.0 {
+            return;
+        }
+        let what = self.demo_open.take().unwrap_or_default();
+        let (view, arg) = what.split_once(':').unwrap_or((what.as_str(), ""));
+        let section = match view {
+            "modules" => Some(crate::settings::Section::Modules),
+            "themes" => Some(crate::settings::Section::Themes),
+            "layout" => Some(crate::settings::Section::Layout),
+            _ => None,
+        };
+        let theme = (arg == "frosted")
+            .then(|| {
+                if self.theme_store.get("frosted-glass").is_some() {
+                    return Some("frosted-glass".to_string());
+                }
+                self.theme_store
+                    .import(std::path::Path::new("examples/themes/frosted-glass"))
+                    .ok()
+            })
+            .flatten();
+        if let Some(section) = section {
+            let mut page = SettingsPage::new(&self.config);
+            page.section = section;
+            if theme.is_some() {
+                page.draft.custom_theme = theme;
+            }
+            self.settings = Some(page);
+        } else {
+            if theme.is_some() {
+                // Not saved: `demo_shot` turns saving off.
+                self.config.custom_theme = theme;
+            }
+            if !state.demo_open(view, ctx, &self.config) {
+                // Not ready yet (e.g. history still loading): next frame.
+                self.demo_open = Some(what);
+            }
+        }
+    }
+
+    /// Demo mode only: `RUSTCORD_DEMO_SHOT` screenshot (and
+    /// `RUSTCORD_DEMO_SIZE=WxH` window size), then close the window.
+    fn run_demo_shot(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.demo_shot_path.clone() else {
+            return;
+        };
+        let t = ctx.input(|i| i.time);
+        ctx.request_repaint();
+        if !self.demo_shot_asked && t < 0.5 {
+            if let Some((w, h)) = std::env::var("RUSTCORD_DEMO_SIZE").ok().and_then(|s| {
+                let (w, h) = s.split_once('x')?;
+                Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
+            }) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(w, h)));
+            }
+            return;
+        }
+        if !self.demo_shot_asked && t > 4.5 {
+            self.demo_shot_asked = true;
+            let c = ctx.clone();
+            ctx.request_screenshot(move |img| {
+                let [w, h] = img.size;
+                let bytes: Vec<u8> = img.pixels.iter().flat_map(|p| p.to_array()).collect();
+                if let Some(buf) = image::RgbaImage::from_raw(w as u32, h as u32, bytes) {
+                    let _ = buf.save(&path);
+                }
+                c.send_viewport_cmd(egui::ViewportCommand::Close);
+            });
+        }
     }
 
     /// Back to the login screen. Dropping the State drops the backend's
@@ -379,6 +482,8 @@ impl eframe::App for RustCordApp {
             self.log_out(Some(reason), true);
             return;
         }
+        self.run_demo_open(&ctx);
+        self.run_demo_shot(&ctx);
         if wants_settings {
             self.settings = Some(SettingsPage::new(&self.config));
             self.editing_layout = false;
@@ -500,6 +605,9 @@ impl eframe::App for RustCordApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if self.demo_shot {
+            return;
+        }
         if !self.config.remember_login {
             self.config.saved_token = None;
         }
@@ -728,6 +836,8 @@ pub struct State {
     /// the real picker lands).
     /// The composer's emoji picker popup was open last frame.
     emoji_picker_open: bool,
+    /// Demo mode only: open the composer's emoji picker once.
+    demo_picker: bool,
     /// Custom emoji offered by the pickers: (server id, groups), rebuilt
     /// when the server changes or its emoji do.
     emoji_groups: Option<(String, Vec<CustomEmojiGroup>)>,
@@ -859,6 +969,7 @@ impl State {
             show_shortcuts: false,
             gif_picker: None,
             emoji_picker_open: false,
+            demo_picker: false,
             emoji_groups: None,
             reactions: None,
             search: None,
@@ -1772,7 +1883,7 @@ impl State {
             let mut open = true;
             let mut act = None;
             egui::Modal::new(egui::Id::unique("rc_channels_roles"))
-                .frame(widgets::menu_frame(pal))
+                .frame(widgets::menu_frame(pal).inner_margin(16))
                 .show(ctx, |ui| {
                     ui.set_width(520.0);
                     ui.set_max_height(ctx.content_rect().height() * 0.8);
@@ -2329,7 +2440,10 @@ impl State {
             suggest_channels: &suggest_channels,
             user_name: &user_name,
             channel_name: &channel_name,
-            list_height: Some(420.0),
+            // Room for the box, header and pager under the button.
+            list_height: Some(
+                (ctx.content_rect().bottom() - s.anchor.bottom() - 150.0).clamp(160.0, 420.0),
+            ),
         };
         let width = 420.0;
         let pos = egui::pos2((s.anchor.right() - width).max(8.0), s.anchor.bottom() + 6.0);
@@ -2974,6 +3088,88 @@ impl State {
             return Some(&self.dms);
         }
         self.guilds.iter().find(|g| g.id == id)
+    }
+
+    /// Demo mode only: open one view for a screenshot (see
+    /// `RustCordApp::run_demo_open`).
+    fn demo_open(&mut self, view: &str, ctx: &egui::Context, config: &Config) -> bool {
+        let guild = self
+            .guilds
+            .first()
+            .map(|g| g.id.clone())
+            .unwrap_or_default();
+        if view == "friends" || view == "requests" {
+            self.select_guild(DM_GUILD_ID.into());
+            self.set_home_page(if view == "friends" {
+                HomeSelected::Friends
+            } else {
+                HomeSelected::Requests
+            });
+            return true;
+        }
+        self.select_guild(guild.clone());
+        let channel = if view == "forum" { "205" } else { "201" };
+        self.select_channel(channel.into(), ctx, config);
+        let screen = ctx.content_rect();
+        match view {
+            "search" | "search-empty" | "search-indexing" | "search-error" => {
+                self.open_search(true);
+                if let Some(s) = &mut self.search {
+                    s.panel.demo(view);
+                }
+            }
+            "browser" => self.open_thread_browser(
+                "201".into(),
+                egui::Rect::from_min_size(
+                    egui::pos2(screen.right() - 420.0, 12.0),
+                    vec2(24.0, 24.0),
+                ),
+            ),
+            "thread" => {
+                if let Some(ts) = &mut self.threads {
+                    ts.dialog = Some(ThreadDialog::from_message(
+                        "201",
+                        "1",
+                        "has anyone tried the new layout presets? the compact one is great",
+                    ));
+                }
+            }
+            "addserver" => {
+                if let Some(s) = &mut self.invites {
+                    s.add_server = Some(AddServerDialog::new());
+                }
+            }
+            "pending" => {
+                if let Some(g) = self.guilds.first_mut() {
+                    g.my_pending = true;
+                }
+            }
+            "roles" | "onboarding" => {
+                let _ = self.tx.send(ToBackend::LoadOnboarding {
+                    guild_id: guild,
+                    page: view == "roles",
+                });
+            }
+            "screening" => self.open_screening(&guild),
+            "slow" => self.rate_limited(crate::ratelimit::RateLimited {
+                retry_after: Duration::from_secs(12),
+                global: false,
+            }),
+            "picker" => self.demo_picker = true,
+            "invite" => {
+                let invite = self.messages.get("201").and_then(|ms| {
+                    ms.iter()
+                        .find(|m| m.content.contains("discord.gg"))
+                        .map(|m| m.id.clone())
+                });
+                match invite {
+                    Some(id) => self.jump_to("201".into(), id),
+                    None => return false,
+                }
+            }
+            _ => {}
+        }
+        true
     }
 
     fn select_guild(&mut self, id: String) {
@@ -3623,6 +3819,11 @@ impl State {
         let mut thread_action = None;
         let now = notify::now_iso();
         let guild_muted = self.mutes.guild_muted(&guild.id, &now);
+        // (`self.friends` is lent out as `friends` here.)
+        let home_page = guild.is_dms()
+            && friends
+                .as_ref()
+                .is_some_and(|f| f.page != HomeSelected::None);
         egui::ScrollArea::vertical()
             .id_salt("channels")
             .auto_shrink(false)
@@ -3712,8 +3913,10 @@ impl State {
                                 {
                                     continue;
                                 }
-                                let selected =
-                                    self.selected_channel.as_deref() == Some(c.id.as_str());
+                                // Friends / Message Requests page: no DM
+                                // is highlighted (the page entry is).
+                                let selected = !home_page
+                                    && self.selected_channel.as_deref() == Some(c.id.as_str());
                                 let muted = guild_muted || self.is_muted(&guild.id, c, &now);
                                 let unread = !c.is_voice() && !muted && self.reads.is_unread(&c.id);
                                 let mentions = if muted { 0 } else { self.reads.mentions(&c.id) };
@@ -4304,18 +4507,50 @@ impl State {
                 self.toast = None;
             } else {
                 let rect = ui.clip_rect();
-                let galley = ui.painter().layout_no_wrap(
+                let slow = self.slow_down_until.is_some();
+                let galley = ui.painter().layout(
                     text.clone(),
                     egui::FontId::proportional(13.0),
                     pal.strong,
+                    (rect.width() - 80.0).max(120.0),
                 );
+                // Icon, text, padding; the rate-limit countdown gets a timer.
+                let icon = if slow { icons::TIMER } else { icons::INFO };
+                let icon_color = if slow { pal.idle } else { pal.muted };
+                let size = galley.size() + vec2(24.0 + 24.0, 16.0);
                 let r = egui::Rect::from_center_size(
-                    egui::pos2(rect.center().x, rect.bottom() - 24.0),
-                    galley.size() + vec2(24.0, 12.0),
+                    egui::pos2(rect.center().x, rect.bottom() - 16.0 - size.y / 2.0),
+                    size,
                 );
-                ui.painter().rect_filled(r, 6, pal.servers);
-                ui.painter()
-                    .galley(r.center() - galley.size() / 2.0, galley, pal.strong);
+                let painter = ui.painter();
+                painter.add(
+                    egui::Shadow {
+                        offset: [0, 4],
+                        blur: 12,
+                        spread: 0,
+                        color: Color32::from_black_alpha(if pal.dark { 90 } else { 35 }),
+                    }
+                    .as_shape(r, 8),
+                );
+                painter.rect(
+                    r,
+                    8,
+                    pal.menu_bg(),
+                    egui::Stroke::new(1.0, pal.divider.gamma_multiply(0.6)),
+                    egui::StrokeKind::Inside,
+                );
+                painter.text(
+                    egui::pos2(r.left() + 20.0, r.center().y),
+                    egui::Align2::CENTER_CENTER,
+                    icon,
+                    icons::font(16.0),
+                    icon_color,
+                );
+                painter.galley(
+                    egui::pos2(r.left() + 34.0, r.center().y - galley.size().y / 2.0),
+                    galley,
+                    pal.strong,
+                );
                 ui.ctx().request_repaint_after(Duration::from_millis(500));
             }
         }
@@ -4897,6 +5132,9 @@ impl State {
         }
         // Emoji picker (with the Symbols tab) on the composer's emoji button.
         if let Some(btn) = emoji_btn {
+            if std::mem::take(&mut self.demo_picker) {
+                egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&btn));
+            }
             let tone = Cell::new(config.skin_tone);
             let picked = emoji_picker::popup(
                 &btn,
@@ -6323,11 +6561,9 @@ fn plus_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
     } else {
         pal.muted
     };
-    let c = rect.center();
-    ui.painter().circle_filled(c, 11.0, col);
-    let stroke = egui::Stroke::new(2.0, pal.input);
-    ui.painter().hline(c.x - 5.0..=c.x + 5.0, c.y, stroke);
-    ui.painter().vline(c.x, c.y - 5.0..=c.y + 5.0, stroke);
+    // The filled Phosphor icon has the plus cut out, so it reads on any
+    // theme (glass themes have a see-through input fill).
+    icons::paint(ui, rect, icons::PLUS_CIRCLE, icons::fill_font(26.0), col);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Upload files (or drag them onto the window)")
 }

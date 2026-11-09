@@ -94,32 +94,37 @@ impl ThemesPage {
         // ---- Built-in
         ui.label(pal.section_label("Built-in"));
         ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
-            for choice in ThemeChoice::ALL {
-                let active = store.active_custom.is_none() && store.active_builtin == choice;
-                let def = ThemeDef {
-                    meta: crate::theme_file::ThemeMeta {
-                        name: format!("Discord {}", choice.label()),
-                        author: "RustCord".into(),
-                        version: String::new(),
-                        description: match choice {
-                            ThemeChoice::DiscordDark => "Discord's dark look (default).".into(),
-                            ThemeChoice::DiscordLight => "Discord's light look.".into(),
+        // Rows of cards (frames can't wrap themselves in egui).
+        let per_row = cards_per_row(ui);
+        ui.spacing_mut().item_spacing.y = 12.0;
+        for row in ThemeChoice::ALL.chunks(per_row) {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
+                for &choice in row {
+                    let active = store.active_custom.is_none() && store.active_builtin == choice;
+                    let def = ThemeDef {
+                        meta: crate::theme_file::ThemeMeta {
+                            name: format!("Discord {}", choice.label()),
+                            author: "RustCord".into(),
+                            version: String::new(),
+                            description: match choice {
+                                ThemeChoice::DiscordDark => "Discord's dark look (default).".into(),
+                                ThemeChoice::DiscordLight => "Discord's light look.".into(),
+                            },
+                            base: choice,
                         },
-                        base: choice,
-                    },
-                    palette: choice.palette(),
-                    style: ThemeStyle::default(),
-                };
-                if let Some(a) = card(ui, pal, Ok(&def), active, false) {
-                    match a {
-                        CardAction::Apply => action = Some(ThemesAction::ApplyBuiltin(choice)),
-                        CardAction::Delete => {}
+                        palette: choice.palette(),
+                        style: ThemeStyle::default(),
+                    };
+                    if let Some(a) = card(ui, pal, Ok(&def), active, false) {
+                        match a {
+                            CardAction::Apply => action = Some(ThemesAction::ApplyBuiltin(choice)),
+                            CardAction::Delete => {}
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
 
         // ---- Installed
         if store.enabled() {
@@ -131,23 +136,27 @@ impl ThemesPage {
                     RichText::new("No themes yet. Import one to see it here.").color(pal.muted),
                 );
             }
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
-                for e in &store.entries {
-                    let active = store.active_custom.as_deref() == Some(e.id.as_str());
-                    let theme = e
-                        .theme
-                        .as_ref()
-                        .map_err(|err| (e.id.as_str(), err.as_str()));
-                    match card(ui, pal, theme, active, true) {
-                        Some(CardAction::Apply) => action = Some(ThemesAction::Apply(e.id.clone())),
-                        Some(CardAction::Delete) => {
-                            ui.data_mut(|d| d.insert_temp(confirm_id, e.id.clone()));
+            for row in store.entries.chunks(per_row) {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
+                    for e in row {
+                        let active = store.active_custom.as_deref() == Some(e.id.as_str());
+                        let theme = e
+                            .theme
+                            .as_ref()
+                            .map_err(|err| (e.id.as_str(), err.as_str()));
+                        match card(ui, pal, theme, active, true) {
+                            Some(CardAction::Apply) => {
+                                action = Some(ThemesAction::Apply(e.id.clone()))
+                            }
+                            Some(CardAction::Delete) => {
+                                ui.data_mut(|d| d.insert_temp(confirm_id, e.id.clone()));
+                            }
+                            None => {}
                         }
-                        None => {}
                     }
-                }
-            });
+                });
+            }
         }
 
         // ---- Delete confirmation
@@ -194,6 +203,12 @@ enum CardAction {
 }
 
 /// One theme card. `theme` is `Err((id, error))` for a broken theme file.
+/// How many theme cards fit side by side (card + margins + gap).
+fn cards_per_row(ui: &egui::Ui) -> usize {
+    let step = CARD_W + 16.0 + 2.0 + 12.0;
+    (((ui.available_width() + 12.0) / step).floor() as usize).max(1)
+}
+
 fn card(
     ui: &mut egui::Ui,
     pal: &Palette,

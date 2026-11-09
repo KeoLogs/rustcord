@@ -333,10 +333,22 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
     // --- threads --- (READY guild threads: one under #general)
     if let Some(ev) = crate::threads::ThreadEvent::from_guild(&json!({
         "id": TEST_GUILD,
-        "threads": [{ "id": "250", "type": 11, "name": "release plans", "parent_id": "201",
-                      "owner_id": SAM, "message_count": 7, "member_count": 3,
-                      "last_message_id": last_id("201").to_string(),
-                      "thread_metadata": { "archived": false, "auto_archive_duration": 4320 } }]
+        "threads": [
+            { "id": "250", "type": 11, "name": "release plans", "parent_id": "201",
+              "owner_id": SAM, "message_count": 7, "member_count": 3,
+              "last_message_id": last_id("201").to_string(),
+              "member": { "id": "250", "flags": 1 },
+              "thread_metadata": { "archived": false, "auto_archive_duration": 4320 } },
+            { "id": "251", "type": 11, "name": "theme ideas", "parent_id": "201",
+              "owner_id": ALEX, "message_count": 3, "member_count": 2,
+              "last_message_id": last_id("201").to_string(),
+              "member": { "id": "251", "flags": 1 },
+              "thread_metadata": { "archived": false, "auto_archive_duration": 1440 } },
+            { "id": "252", "type": 11, "name": "old bug hunt", "parent_id": "201",
+              "owner_id": SAM, "message_count": 12, "member_count": 4,
+              "last_message_id": last_id("201").to_string(),
+              "thread_metadata": { "archived": true, "auto_archive_duration": 1440 } }
+        ]
     })) {
         send(ToUi::Thread(ev));
     }
@@ -648,12 +660,41 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             }),
             ToBackend::LoadScreening { guild_id } => send(ToUi::ScreeningLoaded {
                 guild_id,
-                result: Err("Demo mode".into()),
+                result: Ok(crate::screening::VerificationForm::from_json(&json!({
+                    "version": "2026-01-01T00:00:00+00:00",
+                    "description": "Welcome! Please read the rules before chatting.",
+                    "form_fields": [{
+                        "field_type": "TERMS", "label": "Read and agree to the server rules",
+                        "values": ["Be kind to each other.", "No spam or self-promotion.",
+                                   "Keep spoilers in spoiler tags."],
+                        "required": true
+                    }]
+                }))),
             }),
             ToBackend::LoadOnboarding { guild_id, page } => send(ToUi::OnboardingLoaded {
+                result: Ok(crate::onboarding::Onboarding::from_json(&json!({
+                    "guild_id": guild_id, "enabled": true, "mode": 0,
+                    "default_channel_ids": ["200", "201"],
+                    "prompts": [
+                        { "id": "p1", "type": 0, "title": "What brings you here?",
+                          "single_select": false, "required": true, "in_onboarding": true,
+                          "options": [
+                            { "id": "o1", "title": "Using RustCord", "description": "Help and tips",
+                              "role_ids": ["504"], "channel_ids": ["205"] },
+                            { "id": "o2", "title": "Hacking on it", "description": "Dev talk and PRs",
+                              "role_ids": ["503"], "channel_ids": ["203"] },
+                            { "id": "o3", "title": "Just hanging out", "channel_ids": ["202"] }
+                          ] },
+                        { "id": "p2", "type": 1, "title": "Pick a region",
+                          "single_select": true, "required": false, "in_onboarding": true,
+                          "options": [
+                            { "id": "o4", "title": "Europe" }, { "id": "o5", "title": "Americas" },
+                            { "id": "o6", "title": "Asia / Pacific" }
+                          ] }
+                    ]
+                }))),
                 guild_id,
                 page,
-                result: Err("Demo mode".into()),
             }),
             ToBackend::SubmitScreening { guild_id, .. }
             | ToBackend::SubmitOnboarding { guild_id, .. } => {

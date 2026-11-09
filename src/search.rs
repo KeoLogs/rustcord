@@ -1103,6 +1103,33 @@ impl SearchPanel {
         };
     }
 
+    /// Demo mode only (screenshots): type a query, or show the indexing /
+    /// error state.
+    pub fn demo(&mut self, view: &str) {
+        match view {
+            "search-indexing" => {
+                self.input = "release".into();
+                self.status = Status::Indexing {
+                    retry_after: 8.0,
+                    deadline: None,
+                    documents: 1234,
+                };
+            }
+            "search-error" => {
+                self.input = "release".into();
+                self.status = Status::Error("Search failed (HTTP 500). Try again.".into());
+            }
+            "search-empty" => {
+                self.input = "zebra crossing".into();
+                self.typed_at = Some(0.0);
+            }
+            _ => {
+                self.input = "the".into();
+                self.typed_at = Some(0.0);
+            }
+        }
+    }
+
     #[cfg(test)]
     pub fn is_loading(&self) -> bool {
         matches!(self.status, Status::Loading | Status::Indexing { .. })
@@ -1552,6 +1579,9 @@ impl SearchPanel {
         let mut scroll = egui::ScrollArea::vertical()
             .id_salt("search_results")
             .auto_shrink([false, true])
+            // An Area's ui has little free height on its own: ask for the
+            // whole list height once there's more than fits.
+            .min_scrolled_height(height)
             .max_height(height);
         if std::mem::take(&mut self.scroll_top) {
             scroll = scroll.vertical_scroll_offset(0.0);

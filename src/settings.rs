@@ -4,7 +4,7 @@
 
 use eframe::egui::{self, RichText, vec2};
 
-use crate::config::{ClientIdentity, Config, MODULES};
+use crate::config::{ClientIdentity, Config, MODULES, ModuleCategory, ModuleInfo, Modules};
 use crate::icons;
 use crate::settings_proto::{ExplicitFilter, UserSettings};
 use crate::theme::{Bold, Palette, ThemeChoice};
@@ -296,7 +296,8 @@ impl SettingsPage {
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .show(ui, |ui| {
-                        ui.set_max_width(680.0);
+                        // At most 680 px, narrower with the window.
+                        ui.set_max_width(ui.available_width().min(680.0));
                         ui.spacing_mut().item_spacing.y = 6.0;
                         if let Some(a) = self.section_ui(ui, me, synced, pal, themes) {
                             action = Some(a);
@@ -556,29 +557,8 @@ impl SettingsPage {
                     "Optional parts of RustCord. A module that's off doesn't run at all, \
                      which saves memory and CPU.",
                 );
-                ui.add_space(8.0);
-                for m in MODULES {
-                    egui::Frame::new()
-                        .fill(pal.sidebar)
-                        .corner_radius(8)
-                        .inner_margin(12)
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                ui.vertical(|ui| {
-                                    // Leave room for the switch on the right.
-                                    ui.set_max_width(ui.available_width() - 60.0);
-                                    ui.label(RichText::new(m.name).bold().color(pal.strong));
-                                    ui.label(RichText::new(m.description).small().color(pal.muted));
-                                });
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| toggle(ui, (m.get)(&mut config.modules), pal),
-                                );
-                            });
-                        });
-                    ui.add_space(6.0);
-                }
+                ui.add_space(10.0);
+                modules_grid(ui, &mut config.modules, pal);
             }
             Section::Layout => {
                 hint(
@@ -1202,7 +1182,158 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool, pal: &Palette) -> egui::Response {
     resp
 }
 
+// ---------------------------------------------------------------------------
+// Modules page: a compact grid of check boxes grouped by category
+// ---------------------------------------------------------------------------
+
+/// Narrowest module column; the grid has 3 columns on a normal window,
+/// 2 or 1 when narrow.
+const MODULE_COL_MIN: f32 = 190.0;
+const MODULE_COL_GAP: f32 = 24.0;
+const MODULE_ROW_H: f32 = 28.0;
+
+fn modules_grid(ui: &mut egui::Ui, modules: &mut Modules, pal: &Palette) {
+    let width = ui.available_width();
+    let cols = (((width + MODULE_COL_GAP) / (MODULE_COL_MIN + MODULE_COL_GAP)).floor() as usize)
+        .clamp(1, 3);
+    let col_w = (width - MODULE_COL_GAP * (cols - 1) as f32) / cols as f32;
+    let groups: Vec<(ModuleCategory, Vec<&ModuleInfo>)> = ModuleCategory::ALL
+        .iter()
+        .map(|&c| (c, MODULES.iter().filter(|m| m.category == c).collect()))
+        .filter(|(_, items): &(_, Vec<_>)| !items.is_empty())
+        .collect();
+    // A header weighs about two rows (label + gap).
+    let sizes: Vec<usize> = groups.iter().map(|(_, items)| items.len() + 2).collect();
+    let columns = split_columns(&sizes, cols);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = MODULE_COL_GAP;
+        for col in &columns {
+            ui.vertical(|ui| {
+                ui.set_width(col_w);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (i, &g) in col.iter().enumerate() {
+                    let (cat, items) = &groups[g];
+                    if i > 0 {
+                        ui.add_space(14.0);
+                    }
+                    ui.label(pal.section_label(cat.label()));
+                    ui.add_space(4.0);
+                    for m in items {
+                        module_row(ui, m, (m.get)(modules), pal);
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// Split groups of `sizes` (in order) into at most `cols` columns so the
+/// tallest column is as short as possible. Returns group indices per column.
+fn split_columns(sizes: &[usize], cols: usize) -> Vec<Vec<usize>> {
+    fn best(sizes: &[usize], start: usize, cols: usize) -> (usize, Vec<usize>) {
+        // (tallest column, where each column after the first starts)
+        let rest = sizes.len() - start;
+        if cols <= 1 || rest <= 1 {
+            return (sizes[start..].iter().sum(), Vec::new());
+        }
+        let mut out = (usize::MAX, Vec::new());
+        let mut first = 0;
+        for end in start + 1..sizes.len() {
+            first += sizes[end - 1];
+            let (tail, mut cuts) = best(sizes, end, cols - 1);
+            let tallest = first.max(tail);
+            if tallest < out.0 {
+                cuts.insert(0, end);
+                out = (tallest, cuts);
+            }
+        }
+        out
+    }
+    if sizes.is_empty() {
+        return Vec::new();
+    }
+    let (_, cuts) = best(sizes, 0, cols.clamp(1, sizes.len()));
+    let mut bounds = vec![0];
+    bounds.extend(cuts);
+    bounds.push(sizes.len());
+    bounds.windows(2).map(|w| (w[0]..w[1]).collect()).collect()
+}
+
+/// One module: its name on the left, a small square check box on the
+/// right (accent fill with a tick = on). The whole row toggles it; the
+/// description shows on hover.
+fn module_row(ui: &mut egui::Ui, m: &ModuleInfo, on: &mut bool, pal: &Palette) {
+    let (rect, resp) = ui.allocate_exact_size(
+        vec2(ui.available_width(), MODULE_ROW_H),
+        egui::Sense::click(),
+    );
+    if resp.clicked() {
+        *on = !*on;
+    }
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, *on, m.name));
+    if ui.is_rect_visible(rect) {
+        let hovered = resp.hovered();
+        let painter = ui.painter();
+        if hovered {
+            painter.rect_filled(rect, 4, pal.hover);
+        }
+        let box_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - 16.0, rect.center().y),
+            vec2(16.0, 16.0),
+        );
+        let text_w = box_rect.left() - rect.left() - 8.0 - 8.0;
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let color = if hovered { pal.strong } else { pal.text };
+        let mut job = egui::text::LayoutJob::simple_singleline(m.name.to_string(), font, color);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(text_w.max(10.0));
+        let galley = painter.layout_job(job);
+        painter.galley(
+            egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+        if *on {
+            painter.rect_filled(box_rect, 3, pal.accent);
+            let c = box_rect.center();
+            painter.add(egui::Shape::line(
+                vec![
+                    c + vec2(-4.0, 0.2),
+                    c + vec2(-1.2, 3.0),
+                    c + vec2(4.2, -2.8),
+                ],
+                egui::Stroke::new(2.0, egui::Color32::WHITE),
+            ));
+        } else {
+            painter.rect_stroke(
+                box_rect,
+                3,
+                egui::Stroke::new(1.5, if hovered { pal.text } else { pal.muted }),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(m.description);
+}
+
 fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     egui::Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_columns;
+
+    #[test]
+    fn module_columns_balance() {
+        // Messaging, Social, Servers, Appearance (rows + header).
+        let sizes = [8, 5, 4, 8];
+        assert_eq!(split_columns(&sizes, 3), vec![vec![0], vec![1, 2], vec![3]]);
+        assert_eq!(split_columns(&sizes, 2), vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(split_columns(&sizes, 1), vec![vec![0, 1, 2, 3]]);
+        // More columns than groups: one group each.
+        assert_eq!(split_columns(&[3, 3], 3), vec![vec![0], vec![1]]);
+        assert!(split_columns(&[], 3).is_empty());
+    }
 }

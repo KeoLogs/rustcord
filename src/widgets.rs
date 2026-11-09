@@ -208,3 +208,20 @@ pub fn menu_frame(pal: &Palette) -> egui::Frame {
             color: Color32::from_black_alpha(if pal.dark { 100 } else { 40 }),
         })
 }
+
+/// Draw `add` with combo boxes / dropdown buttons styled as Discord's
+/// select fields: the input fill, a hover fill, 4 px radius.
+pub fn field_style<R>(ui: &mut egui::Ui, pal: &Palette, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        w.inactive.weak_bg_fill = pal.input;
+        w.inactive.fg_stroke = egui::Stroke::new(1.0, pal.text);
+        w.hovered.weak_bg_fill = pal.input;
+        w.hovered.bg_stroke = egui::Stroke::new(1.0, pal.divider);
+        w.open.weak_bg_fill = pal.input;
+        w.active.weak_bg_fill = pal.input;
+        ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
+        add(ui)
+    })
+    .inner
+}

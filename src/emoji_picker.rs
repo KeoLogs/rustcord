@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::emoji;
+use crate::icons;
 use crate::theme::Palette;
 use crate::unicode_symbols::{self, FancyStyle};
 
@@ -304,21 +305,68 @@ pub fn with_tone(e: &'static emojis::Emoji, tone: u8) -> &'static emojis::Emoji 
     e.with_skin_tone(t).unwrap_or(e)
 }
 
-/// The tone button next to the search box: a coloured dot; click cycles.
-fn tone_button(ui: &mut egui::Ui, tone: &Cell<u8>, pal: &Palette) {
+/// The skin tone button next to the search box: a hand in the current
+/// tone. Click shows the tone row ([`tone_row`]) under the search box.
+fn tone_button(ui: &mut egui::Ui, tone: &Cell<u8>, open: &mut bool, pal: &Palette) {
     let t = usize::from(tone.get().min(5));
-    let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::click());
-    if resp.hovered() {
+    let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+    if *open {
+        ui.painter().rect_filled(rect, 4, pal.selected);
+    } else if resp.hovered() {
         ui.painter().rect_filled(rect, 4, pal.hover);
     }
-    ui.painter()
-        .circle_filled(rect.center(), 7.0, SKIN_TONES[t].1);
+    tone_hand(ui, rect, t);
     let resp = resp
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(format!("Skin tone: {} (click to change)", SKIN_TONES[t].0));
+        .on_hover_text(format!("Skin tone: {}", SKIN_TONES[t].0));
     if resp.clicked() {
-        tone.set(((t + 1) % SKIN_TONES.len()) as u8);
+        *open = !*open;
     }
+}
+
+/// The six skin tones to pick from (the current one outlined).
+fn tone_row(ui: &mut egui::Ui, tone: &Cell<u8>, open: &mut bool, pal: &Palette) {
+    let t = usize::from(tone.get().min(5));
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+        ui.label(RichText::new("Skin tone").color(pal.muted));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            for i in (0..SKIN_TONES.len()).rev() {
+                let (r, cell) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+                if i == t {
+                    ui.painter().rect_filled(r, 4, pal.selected);
+                    ui.painter().rect_stroke(
+                        r,
+                        4,
+                        egui::Stroke::new(1.5, pal.accent),
+                        egui::StrokeKind::Inside,
+                    );
+                } else if cell.hovered() {
+                    ui.painter().rect_filled(r, 4, pal.hover);
+                }
+                tone_hand(ui, r, i);
+                if cell
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(SKIN_TONES[i].0)
+                    .clicked()
+                {
+                    tone.set(i as u8);
+                    *open = false;
+                }
+            }
+        });
+    });
+}
+
+/// A filled hand icon in skin tone `t` (0-5), centred in `rect`.
+fn tone_hand(ui: &egui::Ui, rect: egui::Rect, t: usize) {
+    icons::paint(
+        ui,
+        rect,
+        icons::HAND,
+        icons::fill_font(20.0),
+        SKIN_TONES[t.min(5)].1,
+    );
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -338,6 +386,8 @@ struct PickerState {
     loaded: HashSet<String>,
     focused: bool,
     tab: Tab,
+    /// The skin tone row is showing.
+    tones_open: bool,
 }
 
 /// Show the picker as a popup under `button` (toggled by clicking it).
@@ -375,11 +425,18 @@ pub fn forget(egui_ctx: &egui::Context, state_id: egui::Id, recent: &RecentEmoji
     }
 }
 
+/// A category bar icon: a Phosphor icon for the built-in sections, the
+/// first emoji for a server's custom emoji (user content).
+enum BarIcon {
+    Icon(&'static str),
+    Emoji(EmojiRef),
+}
+
 /// One picker section.
 struct Section {
     title: String,
     /// Category bar icon.
-    icon: EmojiRef,
+    icon: BarIcon,
     emojis: Vec<EmojiRef>,
 }
 
@@ -429,12 +486,15 @@ fn emoji_tab(
             let search = ui.add(
                 egui::TextEdit::singleline(&mut state.query)
                     .hint_text("Find the perfect emoji")
-                    .desired_width(width - 32.0),
+                    .desired_width(width - 36.0),
             );
-            tone_button(ui, ctx.skin_tone, pal);
+            tone_button(ui, ctx.skin_tone, &mut state.tones_open, pal);
             search
         })
         .inner;
+    if state.tones_open {
+        tone_row(ui, ctx.skin_tone, &mut state.tones_open, pal);
+    }
     if !state.focused {
         search.request_focus();
         state.focused = true;
@@ -446,7 +506,7 @@ fn emoji_tab(
     } else {
         vec![Section {
             title: "Search results".into(),
-            icon: EmojiRef::unicode("🔍"),
+            icon: BarIcon::Icon(icons::MAGNIFYING_GLASS),
             emojis: search_emoji(&query, ctx.custom, ctx.skin_tone.get()),
         }]
     };
@@ -460,8 +520,27 @@ fn emoji_tab(
                 if resp.hovered() {
                     ui.painter().rect_filled(rect, 4, pal.hover);
                 }
-                draw_emoji(ui, &s.icon, rect.shrink(3.0), ctx.images, &mut state.loaded);
-                if resp.on_hover_text(&s.title).clicked() {
+                match &s.icon {
+                    BarIcon::Icon(icon) => icons::paint(
+                        ui,
+                        rect,
+                        icon,
+                        icons::font(18.0),
+                        if resp.hovered() {
+                            pal.strong
+                        } else {
+                            pal.muted
+                        },
+                    ),
+                    BarIcon::Emoji(e) => {
+                        draw_emoji(ui, e, rect.shrink(3.0), ctx.images, &mut state.loaded)
+                    }
+                }
+                if resp
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(&s.title)
+                    .clicked()
+                {
                     state.jump = Some(i);
                 }
             }
@@ -764,7 +843,7 @@ fn sections(ctx: &PickerCtx) -> Vec<Section> {
     if !recent.is_empty() {
         out.push(Section {
             title: "Recently used".into(),
-            icon: EmojiRef::unicode("🕘"),
+            icon: BarIcon::Icon(icons::CLOCK),
             emojis: recent,
         });
     }
@@ -772,7 +851,7 @@ fn sections(ctx: &PickerCtx) -> Vec<Section> {
         if let Some(first) = g.emojis.first() {
             out.push(Section {
                 title: g.name.clone(),
-                icon: first.clone(),
+                icon: BarIcon::Emoji(first.clone()),
                 emojis: g.emojis.clone(),
             });
         }
@@ -781,7 +860,7 @@ fn sections(ctx: &PickerCtx) -> Vec<Section> {
         let (title, icon) = group_info(group);
         out.push(Section {
             title: title.into(),
-            icon: EmojiRef::unicode(icon),
+            icon: BarIcon::Icon(icon),
             emojis: group
                 .emojis()
                 .filter(|e| version_ok(e))
@@ -795,15 +874,15 @@ fn sections(ctx: &PickerCtx) -> Vec<Section> {
 fn group_info(g: emojis::Group) -> (&'static str, &'static str) {
     use emojis::Group::*;
     match g {
-        SmileysAndEmotion => ("Smileys & Emotion", "😀"),
-        PeopleAndBody => ("People & Body", "👋"),
-        AnimalsAndNature => ("Animals & Nature", "🐶"),
-        FoodAndDrink => ("Food & Drink", "🍔"),
-        TravelAndPlaces => ("Travel & Places", "✈️"),
-        Activities => ("Activities", "⚽"),
-        Objects => ("Objects", "💡"),
-        Symbols => ("Symbols", "❤️"),
-        Flags => ("Flags", "🏁"),
+        SmileysAndEmotion => ("Smileys & Emotion", icons::SMILEY),
+        PeopleAndBody => ("People & Body", icons::HAND_WAVING),
+        AnimalsAndNature => ("Animals & Nature", icons::PAW_PRINT),
+        FoodAndDrink => ("Food & Drink", icons::HAMBURGER),
+        TravelAndPlaces => ("Travel & Places", icons::AIRPLANE),
+        Activities => ("Activities", icons::SOCCER_BALL),
+        Objects => ("Objects", icons::LIGHTBULB),
+        Symbols => ("Symbols", icons::HEART),
+        Flags => ("Flags", icons::FLAG),
     }
 }
 

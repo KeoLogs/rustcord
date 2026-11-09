@@ -666,17 +666,20 @@ fn prompt_options(
             } else {
                 summary.join(", ")
             };
-            egui::ComboBox::from_id_salt("dropdown")
-                .selected_text(text)
-                .width(ui.available_width().min(420.0))
-                .show_ui(ui, |ui| {
-                    for o in &p.options {
-                        let on = selected.contains(&o.id);
-                        if ui.selectable_label(on, &o.title).clicked() {
-                            clicked = Some(o.id.clone());
+            crate::widgets::field_style(ui, pal, |ui| {
+                egui::ComboBox::from_id_salt(("dropdown", &p.id))
+                    .selected_text(text)
+                    .width(ui.available_width())
+                    .height(240.0)
+                    .show_ui(ui, |ui| {
+                        for o in &p.options {
+                            let on = selected.contains(&o.id);
+                            if ui.selectable_label(on, &o.title).clicked() {
+                                clicked = Some(o.id.clone());
+                            }
                         }
-                    }
-                });
+                    });
+            });
         }
     });
     clicked
@@ -851,9 +854,15 @@ impl ChannelsRoles {
     pub fn show(&mut self, ui: &mut egui::Ui, pal: &Palette) -> Option<OnboardingAction> {
         let mut action = None;
         ui.horizontal(|ui| {
-            ui.heading("Channels & Roles");
+            ui.label(
+                RichText::new("Channels & Roles")
+                    .heading()
+                    .color(pal.strong),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
+                if crate::widgets::icon_button(ui, crate::icons::X, "Close", false, true, pal)
+                    .clicked()
+                {
                     action = Some(OnboardingAction::Close);
                 }
             });
@@ -874,7 +883,7 @@ impl ChannelsRoles {
         let mut clicked: Option<(String, String)> = None;
         egui::ScrollArea::vertical()
             .max_height((ui.available_height() - footer_h).max(120.0))
-            .auto_shrink([false, false])
+            .auto_shrink([false, true])
             .show(ui, |ui| {
                 if self.onb.prompts.is_empty() {
                     ui.label(RichText::new("This server has no questions.").color(pal.muted));

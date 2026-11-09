@@ -201,11 +201,14 @@ fn entry(
     } else {
         egui::FontId::proportional(15.0)
     };
-    ui.painter().text(
-        egui::pos2(x + 44.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        label,
-        font,
+    // Cut the label with "…" before the badge on narrow sidebars.
+    let room = rect.right() - (x + 44.0) - if badge > 0 { 34.0 } else { 8.0 };
+    let mut job = egui::text::LayoutJob::simple_singleline(label.to_string(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(room.max(10.0));
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(
+        egui::pos2(x + 44.0, rect.center().y - galley.size().y / 2.0),
+        galley,
         color,
     );
     if badge > 0 {

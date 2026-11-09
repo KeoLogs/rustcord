@@ -1082,6 +1082,7 @@ pub fn thread_browser(
     let archived = store.archived_threads(channel_id);
     egui::ScrollArea::vertical()
         .id_salt(("thread_browser", channel_id))
+        .min_scrolled_height(320.0)
         .max_height(420.0)
         .show(ui, |ui| {
             ui.label(pal.section_label(&format!("Active threads — {}", active.len())));
@@ -1115,31 +1116,81 @@ pub fn thread_browser(
 
 fn browser_row(ui: &mut egui::Ui, t: &Thread, ctx: &Ctx, action: &mut Option<ThreadAction>) {
     let pal = ctx.pal;
-    ui.horizontal(|ui| {
-        let w = (ui.available_width() - 70.0).max(40.0);
-        let r = ui.add_sized(
-            vec2(w, 36.0),
-            egui::Button::new(
-                RichText::new(format!(
-                    "{}\n{} · {}",
-                    t.name,
-                    plural(t.message_count, "message"),
-                    crate::timefmt::full(t.last_activity())
-                ))
-                .color(pal.text),
-            )
-            .frame_when_inactive(false),
-        );
-        if r.clicked() {
-            *action = Some(open_action(t));
-        }
-        r.context_menu(|ui| thread_menu(ui, t, action));
-        if !t.joined && !(t.meta.locked && !ctx.can_manage_threads) && ui.button("Join").clicked() {
-            *action = Some(ThreadAction::JoinThread {
-                thread_id: t.id.clone(),
-            });
-        }
+    let can_join = !t.joined && !(t.meta.locked && !ctx.can_manage_threads);
+    let (rect, resp) =
+        ui.allocate_exact_size(vec2(ui.available_width(), 44.0), egui::Sense::click());
+    // The Join button sits on top of the row.
+    let join_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - 58.0, rect.center().y - 13.0),
+        vec2(52.0, 26.0),
+    );
+    let join = can_join.then(|| {
+        ui.put(
+            join_rect,
+            egui::Button::new(RichText::new("Join").color(pal.text))
+                .fill(pal.input)
+                .corner_radius(4),
+        )
     });
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if resp.hovered() || join.as_ref().is_some_and(egui::Response::hovered) {
+            painter.rect_filled(rect, 4, pal.hover);
+        }
+        painter.text(
+            egui::pos2(rect.left() + 18.0, rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            crate::icons::CHATS,
+            crate::icons::font(18.0),
+            pal.muted,
+        );
+        let text_w = rect.width() - 36.0 - if can_join { 64.0 } else { 8.0 };
+        painter.galley(
+            egui::pos2(rect.left() + 36.0, rect.top() + 5.0),
+            one_line(
+                ui,
+                &t.name,
+                crate::theme::bold_font(14.0),
+                pal.strong,
+                text_w,
+            ),
+            pal.strong,
+        );
+        painter.text(
+            egui::pos2(rect.left() + 36.0, rect.bottom() - 5.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!(
+                "{} · {}",
+                plural(t.message_count, "message"),
+                crate::timefmt::full(t.last_activity())
+            ),
+            egui::FontId::proportional(12.0),
+            pal.muted,
+        );
+    }
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resp.clicked() {
+        *action = Some(open_action(t));
+    }
+    resp.context_menu(|ui| thread_menu(ui, t, action));
+    if join.is_some_and(|j| j.clicked()) {
+        *action = Some(ThreadAction::JoinThread {
+            thread_id: t.id.clone(),
+        });
+    }
+}
+
+/// `text` on one row, cut with "…" to `width`.
+fn one_line(
+    ui: &egui::Ui,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(10.0));
+    ui.painter().layout_job(job)
 }
 
 /// "1 message" / "3 messages".

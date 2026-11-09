@@ -287,9 +287,38 @@ pub mod live {
     }
 }
 
+/// Group a module is listed under on the Modules settings page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModuleCategory {
+    Messaging,
+    Social,
+    Servers,
+    Appearance,
+}
+
+impl ModuleCategory {
+    /// In page order.
+    pub const ALL: [ModuleCategory; 4] = [
+        ModuleCategory::Messaging,
+        ModuleCategory::Social,
+        ModuleCategory::Servers,
+        ModuleCategory::Appearance,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ModuleCategory::Messaging => "Messaging",
+            ModuleCategory::Social => "Social",
+            ModuleCategory::Servers => "Servers",
+            ModuleCategory::Appearance => "Appearance",
+        }
+    }
+}
+
 /// Description of each module for the Modules settings page.
 pub struct ModuleInfo {
     pub name: &'static str,
+    pub category: ModuleCategory,
     pub description: &'static str,
     pub get: fn(&mut Modules) -> &mut bool,
 }
@@ -297,86 +326,103 @@ pub struct ModuleInfo {
 pub const MODULES: &[ModuleInfo] = &[
     ModuleInfo {
         name: "Layout editor",
+        category: ModuleCategory::Appearance,
         description: "Move and resize panels. When off, the layout is locked.",
         get: |m| &mut m.layout_editor,
     },
     ModuleInfo {
         name: "Images",
+        category: ModuleCategory::Appearance,
         description: "Avatars, server icons and image attachments. Turn off for the lowest memory use.",
         get: |m| &mut m.images,
     },
     ModuleInfo {
         name: "Emoji images",
+        category: ModuleCategory::Appearance,
         description: "Show emoji in colour like Discord (Twemoji and custom server emoji).",
         get: |m| &mut m.emoji_images,
     },
     ModuleInfo {
         name: "Typing indicators",
+        category: ModuleCategory::Messaging,
         description: "Show when others are typing, and let them see when you are.",
         get: |m| &mut m.typing_indicators,
     },
     ModuleInfo {
         name: "Member list & presence",
+        category: ModuleCategory::Social,
         description: "The member list (grouped by role, with online status and activities) and status dots. Off = no member list requests and no presence kept.",
         get: |m| &mut m.member_list,
     },
     ModuleInfo {
         name: "Notifications",
+        category: ModuleCategory::Social,
         description: "Desktop notifications and taskbar flashing for mentions and DMs, plus the mentions inbox (bell in the chat header). Unread markers work either way.",
         get: |m| &mut m.notifications,
     },
     ModuleInfo {
         name: "Status bar",
+        category: ModuleCategory::Appearance,
         description: "A thin bar at the bottom of the window (like Discord Messenger's) with the connection state, the open channel, who's typing and RAM use.",
         get: |m| &mut m.status_bar,
     },
     ModuleInfo {
         name: "Embeds & link previews",
+        category: ModuleCategory::Messaging,
         description: "Cards under messages for links (YouTube, articles...) and bot embeds. Off = embeds aren't kept or drawn.",
         get: |m| &mut m.embeds,
     },
     ModuleInfo {
         name: "Autocomplete",
+        category: ModuleCategory::Messaging,
         description: "Suggestions while typing @mentions, #channels and :emoji: in the message box.",
         get: |m| &mut m.autocomplete,
     },
     ModuleInfo {
         name: "GIF picker",
+        category: ModuleCategory::Messaging,
         description: "The GIF button in the message box: trending GIFs and Tenor search through Discord (user accounts). Off = no button, nothing loaded.",
         get: |m| &mut m.gif_picker,
     },
     ModuleInfo {
         name: "Reactions",
+        category: ModuleCategory::Messaging,
         description: "Reaction pills under messages, the add-reaction button and the emoji picker. Off = no reactions shown or loaded.",
         get: |m| &mut m.reactions,
     },
     ModuleInfo {
         name: "Search",
+        category: ModuleCategory::Messaging,
         description: "Ctrl+F message search (this channel, or the whole server / DM). Off = no search box, nothing loaded.",
         get: |m| &mut m.search,
     },
     ModuleInfo {
         name: "Friends & message requests",
+        category: ModuleCategory::Social,
         description: "Friends and Message Requests pages and the Home search header above your DMs (user accounts). Off = plain DM list, nothing loaded.",
         get: |m| &mut m.friends,
     },
     ModuleInfo {
         name: "Threads & forums",
+        category: ModuleCategory::Servers,
         description: "Threads under their channels, forum channels with posts, the Threads browser and Create Thread. Off = threads and forums hidden, nothing loaded.",
         get: |m| &mut m.threads,
     },
     ModuleInfo {
         name: "Invites & onboarding",
+        category: ModuleCategory::Servers,
         description: "Invite cards under messages, the rail's Add a Server button, server rules screening and onboarding questions. Off = invite links stay plain links, nothing loaded.",
         get: |m| &mut m.invites,
     },
     ModuleInfo {
         name: "Layout presets",
+        category: ModuleCategory::Appearance,
         description: "Ready-made panel layouts and copying / importing a layout as text in Settings, Layout. Off = only Edit layout and Reset.",
         get: |m| &mut m.layout_presets,
     },
     ModuleInfo {
         name: "Custom themes",
+        category: ModuleCategory::Appearance,
         description: "Import and apply your own themes (Settings, Themes). Off = only the built-in Dark and Light themes, and no theme files are read.",
         get: |m| &mut m.custom_themes,
     },
@@ -416,6 +462,16 @@ mod tests {
         assert!(c.modules.reactions);
         assert_eq!(c.custom_theme, None);
         assert!(c.modules.custom_themes);
+    }
+
+    #[test]
+    fn every_module_has_a_listed_category() {
+        for m in MODULES {
+            assert!(ModuleCategory::ALL.contains(&m.category), "{}", m.name);
+        }
+        for c in ModuleCategory::ALL {
+            assert!(MODULES.iter().any(|m| m.category == c), "{c:?} is empty");
+        }
     }
 
     #[test]

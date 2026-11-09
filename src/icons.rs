@@ -129,3 +129,17 @@ pub fn paint(ui: &egui::Ui, rect: egui::Rect, icon: &str, font: FontId, color: e
 pub fn label(icon: &str, text: &str) -> String {
     format!("{icon}  {text}")
 }
+
+// Emoji picker categories and the skin tone button
+pub const CLOCK: &str = "\u{E19A}";
+pub const PAW_PRINT: &str = "\u{E648}";
+pub const HAMBURGER: &str = "\u{E790}";
+pub const AIRPLANE: &str = "\u{E002}";
+pub const SOCCER_BALL: &str = "\u{E716}";
+pub const LIGHTBULB: &str = "\u{E2DC}";
+pub const HEART: &str = "\u{E2A8}";
+pub const FLAG: &str = "\u{E244}";
+pub const HAND: &str = "\u{E298}";
+pub const CARET_UP_DOWN: &str = "\u{E140}";
+pub const SORT_ASCENDING: &str = "\u{E444}";
+pub const TIMER: &str = "\u{E492}";

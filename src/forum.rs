@@ -147,13 +147,6 @@ impl SortOrder {
             Self::CreationDate => "Date Posted",
         }
     }
-
-    pub fn toggled(self) -> Self {
-        match self {
-            Self::LatestActivity => Self::CreationDate,
-            Self::CreationDate => Self::LatestActivity,
-        }
-    }
 }
 
 /// `default_forum_layout`.
@@ -468,11 +461,21 @@ impl ForumView {
 
         // Toolbar: sort toggle, tag chips.
         ui.horizontal_wrapped(|ui| {
-            let r = ui
-                .button(format!("Sort: {}", sort.label()))
-                .on_hover_text("Change sort order");
-            if r.clicked() {
-                self.sort = Some(sort.toggled());
+            // Sort dropdown, like Discord's "Sort & View".
+            let mut picked = sort;
+            crate::widgets::field_style(ui, pal, |ui| {
+                egui::ComboBox::from_id_salt(("forum_sort", &forum.id))
+                    .selected_text(format!("{}  {}", icons::SORT_ASCENDING, sort.label()))
+                    .show_ui(ui, |ui| {
+                        for o in [SortOrder::LatestActivity, SortOrder::CreationDate] {
+                            ui.selectable_value(&mut picked, o, o.label());
+                        }
+                    })
+                    .response
+                    .on_hover_text("Sort posts by");
+            });
+            if picked != sort {
+                self.sort = Some(picked);
             }
             for tag in &forum.available_tags {
                 let on = self.tags.contains(&tag.id);
@@ -693,14 +696,17 @@ fn post_card(
                     .filter(|n| !n.is_empty() && n != "unknown");
                 let mut job = egui::text::LayoutJob::default();
                 let body = egui::TextStyle::Body.resolve(ui.style());
+                let content = preview.map_or("", |p| p.content.as_str());
                 if let Some(a) = author {
+                    // "author: message", or just the author until the
+                    // starter message is known.
+                    let sep = if content.is_empty() { "" } else { ": " };
                     job.append(
-                        &format!("{a}: "),
+                        &format!("{a}{sep}"),
                         0.0,
                         egui::TextFormat::simple(body.clone(), pal.text),
                     );
                 }
-                let content = preview.map_or("", |p| p.content.as_str());
                 if !content.is_empty() {
                     job.append(content, 0.0, egui::TextFormat::simple(body, pal.muted));
                 }
