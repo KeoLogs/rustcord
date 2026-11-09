@@ -2,30 +2,28 @@
 
 mod api;
 mod app;
+mod autocomplete;
 mod backend;
 mod config;
 mod demo;
-// Not wired into the UI yet (Batch C: embeds, link warning, pins).
-#[allow(dead_code)]
 mod embed;
 mod emoji;
 mod gateway;
 mod layout;
-#[allow(dead_code)]
 mod links;
 mod login;
 mod markdown;
 mod members;
 mod notify;
-#[allow(dead_code)]
+mod perms;
 mod pins;
 mod presence;
 mod profile;
+mod quick_switcher;
 mod read_state;
 mod settings;
-// Batch D groundwork; not wired into the UI/backend yet.
-#[allow(dead_code)]
 mod settings_proto;
+mod status;
 mod theme;
 mod timefmt;
 mod types;

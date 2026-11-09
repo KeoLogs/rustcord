@@ -2,22 +2,31 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText, vec2};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::autocomplete::{self, Autocomplete, Candidate, Trigger};
 use crate::config::{CONFIG_KEY, Config};
-use crate::emoji::{self, Segment};
+use crate::embed;
 use crate::layout::{self, LAYOUT_KEY, LayoutBehavior, Pane};
+use crate::links::{self, LinkCheck, LinkDecision, LinkWarning};
 use crate::login::{LoginAction, LoginForm};
+use crate::markdown::{self, Block, MarkdownAction, ParseCache};
 use crate::members::{self, Member, MemberCache, MemberList, Row};
 use crate::notify::{self, Inbox, InboxItem, Mutes, NotifyCheck};
+use crate::perms;
+use crate::pins::{PinnedMessage, PinsAction, PinsPopup, PinsView};
 use crate::presence::{Presences, Status};
 use crate::profile::{self, Popout, PopoutAction, ProfileCache};
+use crate::quick_switcher::{self, QuickSwitcher};
 use crate::read_state::ReadState;
-use crate::settings::{SettingsAction, SettingsPage};
+use crate::settings::{SettingsAction, SettingsPage, SyncChange};
+use crate::settings_proto::{self as sp, RailItem, UserSettings};
+use crate::status::{self, CustomStatusDialog, DialogResult};
 use crate::theme::{self, Bold, Palette, ThemeChoice};
 use crate::timefmt;
 use crate::types::{Attachment, CHANNEL_DM, DM_GUILD_ID, Guild, Message, ToBackend, ToUi, User};
@@ -92,6 +101,7 @@ impl RustCordApp {
         let (be_tx, be_rx) = tokio::sync::mpsc::unbounded_channel();
         let options = crate::backend::Options {
             bot_member_intents: self.config.bot_member_intents,
+            identity: self.config.client_identity,
         };
         crate::backend::spawn(token, demo, options, ui_tx, be_rx, ctx.clone());
         self.screen = Screen::Main(Box::new(State::new(ui_rx, be_tx)));
@@ -173,6 +183,21 @@ impl RustCordApp {
     }
 }
 
+/// Apply config changes the chat UI asked for (trusted link domains, the
+/// synced compact setting).
+fn apply_config_updates(config: &mut Config, state: &mut State) {
+    for u in state.config_updates.drain(..) {
+        match u {
+            ConfigUpdate::TrustDomain(d) => {
+                if !config.trusted_domains.contains(&d) {
+                    config.trusted_domains.push(d);
+                }
+            }
+            ConfigUpdate::Compact(c) => config.compact_messages = c,
+        }
+    }
+}
+
 /// RAM use for the status bar, read at most every 2 seconds.
 #[derive(Default)]
 struct RamSampler {
@@ -198,6 +223,7 @@ impl eframe::App for RustCordApp {
             return;
         };
         state.drain_events(ctx, &self.config);
+        apply_config_updates(&mut self.config, state);
         state.ack_open_channel(ctx, self.settings.is_none());
         if !self.config.modules.notifications && !state.inbox.items.is_empty() {
             // Module switched off: free the inbox.
@@ -230,6 +256,7 @@ impl eframe::App for RustCordApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
+        timefmt::set_12_hour(self.config.use_12_hour_time);
         let pal = self.config.theme.palette();
 
         // ---- Login screen
@@ -271,8 +298,15 @@ impl eframe::App for RustCordApp {
             let Screen::Main(state) = &mut self.screen else {
                 return;
             };
-            let action = page.ui(ui, &mut self.config, state.me.as_ref(), &pal);
+            let action = page.ui(
+                ui,
+                &mut self.config,
+                state.me.as_ref(),
+                state.user_settings(),
+                &pal,
+            );
             match action {
+                Some(SettingsAction::Sync(change)) => state.apply_sync_change(change),
                 Some(SettingsAction::Close) => self.settings = None,
                 Some(SettingsAction::EditLayout) => {
                     self.settings = None;
@@ -297,6 +331,11 @@ impl eframe::App for RustCordApp {
             let ram = self.ram.sample();
             state.status_bar(ui, &self.config, &pal, ram);
         }
+        // Ctrl+K (Cmd+K on macOS): quick switcher.
+        let quick = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
+        if ctx.input_mut(|i| i.consume_shortcut(&quick)) {
+            state.toggle_switcher();
+        }
         state.members_visible = layout::members_visible(&self.tree);
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let mut behavior = LayoutBehavior {
@@ -313,6 +352,7 @@ impl eframe::App for RustCordApp {
         }
 
         state.overlays(ui, &self.config, &pal);
+        apply_config_updates(&mut self.config, state);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -331,8 +371,15 @@ impl eframe::App for RustCordApp {
 /// What the message box is currently doing.
 enum Compose {
     New,
-    Reply { message_id: String, author: String },
-    Edit { message_id: String },
+    Reply {
+        message_id: String,
+        author: String,
+        /// Ping the author (allowed_mentions `replied_user`).
+        ping: bool,
+    },
+    Edit {
+        message_id: String,
+    },
 }
 
 /// Something the user clicked on a message; applied after drawing.
@@ -344,6 +391,37 @@ enum MessageAction {
     MarkUnread(String),
     /// Clicked an avatar or name: open their profile next to this rect.
     Profile(User, egui::Rect),
+    /// A link in a message / embed / attachment (goes through the warning).
+    OpenLink(String),
+    /// Clicked a `<@user>` mention.
+    Mention(String, egui::Rect),
+    /// Clicked a `<#channel>` mention.
+    GoToChannel(String),
+    /// Pin (`true`) / unpin: asks for confirmation first.
+    Pin(String, bool),
+    /// Save an image attachment: (url, file name).
+    SaveImage(String, String),
+    /// Reveal a run of blocked messages (id of the first one).
+    ShowBlocked(String),
+    /// Clicked a reply preview: scroll to the original message.
+    JumpTo(String),
+}
+
+/// Changes to the saved config that come from the chat UI; the app applies
+/// them (State only gets `&Config`).
+pub enum ConfigUpdate {
+    TrustDomain(String),
+    /// Synced compact/cozy setting arrived from Discord.
+    Compact(bool),
+}
+
+/// Context for a message's menus.
+struct MenuCtx {
+    mine: bool,
+    /// Server id for "Copy message link" (None in DMs).
+    guild_id: Option<String>,
+    /// May pin / unpin here (DM, or Manage Messages).
+    can_pin: bool,
 }
 
 /// An op 14 subscription: (guild, channel, ranges).
@@ -435,6 +513,44 @@ pub struct State {
     toggle_members: bool,
     /// Reply / Edit was picked: focus the message box next frame.
     focus_composer: bool,
+
+    /// Parsed markdown per message (Batch C).
+    md_cache: ParseCache,
+    /// Display names of people seen in messages (for `<@id>` mentions and
+    /// autocomplete). Capped.
+    user_names: HashMap<String, String>,
+    /// "Leaving RustCord" dialog for a clicked link.
+    link_warning: Option<LinkWarning>,
+    /// Pinned messages popup, and the 📌 button's rect it hangs from.
+    pins: Option<(PinsPopup, egui::Rect)>,
+    /// Scroll to (and flash) this message once it's on screen.
+    scroll_to: Option<(String, String)>,
+    highlight: Option<(String, Instant)>,
+    /// Confirm pin / unpin: (channel, message, pin?).
+    confirm_pin: Option<(String, String, bool)>,
+    /// Confirm leaving a server: (id, name).
+    confirm_leave: Option<(String, String)>,
+
+    /// Synced settings (user accounts): status, folders, privacy, compact.
+    user_settings: Option<UserSettings>,
+    status_dialog: Option<CustomStatusDialog>,
+    /// Open folders in the server rail.
+    open_folders: HashSet<i64>,
+    /// Blocked users (READY relationships type 2).
+    blocked: HashSet<String>,
+    /// Runs of blocked messages the user chose to show (first message id).
+    revealed_blocked: HashSet<String>,
+
+    /// Ctrl+K switcher, while open.
+    switcher: Option<QuickSwitcher>,
+    /// Recently opened channels (most recent first) for the switcher.
+    visited: VecDeque<String>,
+    /// Composer suggestions.
+    ac: Autocomplete,
+    /// Short notice at the bottom of the chat ("Saved …").
+    toast: Option<(String, Instant)>,
+    /// Config changes for the app to apply.
+    pub config_updates: Vec<ConfigUpdate>,
 }
 
 impl State {
@@ -479,6 +595,24 @@ impl State {
             members_visible: true,
             toggle_members: false,
             focus_composer: false,
+            md_cache: ParseCache::default(),
+            user_names: HashMap::new(),
+            link_warning: None,
+            pins: None,
+            scroll_to: None,
+            highlight: None,
+            confirm_pin: None,
+            confirm_leave: None,
+            user_settings: None,
+            status_dialog: None,
+            open_folders: HashSet::new(),
+            blocked: HashSet::new(),
+            revealed_blocked: HashSet::new(),
+            switcher: None,
+            visited: VecDeque::new(),
+            ac: Autocomplete::default(),
+            toast: None,
+            config_updates: Vec::new(),
         }
     }
 
@@ -506,9 +640,20 @@ impl State {
                 dms,
                 read_state,
                 guild_settings,
+                blocked,
+                user_settings,
             } => {
                 self.status = "Connected".into();
                 self.connected = true;
+                self.blocked = blocked.into_iter().collect();
+                match user_settings {
+                    Some(s) => self.set_user_settings(*s),
+                    // User accounts: load them over REST.
+                    None if !me.bot => {
+                        let _ = self.tx.send(ToBackend::LoadUserSettings);
+                    }
+                    None => {}
+                }
                 self.me = Some(me);
                 self.guilds = guilds;
                 self.dms = Guild::dms(dms);
@@ -579,10 +724,23 @@ impl State {
             }
             ToUi::History {
                 channel_id,
-                messages,
+                mut messages,
             } => {
                 self.request_unknown_authors(&channel_id, &messages);
+                self.remember_users(&mut messages, config);
                 self.messages.insert(channel_id, messages);
+            }
+            ToUi::HistoryAround {
+                channel_id,
+                message_id,
+                mut messages,
+            } => {
+                self.request_unknown_authors(&channel_id, &messages);
+                self.remember_users(&mut messages, config);
+                if let Some(old) = self.messages.insert(channel_id.clone(), messages) {
+                    forget_message_images(ctx, &old);
+                }
+                self.scroll_to = Some((channel_id, message_id));
             }
             ToUi::FilesPicked(paths) => self.add_files(paths),
             ToUi::NewMessage(mut msg) => {
@@ -593,6 +751,7 @@ impl State {
                 if let Some(typers) = self.typing.get_mut(&msg.channel_id) {
                     typers.retain(|t| t.user_id != msg.author.id);
                 }
+                self.remember_users(std::slice::from_mut(&mut *msg), config);
                 self.track_new_message(&msg, ctx, config, focused);
                 if let Some(c) = self
                     .dms
@@ -607,7 +766,7 @@ impl State {
                 if let Some(list) = self.messages.get_mut(&msg.channel_id)
                     && !list.iter().any(|m| m.id == msg.id)
                 {
-                    list.push(msg);
+                    list.push(*msg);
                     let cap = config.max_messages_per_channel.max(10);
                     if list.len() > cap {
                         let removed: Vec<Message> = list.drain(..list.len() - cap).collect();
@@ -615,7 +774,10 @@ impl State {
                     }
                 }
             }
-            ToUi::MessageUpdated(patch) => {
+            ToUi::MessageUpdated(mut patch) => {
+                if !config.modules.embeds {
+                    patch.embeds = None;
+                }
                 if let Some(m) = self
                     .messages
                     .get_mut(&patch.channel_id)
@@ -630,6 +792,10 @@ impl State {
             } => {
                 if let Some(list) = self.messages.get_mut(&channel_id) {
                     list.retain(|m| m.id != message_id);
+                }
+                self.md_cache.remove(&message_id);
+                if let Some((p, _)) = &mut self.pins {
+                    p.remove(&message_id);
                 }
             }
             ToUi::Typing {
@@ -764,6 +930,121 @@ impl State {
                     }
                 }
                 self.profiles.set_note(&user_id, note);
+            }
+            ToUi::GuildRemoved(id) => {
+                self.guilds.retain(|g| g.id != id);
+                if self.selected_guild.as_ref() == Some(&id) {
+                    self.selected_guild = Some(DM_GUILD_ID.into());
+                    self.selected_channel = None;
+                }
+            }
+            ToUi::Pins { channel_id, pins } => {
+                let mut list = PinnedMessage::list_from_json(&pins);
+                // Previews as plain text (mentions resolved, no markup).
+                let gid = self
+                    .find_channel(&channel_id)
+                    .map(|(g, _)| g.id.clone())
+                    .unwrap_or_default();
+                for p in &mut list {
+                    if !p.message.content.trim().is_empty() {
+                        let text = self.plain_text(&p.message.content, &gid);
+                        p.preview = notify::preview(&text, 300);
+                    }
+                }
+                if let Some((p, _)) = &mut self.pins
+                    && p.channel_id == channel_id
+                {
+                    p.set_pins(list);
+                }
+            }
+            ToUi::PinsFailed { channel_id, error } => {
+                if let Some((p, _)) = &mut self.pins
+                    && p.channel_id == channel_id
+                {
+                    p.set_failed(error);
+                }
+            }
+            ToUi::PinChanged {
+                channel_id,
+                message_id,
+                pinned,
+            } => {
+                if let Some(m) = self
+                    .messages
+                    .get_mut(&channel_id)
+                    .and_then(|l| l.iter_mut().find(|m| m.id == message_id))
+                {
+                    m.pinned = pinned;
+                }
+                if let Some((p, _)) = &mut self.pins
+                    && p.channel_id == channel_id
+                {
+                    if pinned {
+                        let _ = self.tx.send(ToBackend::LoadPins { channel_id });
+                    } else {
+                        p.remove(&message_id);
+                    }
+                }
+            }
+            ToUi::PinFailed {
+                channel_id,
+                message_id,
+                error,
+            } => match &mut self.pins {
+                Some((p, _)) if p.channel_id == channel_id => p.unpin_failed(&message_id, error),
+                _ => self.toast = Some((error, Instant::now())),
+            },
+            ToUi::PinsUpdated(channel_id) => {
+                if let Some((p, _)) = &self.pins
+                    && p.channel_id == channel_id
+                {
+                    let _ = self.tx.send(ToBackend::LoadPins { channel_id });
+                }
+            }
+            ToUi::UserSettings(s) => self.set_user_settings(*s),
+            ToUi::UserSettingsUpdate(d) => {
+                if let Some(s) = &mut self.user_settings
+                    && let Ok(true) = s.apply_update_event(&d)
+                {
+                    let compact = s.compact_mode;
+                    if let Some(c) = compact {
+                        self.config_updates.push(ConfigUpdate::Compact(c));
+                    }
+                }
+            }
+            ToUi::Blocked { user_id, blocked } => {
+                if blocked {
+                    self.blocked.insert(user_id);
+                } else {
+                    self.blocked.remove(&user_id);
+                }
+            }
+            ToUi::Notice(text) => self.toast = Some((text, Instant::now())),
+        }
+    }
+
+    /// New synced settings (full message from READY / GET / PATCH).
+    fn set_user_settings(&mut self, s: UserSettings) {
+        if let Some(c) = s.compact_mode {
+            self.config_updates.push(ConfigUpdate::Compact(c));
+        }
+        self.user_settings = Some(s);
+    }
+
+    /// Learn names from messages (for mentions and autocomplete) and drop
+    /// embeds when the Embeds module is off.
+    fn remember_users(&mut self, messages: &mut [Message], config: &Config) {
+        if self.user_names.len() > 5000 {
+            self.user_names.clear();
+        }
+        for m in messages {
+            if !config.modules.embeds {
+                m.embeds = Vec::new();
+            }
+            self.user_names
+                .insert(m.author.id.clone(), m.author.name.clone());
+            for (id, name) in &m.mention_names {
+                self.user_names.insert(id.clone(), name.clone());
             }
         }
     }
@@ -979,6 +1260,8 @@ impl State {
         if !config.modules.notifications || mine {
             return;
         }
+        // Mentions resolved, markup and spoilers hidden.
+        let plain = self.plain_text(&msg.content, &guild_id);
         let place = if is_dm {
             "Direct message".to_string()
         } else {
@@ -991,7 +1274,7 @@ impl State {
                 message_id: msg.id.clone(),
                 place: place.clone(),
                 author: msg.author.name.clone(),
-                preview: notify::preview(&msg.content, 140),
+                preview: notify::preview(&plain, 140),
                 time: msg.short_time().to_string(),
                 read: viewing,
             });
@@ -1019,7 +1302,7 @@ impl State {
             };
             let _ = self.tx.send(ToBackend::Notify {
                 title,
-                body: notify::preview(&msg.content, 200),
+                body: notify::preview(&plain, 200),
             });
         }
         if config.flash_taskbar && !focused {
@@ -1248,8 +1531,22 @@ impl State {
                 && let Some(msgs) = self.messages.remove(&old)
             {
                 forget_message_images(ctx, &msgs);
+                // Parsed markdown of the dropped channel goes too.
+                self.md_cache.clear();
             }
         }
+        // For the quick switcher's "recent" list.
+        self.visited.retain(|c| c != &channel_id);
+        self.visited.push_front(channel_id.clone());
+        self.visited.truncate(30);
+        if self
+            .pins
+            .as_ref()
+            .is_some_and(|(p, _)| p.channel_id != channel_id)
+        {
+            self.pins = None;
+        }
+        self.ac.clear();
         self.selected_channel = Some(channel_id);
     }
 
@@ -1272,12 +1569,21 @@ impl State {
     }
 
     /// Discord's server rail: round icons, a white pill on the left for
-    /// unread / hovered / selected, Home (DMs) at the top. Wider than
-    /// `RAIL_NAMES_WIDTH` (the user dragged it), it shows names too.
+    /// unread / hovered / selected, Home (DMs) at the top, then servers and
+    /// folders in the user's synced order. Wider than `RAIL_NAMES_WIDTH`
+    /// (the user dragged it), it shows names too.
     fn servers_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
-        let mut clicked = None;
-        let mut mark_read = None;
+        let mut ev = RailEvents::default();
         let now = notify::now_iso();
+        // Folders and order from synced settings (user accounts).
+        let items: Vec<RailItem> = match &self.user_settings {
+            Some(us) => sp::ordered_guilds(us, self.guilds.iter().map(|g| g.id.as_str())),
+            None => self
+                .guilds
+                .iter()
+                .map(|g| RailItem::Guild(g.id.clone()))
+                .collect(),
+        };
         egui::ScrollArea::vertical()
             .id_salt("servers")
             .auto_shrink(false)
@@ -1296,11 +1602,11 @@ impl State {
                     pal,
                 );
                 if resp.clicked() {
-                    clicked = Some(DM_GUILD_ID.to_string());
+                    ev.clicked = Some(DM_GUILD_ID.to_string());
                 }
                 egui::Popup::context_menu(&resp).show(|ui| {
                     if ui.button("✔ Mark as read").clicked() {
-                        mark_read = Some(DM_GUILD_ID.to_string());
+                        ev.mark_read = Some(DM_GUILD_ID.to_string());
                     }
                 });
                 // Separator under Home, centred under the icons.
@@ -1316,66 +1622,192 @@ impl State {
                     1,
                     pal.divider,
                 );
-                for g in &self.guilds {
-                    let selected = self.selected_guild.as_deref() == Some(g.id.as_str());
-                    let initials: String = g
-                        .name
-                        .split_whitespace()
-                        .filter_map(|w| w.chars().next())
-                        .take(3)
-                        .collect();
-                    let badge = self.guild_badge(g, &now);
-                    let icon = match &g.icon_url {
-                        Some(url) if config.modules.images => RailIcon::Image(url),
-                        _ => RailIcon::Initials(&initials),
-                    };
-                    let resp = rail_item(ui, icon, &g.name, selected, badge, config, pal);
-                    if resp.clicked() {
-                        clicked = Some(g.id.clone());
+                for item in &items {
+                    match item {
+                        RailItem::Guild(id) => {
+                            if let Some(g) = self.guilds.iter().find(|g| &g.id == id) {
+                                self.rail_guild(ui, g, &now, &mut ev, config, pal);
+                            }
+                        }
+                        RailItem::Folder {
+                            id,
+                            name,
+                            color,
+                            guild_ids,
+                        } => {
+                            let guilds: Vec<&Guild> = guild_ids
+                                .iter()
+                                .filter_map(|gid| self.guilds.iter().find(|g| &g.id == gid))
+                                .collect();
+                            if guilds.is_empty() {
+                                continue;
+                            }
+                            let open = self.open_folders.contains(id);
+                            let mut badge = Badge::default();
+                            for g in &guilds {
+                                let b = self.guild_badge(g, &now);
+                                badge.unread |= b.unread;
+                                badge.mentions += b.mentions;
+                            }
+                            let label = name.clone().unwrap_or_else(|| {
+                                guilds
+                                    .iter()
+                                    .map(|g| g.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            });
+                            let folder = FolderIcon {
+                                name: &label,
+                                color: color.map(members::rgb).unwrap_or(pal.accent),
+                                guilds: &guilds,
+                                open,
+                                selected: guilds
+                                    .iter()
+                                    .any(|g| self.selected_guild.as_ref() == Some(&g.id)),
+                                badge: if open { Badge::default() } else { badge },
+                            };
+                            // Background strip behind an open folder.
+                            let bg = ui.painter().add(egui::Shape::Noop);
+                            let top = ui.cursor().top();
+                            if folder_item(ui, &folder, config, pal).clicked() {
+                                ev.toggle_folder = Some(*id);
+                            }
+                            if open {
+                                for g in &guilds {
+                                    self.rail_guild(ui, g, &now, &mut ev, config, pal);
+                                }
+                                let w = ui.available_width();
+                                let x = if w >= RAIL_NAMES_WIDTH {
+                                    ui.min_rect().left() + 12.0 + 24.0
+                                } else {
+                                    ui.min_rect().center().x
+                                };
+                                let rect = egui::Rect::from_x_y_ranges(
+                                    x - 28.0..=x + 28.0,
+                                    top - 4.0..=ui.cursor().top() - 4.0,
+                                );
+                                ui.painter().set(
+                                    bg,
+                                    egui::Shape::rect_filled(
+                                        rect,
+                                        16,
+                                        folder.color.gamma_multiply(0.18),
+                                    ),
+                                );
+                            }
+                        }
                     }
-                    egui::Popup::context_menu(&resp).show(|ui| {
-                        let any_unread = badge.unread || badge.mentions > 0;
-                        if ui
-                            .add_enabled(any_unread, egui::Button::new("✔ Mark as read"))
-                            .clicked()
-                        {
-                            mark_read = Some(g.id.clone());
-                        }
-                        if badge.muted {
-                            ui.label(RichText::new("🔕 Muted").small().color(pal.muted));
-                        }
-                    });
                 }
             });
-        if let Some(id) = mark_read {
+        if let Some(id) = ev.toggle_folder
+            && !self.open_folders.remove(&id)
+        {
+            self.open_folders.insert(id);
+        }
+        if let Some(id) = ev.mark_read {
             self.mark_guild_read(&id);
         }
-        if let Some(id) = clicked {
+        if let Some(leave) = ev.leave {
+            self.confirm_leave = Some(leave);
+        }
+        if let Some(id) = ev.clicked {
             self.select_guild(id);
         }
     }
 
-    /// Bottom-left user panel: avatar with status dot, bold name, muted
-    /// status, ⚙ settings. In the narrow default rail it stacks the avatar
-    /// over the gear.
+    /// One server in the rail, with its right-click menu.
+    fn rail_guild(
+        &self,
+        ui: &mut egui::Ui,
+        g: &Guild,
+        now: &str,
+        ev: &mut RailEvents,
+        config: &Config,
+        pal: &Palette,
+    ) {
+        let selected = self.selected_guild.as_deref() == Some(g.id.as_str());
+        let initials = initials(&g.name);
+        let badge = self.guild_badge(g, now);
+        let icon = match &g.icon_url {
+            Some(url) if config.modules.images => RailIcon::Image(url),
+            _ => RailIcon::Initials(&initials),
+        };
+        let resp = rail_item(ui, icon, &g.name, selected, badge, config, pal);
+        if resp.clicked() {
+            ev.clicked = Some(g.id.clone());
+        }
+        egui::Popup::context_menu(&resp).show(|ui| {
+            let any_unread = badge.unread || badge.mentions > 0;
+            if ui
+                .add_enabled(any_unread, egui::Button::new("✔ Mark as read"))
+                .clicked()
+            {
+                ev.mark_read = Some(g.id.clone());
+            }
+            if badge.muted {
+                ui.label(RichText::new("🔕 Muted").small().color(pal.muted));
+            }
+            ui.separator();
+            if ui
+                .button(RichText::new("🚪 Leave Server").color(pal.danger))
+                .clicked()
+            {
+                ev.leave = Some((g.id.clone(), g.name.clone()));
+            }
+        });
+    }
+
+    /// Bottom-left user panel: avatar with status dot, bold name, custom
+    /// status (or status), ⚙ settings. Clicking the avatar opens the status
+    /// picker (user accounts). In the narrow default rail it stacks the
+    /// avatar over the gear.
     fn profile_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let (name, uid, url) = match &self.me {
             Some(me) => (me.name.clone(), me.id.clone(), me.avatar_url.clone()),
             None => ("…".into(), String::new(), String::new()),
         };
-        let status = if self.connected { "Online" } else { "Offline" };
-        let dot = if self.connected {
-            pal.online
-        } else {
-            pal.offline
+        let my_status = self.my_status();
+        let (status_text, dot) = match my_status {
+            Some(st) => (status::label(st).to_string(), status::color(st, pal)),
+            None => ("Offline".to_string(), pal.offline),
         };
-        let draw_avatar = |ui: &mut egui::Ui| {
+        let custom = self.my_custom_status();
+        let line2 = match &custom {
+            Some(c) => format!("{} {}", c.emoji_name.as_deref().unwrap_or(""), c.text)
+                .trim()
+                .to_string(),
+            None => status_text.clone(),
+        };
+        let can_pick = self.user_settings.is_some() && self.connected;
+        let mut picked = None;
+        let mut draw_avatar = |ui: &mut egui::Ui| {
             let rect = avatar(ui, &uid, &name, &url, 32.0, config, pal);
             let c = rect.right_bottom() - vec2(4.0, 4.0);
             ui.painter().circle_filled(c, 6.0, pal.servers);
             ui.painter().circle_filled(c, 4.0, dot);
-            ui.interact(rect, ui.scope_id().with("me_avatar"), egui::Sense::hover())
-                .on_hover_text(format!("{name} · {status}"));
+            let resp = ui
+                .interact(rect, ui.scope_id().with("me_avatar"), egui::Sense::click())
+                .on_hover_text(if can_pick {
+                    format!("{name} · {status_text} · click to set your status")
+                } else {
+                    format!("{name} · {status_text}")
+                });
+            if can_pick {
+                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                egui::Popup::menu(&resp)
+                    .align(egui::RectAlign::TOP_START)
+                    .show(|ui| {
+                        if let Some(a) = status::menu(
+                            ui,
+                            my_status.unwrap_or(sp::Status::Online),
+                            custom.as_ref(),
+                            pal,
+                        ) {
+                            picked = Some(a);
+                            ui.close();
+                        }
+                    });
+            }
         };
         let mut open = false;
         if ui.available_width() < 120.0 {
@@ -1401,9 +1833,11 @@ impl State {
                                 .selectable(false),
                             );
                             ui.add(
-                                egui::Label::new(RichText::new(status).size(12.0).color(pal.muted))
+                                egui::Label::new(RichText::new(&line2).size(12.0).color(pal.muted))
+                                    .truncate()
                                     .selectable(false),
-                            );
+                            )
+                            .on_hover_text(&status_text);
                         });
                     });
                 });
@@ -1412,6 +1846,113 @@ impl State {
         if open {
             self.open_settings = true;
         }
+        match picked {
+            Some(status::MenuAction::Set(st)) => self.set_status(st),
+            Some(status::MenuAction::EditCustom) => {
+                self.status_dialog = Some(CustomStatusDialog::new(custom.as_ref()));
+            }
+            Some(status::MenuAction::ClearCustom) => self.set_custom_status(None),
+            None => {}
+        }
+    }
+
+    /// My status: synced setting (user accounts), else online while connected.
+    fn my_status(&self) -> Option<sp::Status> {
+        if !self.connected {
+            return None;
+        }
+        Some(
+            self.user_settings
+                .as_ref()
+                .and_then(|s| s.status)
+                .unwrap_or(sp::Status::Online),
+        )
+    }
+
+    /// My custom status, unless it has expired.
+    fn my_custom_status(&self) -> Option<sp::CustomStatus> {
+        self.user_settings
+            .as_ref()?
+            .custom_status
+            .clone()
+            .filter(|c| !c.is_expired(status::now_ms()))
+            .filter(|c| !c.text.is_empty() || c.emoji_name.is_some())
+    }
+
+    /// Status picked in the menu: save it (PATCH) and show it now (op 3).
+    fn set_status(&mut self, st: sp::Status) {
+        let custom = self.my_custom_status();
+        let Some(us) = &mut self.user_settings else {
+            return;
+        };
+        let b64 = us.patch_status(st);
+        let _ = us.apply_patch(&b64);
+        let _ = self
+            .tx
+            .send(ToBackend::PatchUserSettings { settings_b64: b64 });
+        let _ = self.tx.send(ToBackend::SetPresence {
+            status: st.as_str().into(),
+            custom,
+        });
+    }
+
+    /// Custom status dialog saved (or cleared).
+    fn set_custom_status(&mut self, custom: Option<sp::CustomStatus>) {
+        let st = self.my_status().unwrap_or(sp::Status::Online);
+        let Some(us) = &mut self.user_settings else {
+            return;
+        };
+        let b64 = us.patch_custom_status(custom.as_ref());
+        let _ = us.apply_patch(&b64);
+        let _ = self
+            .tx
+            .send(ToBackend::PatchUserSettings { settings_b64: b64 });
+        let _ = self.tx.send(ToBackend::SetPresence {
+            status: st.as_str().into(),
+            custom,
+        });
+    }
+
+    /// A synced setting changed in Settings: PATCH it (explicit user action).
+    pub fn apply_sync_change(&mut self, change: SyncChange) {
+        let Some(us) = &mut self.user_settings else {
+            return;
+        };
+        let b64 = match change {
+            SyncChange::ExplicitFilter(f) => us.patch_explicit_filter(f),
+            SyncChange::AllowGuildDms(on) => us.patch_allow_dms_from_guild_members(on),
+            SyncChange::Compact(on) => us.patch_compact(on),
+        };
+        let _ = us.apply_patch(&b64);
+        let _ = self
+            .tx
+            .send(ToBackend::PatchUserSettings { settings_b64: b64 });
+    }
+
+    pub fn user_settings(&self) -> Option<&UserSettings> {
+        self.user_settings.as_ref()
+    }
+
+    /// The 📌 header button: open (and load) or close the pins popup.
+    fn toggle_pins(&mut self, anchor: egui::Rect) {
+        if self.pins.take().is_some() {
+            return;
+        }
+        let Some(cid) = self.selected_channel.clone() else {
+            return;
+        };
+        let name = self
+            .find_channel(&cid)
+            .map(|(_, c)| {
+                if c.is_dm() {
+                    format!("@{}", c.name)
+                } else {
+                    format!("#{}", c.name)
+                }
+            })
+            .unwrap_or_default();
+        self.pins = Some((PinsPopup::new(cid.clone(), name), anchor));
+        let _ = self.tx.send(ToBackend::LoadPins { channel_id: cid });
     }
 
     fn channels_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
@@ -1591,7 +2132,20 @@ impl State {
         {
             self.toggle_members = true;
         }
-        icon_button(ui, "📌", "Pins — coming next", false, false, pal);
+        let pin_btn = icon_button(
+            ui,
+            "📌",
+            "Pinned Messages",
+            self.pins.is_some(),
+            channel.is_some(),
+            pal,
+        );
+        if pin_btn.clicked() && channel.is_some() {
+            self.toggle_pins(pin_btn.rect);
+        }
+        if let Some((_, anchor)) = &mut self.pins {
+            *anchor = pin_btn.rect;
+        }
         if config.modules.notifications {
             self.inbox_button(ui, config, pal);
         }
@@ -1634,46 +2188,109 @@ impl State {
             });
             return;
         };
-        let Some(messages) = self.messages.get(&channel_id) else {
+        let Some(count) = self.messages.get(&channel_id).map(Vec::len) else {
             ui.centered_and_justified(|ui| ui.spinner());
             return;
         };
-        if messages.is_empty() {
+        if count == 0 {
             ui.centered_and_justified(|ui| {
                 ui.label(RichText::new("No messages yet").color(pal.muted))
             });
             return;
         }
 
-        let my_id = self.me.as_ref().map(|u| u.id.as_str()).unwrap_or_default();
+        let formatting = !config.disable_formatting;
+        let my_id = self.me.as_ref().map(|u| u.id.clone()).unwrap_or_default();
+        // Server nicknames and role colours for author names (not DMs).
+        let guild_idx = self
+            .guilds
+            .iter()
+            .position(|g| g.channel(&channel_id).is_some());
+
+        // Parse (cached) message bodies and reply snippets first: that needs
+        // the cache mutably, drawing needs the rest of the state.
+        let (blocks, replies): (Vec<Arc<[Block]>>, Vec<Option<String>>) = {
+            let lookup = ChatLookup {
+                guild: guild_idx.map(|i| &self.guilds[i]),
+                guilds: &self.guilds,
+                dms: &self.dms,
+                members: &self.member_cache,
+                names: &self.user_names,
+            };
+            let cache = &mut self.md_cache;
+            self.messages[&channel_id]
+                .iter()
+                .map(|m| {
+                    let blocks = cache.get(&m.id, &m.content, formatting);
+                    let reply = m.reply.as_ref().map(|r| {
+                        if r.content.is_empty() {
+                            "Click to see attachment".to_string()
+                        } else {
+                            let b = cache.get(&format!("reply:{}", m.id), &r.content, formatting);
+                            markdown::to_plain_text(&b, &lookup).replace('\n', " ")
+                        }
+                    });
+                    (blocks, reply)
+                })
+                .unzip()
+        };
+
+        let guild = guild_idx.map(|i| &self.guilds[i]);
+        let lookup = ChatLookup {
+            guild,
+            guilds: &self.guilds,
+            dms: &self.dms,
+            members: &self.member_cache,
+            names: &self.user_names,
+        };
+        let menu = MenuCtx {
+            mine: false,
+            guild_id: guild.map(|g| g.id.clone()),
+            can_pin: self.can_pin(&channel_id),
+        };
+        let messages = &self.messages[&channel_id];
         let mut action = None;
-        // Server nicknames and role colours for author names.
-        let guild = self
-            .find_channel(&channel_id)
-            .map(|(g, _)| g)
-            .filter(|g| !g.is_dms());
+        let scroll_id = self
+            .scroll_to
+            .as_ref()
+            .filter(|(c, _)| *c == channel_id)
+            .map(|(_, m)| m.clone());
+        let mut scrolled = false;
+        let flash = self
+            .highlight
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < Duration::from_secs(2))
+            .map(|(id, _)| id.clone());
+        if flash.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
 
         let mut new_after = self
             .new_marker
             .as_ref()
             .filter(|(c, _)| *c == channel_id)
             .map(|(_, acked)| *acked);
+        let hide_blocked = !config.show_blocked_messages;
 
         egui::ScrollArea::vertical()
             .id_salt(("messages", &channel_id))
             .auto_shrink(false)
-            .stick_to_bottom(true)
+            .stick_to_bottom(scroll_id.is_none())
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.add_space(8.0);
                 let mut prev: Option<&Message> = None;
-                for m in messages {
+                let mut revealed_run = false;
+                let mut i = 0;
+                while i < messages.len() {
+                    let m = &messages[i];
                     let day = timefmt::local_day(m.time);
                     let new_day =
                         day.is_some() && prev.and_then(|p| timefmt::local_day(p.time)) != day;
                     // Discord groups messages by the same person sent within 7 minutes.
                     let mut grouped = m.reply.is_none()
                         && !new_day
+                        && !config.compact_messages
                         && prev.is_some_and(|p| {
                             p.author.id == m.author.id && (m.time - p.time).abs() < 7 * 60
                         });
@@ -1688,28 +2305,97 @@ impl State {
                         new_after = None;
                         grouped = false;
                     }
+
+                    // Blocked people: one "N blocked messages — Show" line
+                    // per run, unless shown.
+                    let blocked = self.blocked.contains(&m.author.id);
+                    if !blocked {
+                        revealed_run = false;
+                    } else if hide_blocked && !revealed_run && scroll_id.as_ref() != Some(&m.id) {
+                        if self.revealed_blocked.contains(&m.id) {
+                            revealed_run = true;
+                        } else {
+                            let start = i;
+                            while i < messages.len()
+                                && self.blocked.contains(&messages[i].author.id)
+                            {
+                                i += 1;
+                            }
+                            if blocked_row(ui, i - start, pal) {
+                                action = Some(MessageAction::ShowBlocked(m.id.clone()));
+                            }
+                            prev = None;
+                            continue;
+                        }
+                    }
+
                     let author = self.author_style(guild, &m.author);
                     let mentions_me = !my_id.is_empty()
                         && m.author.id != my_id
-                        && (m.mention_everyone || m.mentions.iter().any(|id| id == my_id));
-                    let ctx = RowCtx {
-                        grouped,
+                        && (m.mention_everyone || m.mentions.contains(&my_id));
+                    let menu = MenuCtx {
                         mine: m.author.id == my_id,
-                        mentions_me,
+                        guild_id: menu.guild_id.clone(),
+                        can_pin: menu.can_pin,
                     };
-                    if let Some(a) = message_row(ui, m, &author, &ctx, config, pal) {
-                        action = Some(a);
+                    let rc = RowCtx {
+                        grouped,
+                        mentions_me,
+                        compact: config.compact_messages,
+                        highlight: flash.as_ref() == Some(&m.id),
+                        menu: &menu,
+                    };
+                    let body = Body {
+                        blocks: &blocks[i],
+                        reply: replies[i].as_deref(),
+                        lookup: &lookup,
+                    };
+                    let (a, rect) = message_row(ui, m, &body, &author, &rc, config, pal);
+                    if a.is_some() {
+                        action = a;
+                    }
+                    if scroll_id.as_ref() == Some(&m.id) {
+                        ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                        scrolled = true;
                     }
                     prev = Some(m);
+                    i += 1;
                 }
                 ui.add_space(20.0);
             });
+        if scrolled && let Some((_, id)) = self.scroll_to.take() {
+            self.highlight = Some((id, Instant::now()));
+        }
 
+        // Toast ("Saved …") over the bottom of the chat.
+        if let Some((text, at)) = &self.toast {
+            if at.elapsed() > Duration::from_secs(4) {
+                self.toast = None;
+            } else {
+                let rect = ui.clip_rect();
+                let galley = ui.painter().layout_no_wrap(
+                    text.clone(),
+                    egui::FontId::proportional(13.0),
+                    pal.strong,
+                );
+                let r = egui::Rect::from_center_size(
+                    egui::pos2(rect.center().x, rect.bottom() - 24.0),
+                    galley.size() + vec2(24.0, 12.0),
+                );
+                ui.painter().rect_filled(r, 6, pal.servers);
+                ui.painter()
+                    .galley(r.center() - galley.size() / 2.0, galley, pal.strong);
+                ui.ctx().request_repaint_after(Duration::from_millis(500));
+            }
+        }
+
+        let ctx = ui.ctx().clone();
         match action {
             Some(MessageAction::Reply(id, author)) => {
                 self.compose = Compose::Reply {
                     message_id: id,
                     author,
+                    ping: config.mention_on_reply,
                 };
                 self.focus_composer = true;
             }
@@ -1719,18 +2405,141 @@ impl State {
                 self.focus_composer = true;
             }
             Some(MessageAction::Delete(id)) => self.confirm_delete = Some((channel_id, id)),
-            Some(MessageAction::Copy(text)) => ui.ctx().copy_text(text),
+            Some(MessageAction::Copy(text)) => ctx.copy_text(text),
             Some(MessageAction::MarkUnread(id)) => self.mark_unread(&channel_id, &id),
             Some(MessageAction::Profile(user, rect)) => {
                 let guild = self
                     .find_channel(&channel_id)
                     .filter(|(g, _)| !g.is_dms())
                     .map(|(g, _)| g.id.clone());
-                let ctx = ui.ctx().clone();
                 self.open_profile(user, guild, rect, &ctx);
             }
+            Some(MessageAction::OpenLink(url)) => self.open_link(&url, &ctx, config),
+            Some(MessageAction::Mention(user_id, rect)) => {
+                let user = self.known_user(&channel_id, &user_id);
+                let guild = guild_idx.map(|i| self.guilds[i].id.clone());
+                self.open_profile(user, guild, rect, &ctx);
+            }
+            Some(MessageAction::GoToChannel(cid)) => self.go_to_channel(&cid, &ctx, config),
+            Some(MessageAction::Pin(id, pin)) => self.confirm_pin = Some((channel_id, id, pin)),
+            Some(MessageAction::SaveImage(url, filename)) => {
+                let _ = self.tx.send(ToBackend::SaveFile { url, filename });
+            }
+            Some(MessageAction::ShowBlocked(id)) => {
+                self.revealed_blocked.insert(id);
+            }
+            Some(MessageAction::JumpTo(id)) => self.jump_to(channel_id, id),
             None => {}
         }
+    }
+
+    /// Open a link: straight away if trusted (or warnings are off),
+    /// otherwise via the "Leaving RustCord" dialog.
+    fn open_link(&mut self, url: &str, ctx: &egui::Context, config: &Config) {
+        match links::check(url, config.warn_before_links, &config.trusted_domains) {
+            LinkCheck::Open(u) => ctx.open_url(egui::OpenUrl::new_tab(u)),
+            LinkCheck::Ask(w) => self.link_warning = Some(w),
+        }
+    }
+
+    /// Scroll to a message, loading the messages around it if needed.
+    fn jump_to(&mut self, channel_id: String, message_id: String) {
+        let loaded = self
+            .messages
+            .get(&channel_id)
+            .is_some_and(|l| l.iter().any(|m| m.id == message_id));
+        if loaded {
+            self.scroll_to = Some((channel_id, message_id));
+        } else {
+            let _ = self.tx.send(ToBackend::LoadAround {
+                channel_id,
+                message_id,
+            });
+        }
+    }
+
+    /// Switch to a channel by id (channel mentions, quick switcher, pins).
+    fn go_to_channel(&mut self, channel_id: &str, ctx: &egui::Context, config: &Config) {
+        let Some((g, c)) = self.find_channel(channel_id) else {
+            self.toast = Some((
+                "You don't have access to that channel".into(),
+                Instant::now(),
+            ));
+            return;
+        };
+        if !c.is_text() {
+            return;
+        }
+        let gid = g.id.clone();
+        self.select_guild(gid);
+        self.select_channel(channel_id.to_string(), ctx, config);
+    }
+
+    /// The best `User` we have for an id (mention clicks).
+    fn known_user(&self, channel_id: &str, user_id: &str) -> User {
+        if let Some(u) = self
+            .messages
+            .get(channel_id)
+            .and_then(|l| l.iter().rev().find(|m| m.author.id == user_id))
+        {
+            return u.author.clone();
+        }
+        if let Some(u) = self
+            .dms
+            .channels
+            .iter()
+            .flat_map(|c| &c.recipients)
+            .find(|u| u.id == user_id)
+        {
+            return u.clone();
+        }
+        let name = self
+            .user_names
+            .get(user_id)
+            .cloned()
+            .unwrap_or_else(|| "unknown-user".into());
+        User {
+            id: user_id.to_string(),
+            username: name.to_lowercase(),
+            avatar_url: crate::types::avatar_url(user_id, None),
+            name,
+            bot: false,
+        }
+    }
+
+    /// May I pin / unpin in this channel? DMs: yes. Servers: Manage
+    /// Messages, from my roles and the channel's overwrites.
+    fn can_pin(&self, channel_id: &str) -> bool {
+        let Some((g, c)) = self.find_channel(channel_id) else {
+            return false;
+        };
+        if g.is_dms() {
+            return true;
+        }
+        let Some(me) = &self.me else { return false };
+        let p = perms::channel_permissions(
+            &g.id,
+            &g.owner_id,
+            &g.roles,
+            &c.overwrites,
+            &perms::Me {
+                user_id: &me.id,
+                roles: &g.my_roles,
+            },
+        );
+        p & perms::MANAGE_MESSAGES != 0
+    }
+
+    /// Markdown → one line of plain text for notifications and the inbox.
+    fn plain_text(&self, content: &str, guild_id: &str) -> String {
+        let lookup = ChatLookup {
+            guild: self.guilds.iter().find(|g| g.id == guild_id),
+            guilds: &self.guilds,
+            dms: &self.dms,
+            members: &self.member_cache,
+            names: &self.user_names,
+        };
+        markdown::to_plain_text(&markdown::parse(content), &lookup)
     }
 
     /// 🔔 button with a red dot when there are unread mentions; opens the
@@ -1812,6 +2621,40 @@ impl State {
         let mut send = false;
         let mut changed = false;
         let mut remove = None;
+        let mut toggle_ping = false;
+        let mut box_rect = egui::Rect::NOTHING;
+        let mut edit_id = None;
+        let mut cursor = None;
+        let mut has_focus = false;
+
+        // Autocomplete keys go first so the text box doesn't see them.
+        let ac_on = config.modules.autocomplete;
+        let mut accept = None;
+        if ac_on && self.ac.active() {
+            let n = self.ac.items.len();
+            let (up, down, tab, enter, esc) = ui.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                )
+            });
+            if down {
+                self.ac.selected = (self.ac.selected + 1) % n;
+            }
+            if up {
+                self.ac.selected = (self.ac.selected + n - 1) % n;
+            }
+            if tab || enter {
+                accept = Some(self.ac.selected);
+            }
+            if esc {
+                self.ac.dismissed = self.ac.query.as_ref().map(|q| q.start);
+                self.ac.clear();
+            }
+        }
 
         // Built bottom-up (like Discord) so the input row always stays visible
         // and extra rows (files, reply banner) grow upwards.
@@ -1846,58 +2689,68 @@ impl State {
                     se: 8,
                 });
             }
-            box_frame.show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    if plus_button(ui, pal).clicked() {
-                        let _ = self.tx.send(ToBackend::PickFiles);
-                    }
-                    ui.add_space(8.0);
-                    let can_send = !self.draft.trim().is_empty() || !self.pending_files.is_empty();
-                    let hint = match self
-                        .find_channel(&channel_id)
-                        .map(|(_, c)| (c.is_dm(), c.name.clone()))
-                    {
-                        Some((true, name)) => format!("Message @{name}"),
-                        Some((false, name)) => format!("Message #{name}"),
-                        None => "Message".into(),
-                    };
-                    let send_w = if can_send {
-                        24.0 + ui.spacing().item_spacing.x
-                    } else {
-                        0.0
-                    };
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut self.draft)
+            box_rect = box_frame
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        if plus_button(ui, pal).clicked() {
+                            let _ = self.tx.send(ToBackend::PickFiles);
+                        }
+                        ui.add_space(8.0);
+                        let can_send =
+                            !self.draft.trim().is_empty() || !self.pending_files.is_empty();
+                        let hint = match self
+                            .find_channel(&channel_id)
+                            .map(|(_, c)| (c.is_dm(), c.name.clone()))
+                        {
+                            Some((true, name)) => format!("Message @{name}"),
+                            Some((false, name)) => format!("Message #{name}"),
+                            None => "Message".into(),
+                        };
+                        let send_w = if can_send {
+                            24.0 + ui.spacing().item_spacing.x
+                        } else {
+                            0.0
+                        };
+                        let out = egui::TextEdit::singleline(&mut self.draft)
                             .hint_text(RichText::new(hint).color(pal.muted))
                             .font(egui::FontId::proportional(15.0))
                             .frame(egui::Frame::NONE)
                             .margin(egui::Margin::ZERO)
-                            .desired_width(ui.available_width() - send_w),
-                    );
-                    if std::mem::take(&mut self.focus_composer) {
-                        resp.request_focus();
-                    }
-                    changed = resp.changed();
-                    if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        cancel = true;
-                    }
-                    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    // Discord has no send button; a subtle one shows only
-                    // when there's something to send.
-                    let send_btn = can_send && send_button(ui, pal).clicked();
-                    if enter || send_btn {
-                        send = true;
-                        resp.request_focus();
-                    }
-                });
-            });
+                            .desired_width(ui.available_width() - send_w)
+                            .show(ui);
+                        let resp = out.response;
+                        edit_id = Some(resp.id);
+                        cursor = out.cursor_range.map(|r| r.primary.index.0);
+                        has_focus = resp.has_focus();
+                        if std::mem::take(&mut self.focus_composer) {
+                            resp.request_focus();
+                        }
+                        changed = resp.changed();
+                        if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            cancel = true;
+                        }
+                        let enter =
+                            resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        // Discord has no send button; a subtle one shows only
+                        // when there's something to send.
+                        let send_btn = can_send && send_button(ui, pal).clicked();
+                        if enter || send_btn {
+                            send = true;
+                            resp.request_focus();
+                        }
+                    });
+                })
+                .response
+                .rect;
 
             // Reply / edit banner, attached to the top of the box.
-            let banner = match &self.compose {
-                Compose::New => None,
-                Compose::Reply { author, .. } => Some(("Replying to ", author.clone())),
-                Compose::Edit { .. } => Some(("Editing message", String::new())),
+            let (banner, ping) = match &self.compose {
+                Compose::New => (None, None),
+                Compose::Reply { author, ping, .. } => {
+                    (Some(("Replying to ", author.clone())), Some(*ping))
+                }
+                Compose::Edit { .. } => (Some(("Editing message", String::new())), None),
             };
             if let Some((what, who)) = banner {
                 egui::Frame::new()
@@ -1933,6 +2786,32 @@ impl State {
                                         )
                                         .on_hover_text("Cancel (Esc)");
                                     cancel |= x.clicked();
+                                    if let Some(on) = ping {
+                                        ui.add_space(10.0);
+                                        // Discord's "@ ON" switch: ping the author?
+                                        let (text, col) = if on {
+                                            ("@ ON", pal.accent)
+                                        } else {
+                                            ("@ OFF", pal.muted)
+                                        };
+                                        let chip = ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new(text)
+                                                        .size(12.0)
+                                                        .bold()
+                                                        .color(col),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .on_hover_text(if on {
+                                                "Mentioning the author (click to turn off)"
+                                            } else {
+                                                "Not mentioning the author (click to turn on)"
+                                            });
+                                        toggle_ping = chip.clicked();
+                                        ui.add_space(6.0);
+                                    }
                                 },
                             );
                         });
@@ -1983,6 +2862,41 @@ impl State {
         if let Some(i) = remove {
             self.pending_files.remove(i);
         }
+        if toggle_ping && let Compose::Reply { ping, .. } = &mut self.compose {
+            *ping = !*ping;
+        }
+
+        // Autocomplete: a clicked row, or Tab / Enter from above.
+        if ac_on {
+            if self.ac.active()
+                && let Some(i) = autocomplete::popup(ui.ctx(), box_rect, &self.ac, pal)
+            {
+                accept = Some(i);
+            }
+            if let (Some(i), Some(q)) = (accept, self.ac.query.clone())
+                && let Some(item) = self.ac.items.get(i)
+            {
+                let insert = item.insert.clone();
+                let at = autocomplete::apply(&mut self.draft, &q, &insert);
+                if let Some(id) = edit_id
+                    && let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id)
+                {
+                    let c = egui::text::CCursor::new(at);
+                    st.cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(c)));
+                    st.store(ui.ctx(), id);
+                    ui.ctx().memory_mut(|m| m.request_focus(id));
+                }
+                self.ac.clear();
+            } else if has_focus {
+                self.update_autocomplete(&channel_id, cursor);
+            } else {
+                self.ac.clear();
+            }
+        } else if self.ac.query.is_some() {
+            self.ac = Autocomplete::default();
+        }
+
         if cancel {
             if matches!(self.compose, Compose::Edit { .. }) {
                 self.draft.clear();
@@ -2158,6 +3072,139 @@ impl State {
         }
     }
 
+    /// Recompute composer suggestions for the word at the cursor.
+    fn update_autocomplete(&mut self, channel_id: &str, cursor: Option<usize>) {
+        let q = cursor.and_then(|c| autocomplete::find_query(&self.draft, c));
+        let Some(q) = q else {
+            self.ac.clear();
+            self.ac.dismissed = None;
+            return;
+        };
+        if self.ac.dismissed == Some(q.start) {
+            return;
+        }
+        if self.ac.query.as_ref() == Some(&q) {
+            return; // Nothing changed.
+        }
+        let guild = self.guilds.iter().find(|g| g.channel(channel_id).is_some());
+        let items = match q.trigger {
+            Trigger::User => {
+                autocomplete::rank_named(&q.text, self.mention_candidates(channel_id, guild))
+            }
+            Trigger::Channel => {
+                let candidates = guild
+                    .map(|g| {
+                        g.channels
+                            .iter()
+                            .filter(|c| c.is_text())
+                            .map(|c| Candidate {
+                                name: c.name.clone(),
+                                detail: c
+                                    .parent_id
+                                    .as_deref()
+                                    .and_then(|p| g.channel(p))
+                                    .map(|p| p.name.to_uppercase())
+                                    .unwrap_or_default(),
+                                insert: format!("<#{}>", c.id),
+                                color: None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut items = autocomplete::rank_named(&q.text, candidates);
+                for i in &mut items {
+                    i.glyph = "#".into();
+                }
+                items
+            }
+            Trigger::Emoji => autocomplete::emoji(&q.text, guild.map_or(&[], |g| &g.emojis)),
+        };
+        let same_start = self.ac.query.as_ref().is_some_and(|o| o.start == q.start);
+        if !same_start {
+            self.ac.selected = 0;
+        }
+        self.ac.selected = self.ac.selected.min(items.len().saturating_sub(1));
+        self.ac.items = items;
+        self.ac.query = Some(q);
+    }
+
+    /// People (and roles, @everyone / @here) for `@` suggestions: the member
+    /// list, cached members, message authors and DM recipients.
+    fn mention_candidates(&self, channel_id: &str, guild: Option<&Guild>) -> Vec<Candidate> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        let mut person = |out: &mut Vec<Candidate>, id: &str, name: &str, username: &str| {
+            if id.is_empty() || !seen.insert(id.to_string()) {
+                return;
+            }
+            let roles = guild
+                .and_then(|g| self.member_cache.get(&g.id, id))
+                .map(|m| m.roles.as_slice())
+                .unwrap_or(&[]);
+            out.push(Candidate {
+                name: name.to_string(),
+                detail: username.to_string(),
+                insert: format!("<@{id}>"),
+                color: guild.and_then(|g| members::role_color(&g.roles, roles)),
+            });
+        };
+        let lists = self
+            .member_list
+            .iter()
+            .chain(self.bot_list.as_ref().map(|b| &b.list));
+        for list in lists {
+            for row in list.rows.iter().flatten() {
+                if let Row::Member(m) = row {
+                    person(&mut out, &m.user.id, m.display_name(), &m.user.username);
+                }
+            }
+        }
+        for m in self.messages.get(channel_id).into_iter().flatten().rev() {
+            let name = guild
+                .and_then(|g| self.member_cache.get(&g.id, &m.author.id))
+                .and_then(|c| c.nick.as_deref())
+                .unwrap_or(&m.author.name);
+            person(&mut out, &m.author.id, name, &m.author.username);
+        }
+        if let Some(dm) = self.dms.channel(channel_id) {
+            for u in &dm.recipients {
+                person(&mut out, &u.id, &u.name, &u.username);
+            }
+        }
+        if let Some(g) = guild {
+            for (id, m) in self.member_cache.guild(&g.id) {
+                if let Some(name) = m
+                    .nick
+                    .as_deref()
+                    .or(self.user_names.get(id).map(String::as_str))
+                {
+                    person(&mut out, id, name, "");
+                }
+            }
+            for r in g.roles.iter().filter(|r| r.id != g.id) {
+                out.push(Candidate {
+                    name: r.name.clone(),
+                    detail: "role".into(),
+                    insert: format!("<@&{}>", r.id),
+                    color: r.color32(),
+                });
+            }
+            for e in ["everyone", "here"] {
+                out.push(Candidate {
+                    name: e.into(),
+                    detail: if e == "here" {
+                        "Notify everyone online".into()
+                    } else {
+                        "Notify everyone in this channel".into()
+                    },
+                    insert: format!("@{e}"),
+                    color: None,
+                });
+            }
+        }
+        out
+    }
+
     /// Tell Discord we're typing, at most every 8 seconds per channel.
     fn maybe_send_typing(&mut self, channel_id: &str) {
         let recently = self
@@ -2188,12 +3235,16 @@ impl State {
                 channel_id,
                 content,
                 reply_to: None,
+                reply_ping: false,
                 files,
             },
-            Compose::Reply { message_id, .. } => ToBackend::Send {
+            Compose::Reply {
+                message_id, ping, ..
+            } => ToBackend::Send {
                 channel_id,
                 content,
                 reply_to: Some(message_id),
+                reply_ping: ping,
                 files,
             },
         };
@@ -2256,9 +3307,12 @@ impl State {
             });
     }
 
-    /// Profile card, delete confirmation and the "drop files here" overlay.
+    /// Profile card, pins, dialogs and the "drop files here" overlay.
     fn overlays(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
-        self.popout_overlay(ui.ctx(), config, pal);
+        let ctx = ui.ctx().clone();
+        self.popout_overlay(&ctx, config, pal);
+        self.pins_overlay(&ctx, config, pal);
+        self.dialogs(&ctx, config, pal);
 
         // Drag-and-drop hint
         let hovering_files = ui.input(|i| !i.raw.hovered_files.is_empty());
@@ -2316,6 +3370,272 @@ impl State {
 }
 
 impl State {
+    /// Link warning, pin / leave confirmations, custom status, Ctrl+K.
+    fn dialogs(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        if let Some(w) = &mut self.link_warning
+            && let Some(decision) = w.show(ctx, pal)
+        {
+            if let LinkDecision::Visit { url, trust } = decision {
+                if let Some(domain) = trust {
+                    self.config_updates.push(ConfigUpdate::TrustDomain(domain));
+                }
+                ctx.open_url(egui::OpenUrl::new_tab(url));
+            }
+            self.link_warning = None;
+        }
+
+        if let Some(dialog) = &mut self.status_dialog
+            && let Some(result) = dialog.show(ctx, pal)
+        {
+            self.status_dialog = None;
+            match result {
+                DialogResult::Save(c) => self.set_custom_status(Some(c)),
+                DialogResult::Clear => self.set_custom_status(None),
+                DialogResult::Cancel => {}
+            }
+        }
+
+        if let Some((cid, mid, pin)) = self.confirm_pin.clone() {
+            let preview = self
+                .messages
+                .get(&cid)
+                .and_then(|l| l.iter().find(|m| m.id == mid))
+                .map(|m| {
+                    let text = self.plain_text(&m.content, m.guild_id.as_deref().unwrap_or(""));
+                    format!("{}: {}", m.author.name, notify::preview(&text, 120))
+                })
+                .unwrap_or_default();
+            let mut close = false;
+            let modal = egui::Modal::new(egui::Id::unique("rc_confirm_pin")).show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.heading(if pin { "Pin It. Pin It Good." } else { "Unpin Message" });
+                ui.label(if pin {
+                    "Hey, just double checking that you want to pin this message to the channel for posterity and greatness?"
+                } else {
+                    "You sure you want to remove this pinned message?"
+                });
+                if !preview.is_empty() {
+                    egui::Frame::new()
+                        .fill(pal.input)
+                        .corner_radius(4)
+                        .inner_margin(8)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(RichText::new(&preview).color(pal.muted));
+                        });
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                    let (label, fill) = if pin {
+                        ("Pin It", pal.accent)
+                    } else {
+                        ("Remove it please!", pal.danger)
+                    };
+                    if ui
+                        .add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(fill))
+                        .clicked()
+                    {
+                        let _ = self.tx.send(ToBackend::SetPinned {
+                            channel_id: cid.clone(),
+                            message_id: mid.clone(),
+                            pinned: pin,
+                        });
+                        close = true;
+                    }
+                });
+            });
+            if close || modal.should_close() {
+                self.confirm_pin = None;
+            }
+        }
+
+        if let Some((gid, name)) = self.confirm_leave.clone() {
+            let mut close = false;
+            let modal = egui::Modal::new(egui::Id::unique("rc_confirm_leave")).show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.heading(format!("Leave '{name}'"));
+                ui.label(format!(
+                    "Are you sure you want to leave {name}? You won't be able to rejoin this server unless you are re-invited."
+                ));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("Leave Server").color(Color32::WHITE))
+                                .fill(pal.danger),
+                        )
+                        .clicked()
+                    {
+                        let _ = self.tx.send(ToBackend::LeaveGuild { guild_id: gid.clone() });
+                        close = true;
+                    }
+                });
+            });
+            if close || modal.should_close() {
+                self.confirm_leave = None;
+            }
+        }
+
+        if self.switcher.is_some() {
+            let entries = self.switcher_entries();
+            let Some(sw) = &mut self.switcher else { return };
+            let results = quick_switcher::rank(&entries, &sw.query);
+            match sw.show(ctx, &results, pal) {
+                Some(quick_switcher::Action::Close) => self.switcher = None,
+                Some(quick_switcher::Action::Go(e)) => {
+                    self.switcher = None;
+                    match e.channel_id {
+                        Some(cid) => self.go_to_channel(&cid, ctx, config),
+                        None => self.select_guild(e.guild_id),
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// Ctrl+K.
+    pub fn toggle_switcher(&mut self) {
+        self.switcher = match self.switcher {
+            Some(_) => None,
+            None => Some(QuickSwitcher::default()),
+        };
+    }
+
+    /// Everything the quick switcher can go to.
+    fn switcher_entries(&self) -> Vec<quick_switcher::Entry> {
+        use quick_switcher::{Entry, Kind};
+        let recent = |cid: &str| self.visited.iter().position(|c| c == cid);
+        let mut out = Vec::new();
+        for g in &self.guilds {
+            let mut guild_recent = None;
+            for c in g.channels.iter().filter(|c| c.is_text()) {
+                let r = recent(&c.id);
+                guild_recent = match (guild_recent, r) {
+                    (Some(a), Some(b)) => Some(std::cmp::min(a, b)),
+                    (a, b) => a.or(b),
+                };
+                out.push(Entry {
+                    kind: Kind::Channel,
+                    name: c.name.clone(),
+                    detail: g.name.clone(),
+                    guild_id: g.id.clone(),
+                    channel_id: Some(c.id.clone()),
+                    recent: r,
+                });
+            }
+            out.push(Entry {
+                kind: Kind::Server,
+                name: g.name.clone(),
+                detail: String::new(),
+                guild_id: g.id.clone(),
+                channel_id: None,
+                // Servers rank just below their most recent channel.
+                recent: guild_recent.map(|r| r + 1),
+            });
+        }
+        for c in &self.dms.channels {
+            out.push(Entry {
+                kind: Kind::Dm,
+                name: c.name.clone(),
+                detail: "Direct Message".into(),
+                guild_id: DM_GUILD_ID.into(),
+                channel_id: Some(c.id.clone()),
+                recent: recent(&c.id),
+            });
+        }
+        out
+    }
+
+    /// The pinned messages popup under the 📌 button.
+    fn pins_overlay(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let Some(channel_id) = self.pins.as_ref().map(|(p, _)| p.channel_id.clone()) else {
+            return;
+        };
+        let can_unpin = self.can_pin(&channel_id);
+        let guild = self
+            .guilds
+            .iter()
+            .find(|g| g.channel(&channel_id).is_some());
+        let members = &self.member_cache;
+        let author = |u: &User| -> (String, Option<Color32>) {
+            let cached = guild.and_then(|g| members.get(&g.id, &u.id));
+            (
+                cached
+                    .and_then(|c| c.nick.clone())
+                    .unwrap_or_else(|| u.name.clone()),
+                cached.and_then(|c| members::role_color(&guild?.roles, &c.roles)),
+            )
+        };
+        let view = PinsView {
+            pal,
+            config,
+            can_unpin,
+            author: Some(&author),
+        };
+        let Some((popup, anchor)) = &mut self.pins else {
+            return;
+        };
+        let anchor = *anchor;
+        let mut action = None;
+        let area = egui::Area::new(egui::Id::unique("rc_pins_popup"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(anchor.right() - 440.0, anchor.bottom() + 6.0))
+            .constrain(true)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    action = popup.show_contents(ui, &view);
+                });
+            });
+        // Click outside (but not on the 📌 button, which toggles) or Esc closes.
+        let outside = ctx.input(|i| {
+            i.pointer.any_click()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|p| !area.response.rect.contains(p) && !anchor.contains(p))
+        });
+        let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        if outside || esc {
+            self.pins = None;
+        }
+        match action {
+            Some(PinsAction::Jump {
+                channel_id,
+                message_id,
+            }) => {
+                self.pins = None;
+                if self.selected_channel.as_ref() != Some(&channel_id) {
+                    self.go_to_channel(&channel_id, ctx, config);
+                }
+                self.jump_to(channel_id, message_id);
+            }
+            // Confirmed in the popup.
+            Some(PinsAction::Unpin {
+                channel_id,
+                message_id,
+            }) => {
+                let _ = self.tx.send(ToBackend::SetPinned {
+                    channel_id,
+                    message_id,
+                    pinned: false,
+                });
+            }
+            Some(PinsAction::Retry { channel_id }) => {
+                if let Some((p, _)) = &mut self.pins {
+                    p.set_loading();
+                }
+                let _ = self.tx.send(ToBackend::LoadPins { channel_id });
+            }
+            None => {}
+        }
+    }
+
     fn popout_overlay(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
         let is_bot_session = self.is_bot_session();
         let Some(pop) = &mut self.popout else {
@@ -2359,12 +3679,18 @@ impl State {
     }
 }
 
-/// Free the GPU/CPU copies of attachment images for messages we no longer keep.
+/// Free the GPU/CPU copies of attachment and embed images for messages we
+/// no longer keep.
 fn forget_message_images(ctx: &egui::Context, messages: &[Message]) {
     let (w, h) = IMAGE_MAX;
     for m in messages {
         for a in m.attachments.iter().filter(|a| a.is_image()) {
             ctx.forget_image(&a.thumbnail_url(w as u32, h as u32));
+        }
+        for e in &m.embeds {
+            for uri in e.image_uris() {
+                ctx.forget_image(&uri);
+            }
         }
     }
 }
@@ -2999,6 +4325,151 @@ fn rail_item(
     }
 }
 
+/// What the user did in the server rail this frame.
+#[derive(Default)]
+struct RailEvents {
+    clicked: Option<String>,
+    mark_read: Option<String>,
+    toggle_folder: Option<i64>,
+    /// (id, name) of a server to leave (after confirming).
+    leave: Option<(String, String)>,
+}
+
+/// Up to three initials of a server name ("RustCord Test Server" → "RTS").
+fn initials(name: &str) -> String {
+    name.split_whitespace()
+        .filter_map(|w| w.chars().next())
+        .take(3)
+        .collect()
+}
+
+/// A server folder in the rail.
+struct FolderIcon<'a> {
+    name: &'a str,
+    color: Color32,
+    guilds: &'a [&'a Guild],
+    open: bool,
+    /// One of its servers is selected.
+    selected: bool,
+    badge: Badge,
+}
+
+/// A folder: closed, a tinted rounded square with up to four tiny server
+/// icons; open, a folder glyph in the folder's colour (its servers follow
+/// below). Click toggles.
+fn folder_item(
+    ui: &mut egui::Ui,
+    f: &FolderIcon,
+    config: &Config,
+    pal: &Palette,
+) -> egui::Response {
+    const SIZE: f32 = 48.0;
+    let width = ui.available_width();
+    let wide = width >= RAIL_NAMES_WIDTH;
+    let (row, resp) = ui.allocate_exact_size(vec2(width, SIZE), egui::Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let x = if wide {
+        row.left() + 12.0
+    } else {
+        row.center().x - SIZE / 2.0
+    };
+    let rect = egui::Rect::from_min_size(egui::pos2(x, row.top()), vec2(SIZE, SIZE));
+    let hovered = resp.hovered();
+    let painter = ui.painter();
+    if f.open {
+        painter.rect_filled(rect, 16, if hovered { pal.hover } else { pal.rail_icon });
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "📁",
+            egui::FontId::proportional(22.0),
+            f.color,
+        );
+    } else {
+        painter.rect_filled(
+            rect,
+            16,
+            f.color.gamma_multiply(if hovered { 0.5 } else { 0.35 }),
+        );
+        // 2×2 grid of mini icons.
+        let mini = 18.0;
+        let gap = 4.0;
+        let start = rect.center() - vec2(mini + gap / 2.0, mini + gap / 2.0);
+        for (i, g) in f.guilds.iter().take(4).enumerate() {
+            let (cx, cy) = ((i % 2) as f32, (i / 2) as f32);
+            let r = egui::Rect::from_min_size(
+                start + vec2(cx * (mini + gap), cy * (mini + gap)),
+                vec2(mini, mini),
+            );
+            match &g.icon_url {
+                Some(url) if config.modules.images => {
+                    painter.circle_filled(r.center(), mini / 2.0, pal.rail_icon);
+                    egui::Image::from_uri(url)
+                        .corner_radius(mini / 2.0)
+                        .show_loading_spinner(false)
+                        .paint_at(ui, r);
+                }
+                _ => {
+                    painter.circle_filled(r.center(), mini / 2.0, pal.rail_icon);
+                    let i: String = initials(&g.name).chars().take(1).collect();
+                    painter.text(
+                        r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        i,
+                        theme::bold_font(9.5),
+                        pal.text,
+                    );
+                }
+            }
+        }
+    }
+    // Pill: selected server inside a closed folder, hover, or unread.
+    let target = if f.selected && !f.open {
+        40.0
+    } else if hovered {
+        20.0
+    } else if f.badge.unread {
+        8.0
+    } else {
+        0.0
+    };
+    let h = ui
+        .ctx()
+        .animate_value_with_time(resp.id.with("pill"), target, 0.12);
+    if h > 0.5 {
+        let left = ui.clip_rect().left();
+        let pill = egui::Rect::from_center_size(egui::pos2(left, rect.center().y), vec2(8.0, h));
+        ui.painter().rect_filled(pill, 4, pal.unread);
+    }
+    if f.badge.mentions > 0 {
+        mention_badge(
+            ui,
+            rect.right_bottom() + vec2(2.0, 2.0),
+            egui::Align2::RIGHT_BOTTOM,
+            f.badge.mentions,
+            pal.servers,
+            pal,
+        );
+    }
+    if wide {
+        let galley = truncated(
+            ui,
+            f.name,
+            egui::FontId::proportional(15.0),
+            pal.muted,
+            row.right() - rect.right() - 20.0,
+        );
+        ui.painter().galley(
+            egui::pos2(rect.right() + 12.0, row.center().y - galley.size().y / 2.0),
+            galley,
+            pal.muted,
+        );
+        resp
+    } else {
+        resp.on_hover_text(f.name)
+    }
+}
+
 /// Lay out one line of text, cut off with "…" past `max_width`.
 fn truncated(
     ui: &egui::Ui,
@@ -3018,13 +4489,56 @@ struct AuthorStyle<'a> {
     color: Option<Color32>,
 }
 
+/// Names for markdown mentions: the open server's nicknames and roles,
+/// people seen in messages, and every known channel.
+struct ChatLookup<'a> {
+    guild: Option<&'a Guild>,
+    guilds: &'a [Guild],
+    dms: &'a Guild,
+    members: &'a MemberCache,
+    names: &'a HashMap<String, String>,
+}
+
+impl markdown::Lookup for ChatLookup<'_> {
+    fn user_name(&self, id: &str) -> Option<String> {
+        self.guild
+            .and_then(|g| self.members.get(&g.id, id))
+            .and_then(|m| m.nick.clone())
+            .or_else(|| self.names.get(id).cloned())
+    }
+
+    fn role(&self, id: &str) -> Option<(String, Option<Color32>)> {
+        let r = self.guild?.roles.iter().find(|r| r.id == id)?;
+        Some((r.name.clone(), r.color32()))
+    }
+
+    fn channel_name(&self, id: &str) -> Option<String> {
+        std::iter::once(self.dms)
+            .chain(self.guilds)
+            .find_map(|g| g.channel(id))
+            .map(|c| c.name.clone())
+    }
+}
+
 /// Per-message flags for `message_row`.
-struct RowCtx {
+struct RowCtx<'a> {
     /// Follow-up from the same author: no avatar / name line.
     grouped: bool,
-    mine: bool,
     /// Mentions me (or @everyone): Discord's yellow highlight.
     mentions_me: bool,
+    /// Compact display: time and name inline, no avatars.
+    compact: bool,
+    /// Just jumped here (pins): flash the background.
+    highlight: bool,
+    menu: &'a MenuCtx,
+}
+
+/// A message's parsed content.
+struct Body<'a> {
+    blocks: &'a [Block],
+    /// Reply snippet as plain text.
+    reply: Option<&'a str>,
+    lookup: &'a dyn markdown::Lookup,
 }
 
 /// Message layout, in px (Discord's): 16 px left padding, 40 px avatar,
@@ -3033,19 +4547,24 @@ const MSG_PAD: f32 = 16.0;
 const MSG_AVATAR: f32 = 40.0;
 const MSG_GUTTER: f32 = 72.0;
 const GROUP_GAP: f32 = 17.0;
+/// Compact mode: width of the time column.
+const COMPACT_TIME: f32 = 64.0;
 
 /// Draw one message. Returns an action if the user picked one (hover bar,
-/// right-click menu, avatar / name click).
+/// right-click menu, avatar / name click, links), and the row's rect.
 fn message_row(
     ui: &mut egui::Ui,
     m: &Message,
+    body: &Body,
     author: &AuthorStyle<'_>,
     rc: &RowCtx,
     config: &Config,
     pal: &Palette,
-) -> Option<MessageAction> {
+) -> (Option<MessageAction>, egui::Rect) {
     let mut action = None;
-    if !rc.grouped {
+    if rc.compact {
+        ui.add_space(if m.reply.is_some() { 6.0 } else { 2.0 });
+    } else if !rc.grouped {
         ui.add_space(GROUP_GAP - 2.0);
     }
     let more_id = egui::Id::unique(("msg_more", &m.id));
@@ -3073,13 +4592,20 @@ fn message_row(
                 .inner_margin(egui::Margin {
                     left: MSG_PAD as i8,
                     right: 48,
-                    top: 2,
-                    bottom: 2,
+                    top: if rc.compact { 1 } else { 2 },
+                    bottom: if rc.compact { 1 } else { 2 },
                 })
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    if let Some(reply) = &m.reply {
-                        reply_preview(ui, reply, config, pal);
+                    if let (Some(reply), Some(text)) = (&m.reply, body.reply)
+                        && reply_preview(ui, reply, text, rc.compact, config, pal).clicked()
+                        && !reply.id.is_empty()
+                    {
+                        action = Some(MessageAction::JumpTo(reply.id.clone()));
+                    }
+                    if rc.compact {
+                        compact_line(ui, m, body, author, rc, config, pal, &mut action);
+                        return;
                     }
                     ui.horizontal_top(|ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
@@ -3090,7 +4616,6 @@ fn message_row(
                             );
                             gutter = r;
                         } else {
-                            ui.add_space(0.0);
                             let rect = avatar(
                                 ui,
                                 &m.author.id,
@@ -3116,25 +4641,11 @@ fn message_row(
                             ui.spacing_mut().item_spacing = vec2(6.0, 2.0);
                             if !rc.grouped {
                                 ui.horizontal(|ui| {
-                                    let name = RichText::new(author.name)
-                                        .bold()
-                                        .size(15.0)
-                                        .color(author.color.unwrap_or(pal.strong));
-                                    let resp = ui
-                                        .add(
-                                            egui::Label::new(name)
-                                                .sense(egui::Sense::click())
-                                                .selectable(false),
-                                        )
-                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                    if resp.clicked() {
+                                    if author_name(ui, m, author, 15.0, pal) {
                                         action = Some(MessageAction::Profile(
                                             m.author.clone(),
-                                            resp.rect,
+                                            ui.min_rect(),
                                         ));
-                                    }
-                                    if m.author.bot {
-                                        members::bot_tag(ui, pal);
                                     }
                                     ui.add(
                                         egui::Label::new(
@@ -3147,14 +4658,7 @@ fn message_row(
                                     .on_hover_text(timefmt::long(m.time));
                                 });
                             }
-                            let texts = message_body(ui, m, pal, config);
-                            for r in &texts {
-                                egui::Popup::context_menu(r)
-                                    .show(|ui| message_menu(ui, m, rc.mine, &mut action));
-                            }
-                            for a in &m.attachments {
-                                attachment_ui(ui, a, config, pal);
-                            }
+                            message_content(ui, m, body, rc, config, pal, &mut action);
                         });
                     });
                 })
@@ -3167,7 +4671,7 @@ fn message_row(
     let resp = row.response;
     let hovered = ui.rect_contains_pointer(rect) || on_bar || menu_open;
 
-    // Backgrounds: mention highlight, then hover.
+    // Backgrounds: mention highlight, jump flash, then hover.
     let mut shapes = Vec::new();
     if rc.mentions_me {
         shapes.push(egui::Shape::rect_filled(
@@ -3179,6 +4683,13 @@ fn message_row(
             egui::Rect::from_min_size(rect.min, vec2(2.0, rect.height())),
             0,
             pal.idle,
+        ));
+    }
+    if rc.highlight {
+        shapes.push(egui::Shape::rect_filled(
+            rect,
+            0,
+            pal.accent.gamma_multiply(0.18),
         ));
     }
     if hovered {
@@ -3202,43 +4713,98 @@ fn message_row(
         );
     }
 
-    egui::Popup::context_menu(&resp).show(|ui| message_menu(ui, m, rc.mine, &mut action));
+    egui::Popup::context_menu(&resp).show(|ui| message_menu(ui, m, rc.menu, &mut action));
 
     if hovered {
-        hover_bar(ui, m, rc.mine, rect, more_id, bar_id, &mut action, pal);
+        hover_bar(ui, m, rc.menu, rect, more_id, bar_id, &mut action, pal);
     }
-    action
+    (action, rect)
 }
 
-/// Text, emoji and "(edited)". Returns the text labels (for right-click).
-fn message_body(
+/// Bold author name (role colour) and BOT tag. Returns true if clicked.
+fn author_name(
     ui: &mut egui::Ui,
     m: &Message,
+    author: &AuthorStyle<'_>,
+    size: f32,
     pal: &Palette,
+) -> bool {
+    let name = RichText::new(author.name)
+        .bold()
+        .size(size)
+        .color(author.color.unwrap_or(pal.strong));
+    let resp = ui
+        .add(
+            egui::Label::new(name)
+                .sense(egui::Sense::click())
+                .selectable(false),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if m.author.bot {
+        members::bot_tag(ui, pal);
+    }
+    resp.clicked()
+}
+
+/// Compact display: "15:05  Name  message…" on one line.
+#[allow(clippy::too_many_arguments)]
+fn compact_line(
+    ui: &mut egui::Ui,
+    m: &Message,
+    body: &Body,
+    author: &AuthorStyle<'_>,
+    rc: &RowCtx,
     config: &Config,
-) -> Vec<egui::Response> {
-    let mut text_responses = Vec::new();
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        if !m.content.is_empty() {
-            if config.modules.emoji_images {
-                let segs = emoji::segments(&m.content);
-                let size = if emoji::is_jumbo(&segs) { 44.0 } else { 20.0 };
-                for seg in segs {
-                    match seg {
-                        Segment::Text(t) => text_responses
-                            .push(ui.add(egui::Label::new(RichText::new(t).color(pal.text)))),
-                        Segment::Emoji { url, alt } => {
-                            ui.add(egui::Image::from_uri(url).fit_to_exact_size(vec2(size, size)))
-                                .on_hover_text(alt);
-                        }
-                    }
+    pal: &Palette,
+    action: &mut Option<MessageAction>,
+) {
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (r, _) = ui.allocate_exact_size(vec2(COMPACT_TIME - 6.0, 20.0), egui::Sense::hover());
+        ui.painter().text(
+            egui::pos2(r.right(), r.center().y),
+            egui::Align2::RIGHT_CENTER,
+            m.short_time(),
+            egui::FontId::proportional(11.0),
+            pal.muted,
+        );
+        ui.interact(
+            r,
+            ui.scope_id().with(("ctime", &m.id)),
+            egui::Sense::hover(),
+        )
+        .on_hover_text(timefmt::long(m.time));
+        let name_rect = ui
+            .horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if author_name(ui, m, author, 14.5, pal) {
+                    *action = Some(MessageAction::Profile(m.author.clone(), ui.min_rect()));
                 }
-            } else {
-                text_responses
-                    .push(ui.add(egui::Label::new(RichText::new(&m.content).color(pal.text))));
-            }
-        }
+            })
+            .response
+            .rect;
+        let _ = name_rect;
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 2.0);
+            message_content(ui, m, body, rc, config, pal, action);
+        });
+    });
+}
+
+/// Markdown body with "(edited)", then embeds and attachments.
+fn message_content(
+    ui: &mut egui::Ui,
+    m: &Message,
+    body: &Body,
+    rc: &RowCtx,
+    config: &Config,
+    pal: &Palette,
+    action: &mut Option<MessageAction>,
+) {
+    let mut rctx = markdown::RenderCtx::new(pal, body.lookup, &m.id);
+    rctx.emoji_images = config.modules.emoji_images;
+    rctx.bold_family = Some(theme::bold_family());
+    let edited = |ui: &mut egui::Ui| {
         if m.edited {
             ui.add_space(4.0);
             ui.add(
@@ -3246,8 +4812,89 @@ fn message_body(
                     .selectable(false),
             );
         }
+    };
+    if !body.blocks.is_empty() {
+        let out = markdown::render_with(ui, body.blocks, &rctx, edited);
+        if let Some(r) = &out.response {
+            egui::Popup::context_menu(r).show(|ui| message_menu(ui, m, rc.menu, action));
+        }
+        match out.action {
+            Some(MarkdownAction::Link(url)) => *action = Some(MessageAction::OpenLink(url)),
+            Some(MarkdownAction::User { id, rect }) => {
+                *action = Some(MessageAction::Mention(id, rect))
+            }
+            Some(MarkdownAction::Channel(id)) => *action = Some(MessageAction::GoToChannel(id)),
+            Some(MarkdownAction::Role(_)) | None => {}
+        }
+    } else if m.edited {
+        ui.horizontal(edited);
+    }
+
+    if config.modules.embeds {
+        for (n, e) in m.embeds.iter().enumerate() {
+            // Spoilers in embeds need their own ids.
+            let key = format!("{}:embed{n}", m.id);
+            let text = |ui: &mut egui::Ui, text: &str| -> Option<String> {
+                let blocks = if config.disable_formatting {
+                    markdown::plain(text)
+                } else {
+                    markdown::parse(text)
+                };
+                let mut c = markdown::RenderCtx::new(pal, body.lookup, &key);
+                c.emoji_images = config.modules.emoji_images;
+                c.bold_family = Some(theme::bold_family());
+                match markdown::render(ui, &blocks, &c).action {
+                    Some(MarkdownAction::Link(url)) => Some(url),
+                    _ => None,
+                }
+            };
+            let mut ectx = embed::EmbedCtx::new(pal);
+            ectx.show_images = config.show_embed_images;
+            ectx.images_enabled = config.modules.images;
+            ectx.max_width = ui.available_width().min(embed::MAX_WIDTH);
+            ectx.text = Some(&text);
+            ui.add_space(2.0);
+            let out = embed::render_embed(ui, e, &ectx);
+            if let Some(url) = out.clicked_link {
+                *action = Some(MessageAction::OpenLink(url));
+            }
+        }
+    }
+    for a in &m.attachments {
+        if let Some(url) = attachment_ui(ui, a, config, pal) {
+            *action = Some(MessageAction::OpenLink(url));
+        }
+    }
+}
+
+/// "N blocked messages — Show". Returns true if Show was clicked.
+fn blocked_row(ui: &mut egui::Ui, n: usize, pal: &Palette) -> bool {
+    ui.add_space(GROUP_GAP - 2.0);
+    let mut show = false;
+    ui.horizontal(|ui| {
+        ui.add_space(MSG_GUTTER);
+        ui.label(RichText::new("⛔").size(14.0).color(pal.muted));
+        let text = if n == 1 {
+            "1 blocked message".to_string()
+        } else {
+            format!("{n} blocked messages")
+        };
+        ui.label(RichText::new(text).size(14.0).color(pal.muted));
+        ui.label(RichText::new("—").color(pal.muted));
+        show = ui
+            .add(
+                egui::Label::new(
+                    RichText::new("Show")
+                        .size(14.0)
+                        .color(ui.visuals().hyperlink_color),
+                )
+                .sense(egui::Sense::click())
+                .selectable(false),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked();
     });
-    text_responses
+    show
 }
 
 /// Discord's reply line above a message: a curved connector from the
@@ -3256,30 +4903,46 @@ fn message_body(
 fn reply_preview(
     ui: &mut egui::Ui,
     reply: &crate::types::ReplyPreview,
+    text: &str,
+    compact: bool,
     config: &Config,
     pal: &Palette,
-) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), egui::Sense::hover());
+) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(vec2(ui.available_width(), 20.0), egui::Sense::click());
     let y = rect.center().y;
-    // Connector: from above the avatar's centre, up and round to the right.
-    let x0 = rect.left() + MSG_AVATAR / 2.0;
-    let x1 = rect.left() + MSG_GUTTER - MSG_PAD - 6.0;
-    let r = 6.0;
-    let mut pts = vec![egui::pos2(x0, rect.bottom() + 4.0)];
-    for i in 0..=6 {
-        let a = std::f32::consts::FRAC_PI_2 * i as f32 / 6.0;
-        pts.push(egui::pos2(x0 + r - r * a.cos(), y + r - r * a.sin()));
-    }
-    pts.push(egui::pos2(x1, y));
     let line = if pal.dark {
         Color32::from_gray(0x4e)
     } else {
         Color32::from_gray(0xc4)
     };
-    ui.painter()
-        .add(egui::Shape::line(pts, egui::Stroke::new(2.0, line)));
-
     let mut x = rect.left() + MSG_GUTTER - MSG_PAD;
+    if compact {
+        // Compact rows have no avatar column: a small ↪ before the name.
+        x = rect.left() + COMPACT_TIME - 18.0;
+        ui.painter().text(
+            egui::pos2(x, y),
+            egui::Align2::LEFT_CENTER,
+            "↪",
+            egui::FontId::proportional(13.0),
+            line,
+        );
+        x += 18.0;
+    } else {
+        // Connector: from above the avatar's centre, up and round to the right.
+        let x0 = rect.left() + MSG_AVATAR / 2.0;
+        let x1 = rect.left() + MSG_GUTTER - MSG_PAD - 6.0;
+        let r = 6.0;
+        let mut pts = vec![egui::pos2(x0, rect.bottom() + 4.0)];
+        for i in 0..=6 {
+            let a = std::f32::consts::FRAC_PI_2 * i as f32 / 6.0;
+            pts.push(egui::pos2(x0 + r - r * a.cos(), y + r - r * a.sin()));
+        }
+        pts.push(egui::pos2(x1, y));
+        ui.painter()
+            .add(egui::Shape::line(pts, egui::Stroke::new(2.0, line)));
+    }
+
     let av = egui::Rect::from_center_size(egui::pos2(x + 8.0, y), vec2(16.0, 16.0));
     paint_avatar(
         ui,
@@ -3298,7 +4961,7 @@ fn reply_preview(
     x += w + 6.0;
     let snippet = truncated(
         ui,
-        &reply.content,
+        text,
         egui::FontId::proportional(13.0),
         pal.muted,
         rect.right() - x,
@@ -3308,6 +4971,8 @@ fn reply_preview(
         snippet,
         pal.muted,
     );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Jump to message")
 }
 
 /// The floating Reply / Edit / More bar at the top-right of a hovered
@@ -3316,13 +4981,14 @@ fn reply_preview(
 fn hover_bar(
     ui: &mut egui::Ui,
     m: &Message,
-    mine: bool,
+    menu: &MenuCtx,
     row: egui::Rect,
     more_id: egui::Id,
     bar_id: egui::Id,
     action: &mut Option<MessageAction>,
     pal: &Palette,
 ) {
+    let mine = menu.mine;
     let buttons = if mine { 3.0 } else { 2.0 };
     let size = vec2(buttons * 32.0 + 4.0, 36.0);
     let clip = ui.clip_rect();
@@ -3378,7 +5044,7 @@ fn hover_bar(
                         let more = more.on_hover_text("More");
                         egui::Popup::menu(&more)
                             .align(egui::RectAlign::BOTTOM_END)
-                            .show(|ui| message_menu(ui, m, mine, action));
+                            .show(|ui| message_menu(ui, m, menu, action));
                     });
                 });
         });
@@ -3407,28 +5073,84 @@ fn date_divider(ui: &mut egui::Ui, label: &str, pal: &Palette) {
     ui.add_space(4.0);
 }
 
-fn message_menu(ui: &mut egui::Ui, m: &Message, mine: bool, action: &mut Option<MessageAction>) {
-    if ui.button("↪ Reply").clicked() {
-        *action = Some(MessageAction::Reply(m.id.clone(), m.author.name.clone()));
+fn message_menu(
+    ui: &mut egui::Ui,
+    m: &Message,
+    menu: &MenuCtx,
+    action: &mut Option<MessageAction>,
+) {
+    let mut pick = |ui: &mut egui::Ui, label: &str, a: MessageAction| {
+        if ui.button(label).clicked() {
+            *action = Some(a);
+        }
+    };
+    pick(
+        ui,
+        "↪ Reply",
+        MessageAction::Reply(m.id.clone(), m.author.name.clone()),
+    );
+    if menu.mine {
+        pick(
+            ui,
+            "✏ Edit",
+            MessageAction::Edit(m.id.clone(), m.content.clone()),
+        );
     }
-    if mine && ui.button("✏ Edit").clicked() {
-        *action = Some(MessageAction::Edit(m.id.clone(), m.content.clone()));
+    if menu.can_pin {
+        if m.pinned {
+            pick(
+                ui,
+                "📌 Unpin message",
+                MessageAction::Pin(m.id.clone(), false),
+            );
+        } else {
+            pick(ui, "📌 Pin message", MessageAction::Pin(m.id.clone(), true));
+        }
     }
-    if ui.button("📋 Copy text").clicked() {
-        *action = Some(MessageAction::Copy(m.content.clone()));
+    pick(ui, "👁 Mark unread", MessageAction::MarkUnread(m.id.clone()));
+    ui.separator();
+    if !m.content.is_empty() {
+        pick(ui, "📋 Copy text", MessageAction::Copy(m.content.clone()));
     }
-    if ui.button("🆔 Copy message ID").clicked() {
-        *action = Some(MessageAction::Copy(m.id.clone()));
+    pick(
+        ui,
+        "🔗 Copy message link",
+        MessageAction::Copy(m.link(menu.guild_id.as_deref())),
+    );
+    for a in m.attachments.iter().filter(|a| a.is_image()) {
+        let label = if m.attachments.len() == 1 {
+            "💾 Save image".to_string()
+        } else {
+            format!("💾 Save {}", a.filename)
+        };
+        pick(
+            ui,
+            &label,
+            MessageAction::SaveImage(a.url.clone(), a.filename.clone()),
+        );
     }
-    if ui.button("👁 Mark unread").clicked() {
-        *action = Some(MessageAction::MarkUnread(m.id.clone()));
-    }
-    if mine && ui.button("🗑 Delete").clicked() {
-        *action = Some(MessageAction::Delete(m.id.clone()));
+    ui.separator();
+    pick(ui, "🆔 Copy message ID", MessageAction::Copy(m.id.clone()));
+    pick(
+        ui,
+        "👤 Copy user ID",
+        MessageAction::Copy(m.author.id.clone()),
+    );
+    if menu.mine {
+        ui.separator();
+        pick(ui, "🗑 Delete", MessageAction::Delete(m.id.clone()));
     }
 }
 
-fn attachment_ui(ui: &mut egui::Ui, a: &Attachment, config: &Config, pal: &Palette) {
+/// An image (click: open full size) or a file card. Returns a link the user
+/// clicked; the caller opens it through the link warning.
+fn attachment_ui(
+    ui: &mut egui::Ui,
+    a: &Attachment,
+    config: &Config,
+    pal: &Palette,
+) -> Option<String> {
+    let mut clicked = None;
     if a.is_image() && config.modules.images {
         let (max_w, max_h) = IMAGE_MAX;
         let url = a.thumbnail_url(max_w as u32, max_h as u32);
@@ -3445,7 +5167,7 @@ fn attachment_ui(ui: &mut egui::Ui, a: &Attachment, config: &Config, pal: &Palet
             a.human_size()
         ));
         if resp.clicked() {
-            ui.ctx().open_url(egui::OpenUrl::new_tab(&a.url));
+            clicked = Some(a.url.clone());
         }
     } else {
         egui::Frame::new()
@@ -3456,12 +5178,24 @@ fn attachment_ui(ui: &mut egui::Ui, a: &Attachment, config: &Config, pal: &Palet
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("📄").size(20.0));
                     ui.vertical(|ui| {
-                        ui.hyperlink_to(&a.filename, &a.url);
+                        let link = ui
+                            .add(
+                                egui::Label::new(
+                                    RichText::new(&a.filename).color(ui.visuals().hyperlink_color),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(&a.url);
+                        if link.clicked() {
+                            clicked = Some(a.url.clone());
+                        }
                         ui.label(RichText::new(a.human_size()).small().color(pal.muted));
                     });
                 });
             });
     }
+    clicked
 }
 
 fn human_size(bytes: u64) -> String {

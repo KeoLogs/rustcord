@@ -14,6 +14,7 @@ pub enum Segment {
     Emoji { url: String, alt: String },
 }
 
+#[cfg(test)]
 /// Split `text` into text and emoji segments, in order.
 pub fn segments(text: &str) -> Vec<Segment> {
     let mut out = Vec::new();
@@ -35,13 +36,13 @@ pub fn segments(text: &str) -> Vec<Segment> {
 
 /// Split `text` into text and Unicode emoji only. Custom emoji syntax
 /// (`<:name:id>`) stays as text; the markdown parser handles that itself.
-#[allow(dead_code)] // used by markdown.rs, not wired into the UI yet
 pub fn unicode_segments(text: &str) -> Vec<Segment> {
     let mut out = Vec::new();
     push_unicode(&mut out, text);
     out
 }
 
+#[cfg(test)]
 /// True if the message is only emoji (and whitespace) — Discord shows those big.
 pub fn is_jumbo(segments: &[Segment]) -> bool {
     let mut count = 0;
@@ -55,6 +56,7 @@ pub fn is_jumbo(segments: &[Segment]) -> bool {
     (1..=27).contains(&count)
 }
 
+#[cfg(test)]
 /// Parse `<:name:id>` / `<a:name:id>` at the start of `s`.
 /// Returns the length consumed and the emoji segment.
 fn parse_custom(s: &str) -> Option<(usize, Segment)> {

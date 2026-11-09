@@ -327,6 +327,7 @@ impl UserSettings {
         self.merge_base64(patch_b64, true)
     }
 
+    #[cfg(test)]
     /// The raw `PreloadedUserSettings` bytes everything above came from.
     pub fn raw(&self) -> &[u8] {
         &self.raw
@@ -526,6 +527,7 @@ impl UserSettings {
     }
 }
 
+#[cfg(test)]
 /// A folder id not used by any existing folder (Discord uses random
 /// positive 31-bit ids).
 pub fn new_folder_id(settings: &UserSettings) -> i64 {

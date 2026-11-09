@@ -189,10 +189,6 @@ impl LinkWarning {
         }
     }
 
-    pub fn url(&self) -> &str {
-        &self.url
-    }
-
     /// Draw the modal. Returns `Some` once the user decides (Escape or
     /// clicking outside = go back). Opens nothing itself.
     pub fn show(&mut self, ctx: &egui::Context, pal: &Palette) -> Option<LinkDecision> {

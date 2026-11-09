@@ -3,7 +3,8 @@
 
 use eframe::egui::{self, RichText, vec2};
 
-use crate::config::{Config, MODULES};
+use crate::config::{ClientIdentity, Config, MODULES};
+use crate::settings_proto::{ExplicitFilter, UserSettings};
 use crate::theme::{Bold, Palette, ThemeChoice};
 use crate::types::User;
 
@@ -12,6 +13,7 @@ pub enum Section {
     #[default]
     Account,
     Appearance,
+    Chat,
     Notifications,
     Privacy,
     Modules,
@@ -26,8 +28,9 @@ const SECTIONS: &[(&str, &[(Section, &str)])] = &[
         "APP SETTINGS",
         &[
             (Section::Appearance, "Appearance"),
+            (Section::Chat, "Chat"),
             (Section::Notifications, "Notifications"),
-            (Section::Privacy, "Privacy & Login"),
+            (Section::Privacy, "Privacy & Safety"),
         ],
     ),
     (
@@ -46,6 +49,15 @@ pub enum SettingsAction {
     EditLayout,
     ResetLayout,
     LogOut,
+    /// Change a setting synced with Discord (user accounts).
+    Sync(SyncChange),
+}
+
+/// A synced (settings-proto) setting the user changed.
+pub enum SyncChange {
+    ExplicitFilter(ExplicitFilter),
+    AllowGuildDms(bool),
+    Compact(bool),
 }
 
 #[derive(Default)]
@@ -59,6 +71,7 @@ impl SettingsPage {
         ui: &mut egui::Ui,
         config: &mut Config,
         me: Option<&User>,
+        synced: Option<&UserSettings>,
         pal: &Palette,
     ) -> Option<SettingsAction> {
         let mut action = None;
@@ -143,7 +156,7 @@ impl SettingsPage {
                     .show(ui, |ui| {
                         ui.set_max_width(680.0);
                         ui.spacing_mut().item_spacing.y = 6.0;
-                        if let Some(a) = self.section_ui(ui, config, me, pal) {
+                        if let Some(a) = self.section_ui(ui, config, me, synced, pal) {
                             action = Some(a);
                         }
                     });
@@ -157,6 +170,7 @@ impl SettingsPage {
         ui: &mut egui::Ui,
         config: &mut Config,
         me: Option<&User>,
+        synced: Option<&UserSettings>,
         pal: &Palette,
     ) -> Option<SettingsAction> {
         let mut action = None;
@@ -177,6 +191,27 @@ impl SettingsPage {
                         .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
                 );
                 ui.add_space(12.0);
+                label(ui, pal, "MESSAGE DISPLAY");
+                let before = config.compact_messages;
+                ui.radio_value(
+                    &mut config.compact_messages,
+                    false,
+                    "Cozy: modern, beautiful, and easy on your eyes.",
+                );
+                ui.radio_value(
+                    &mut config.compact_messages,
+                    true,
+                    "Compact: fit more messages on screen at one time.",
+                );
+                if config.compact_messages != before && synced.is_some() {
+                    action = Some(SettingsAction::Sync(SyncChange::Compact(
+                        config.compact_messages,
+                    )));
+                }
+                if synced.is_some() {
+                    hint(ui, pal, "Synced with your Discord account.");
+                }
+                ui.add_space(12.0);
                 label(ui, pal, "MEMBER LIST");
                 switch_row(
                     ui,
@@ -196,8 +231,35 @@ impl SettingsPage {
                     pal,
                 );
             }
+            Section::Chat => chat(ui, config, pal),
             Section::Notifications => notifications(ui, config, pal),
             Section::Privacy => {
+                if let Some(a) = privacy_synced(ui, synced, pal) {
+                    action = Some(a);
+                }
+                ui.add_space(12.0);
+                label(ui, pal, "SHOW AS");
+                hint(
+                    ui,
+                    pal,
+                    "Which app Discord thinks you're using (the icon friends see next to \
+                     your status). User accounts only; takes effect the next time you log in.",
+                );
+                for id in ClientIdentity::ALL {
+                    ui.radio_value(&mut config.client_identity, id, id.label());
+                }
+                ui.label(
+                    RichText::new(
+                        "Desktop/Mobile make RustCord identify as Discord's official app. \
+                         This only changes the icon friends see, but it misrepresents the \
+                         client to Discord and may slightly increase the chance of your \
+                         account being flagged. Default: Web.",
+                    )
+                    .small()
+                    .color(pal.muted),
+                );
+                ui.add_space(12.0);
+                label(ui, pal, "THIS PC");
                 switch_row(
                     ui,
                     &mut config.remember_login,
@@ -209,13 +271,6 @@ impl SettingsPage {
                 if !config.remember_login {
                     config.saved_token = None;
                 }
-                switch_row(
-                    ui,
-                    &mut config.warn_before_links,
-                    "Warn before opening links",
-                    "Asks before opening links from messages in your browser.",
-                    pal,
-                );
             }
             Section::Modules => {
                 hint(
@@ -347,6 +402,150 @@ impl SettingsPage {
         }
         action
     }
+}
+
+/// Settings → Chat (Discord Messenger's DisableFormatting, ShowEmbedContent,
+/// ShowEmbedImages, Use12HourTime, ReplyMentionDefault, ShowBlockedMessages).
+fn chat(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
+    label(ui, pal, "MESSAGES");
+    switch_row(
+        ui,
+        &mut config.disable_formatting,
+        "Disable formatting",
+        "Show messages as typed: no bold, italics, quotes or code blocks. Mentions, \
+         emoji and links still work.",
+        pal,
+    );
+    switch_row(
+        ui,
+        &mut config.use_12_hour_time,
+        "Use 12-hour time",
+        "3:05 PM instead of 15:05.",
+        pal,
+    );
+    switch_row(
+        ui,
+        &mut config.show_blocked_messages,
+        "Show blocked messages",
+        "Show messages from people you've blocked instead of \"1 blocked message — Show\".",
+        pal,
+    );
+    ui.add_space(12.0);
+    label(ui, pal, "EMBEDS AND LINK PREVIEWS");
+    switch_row(
+        ui,
+        &mut config.modules.embeds,
+        "Show embeds",
+        "Cards for links and bot embeds under messages (same as the Embeds module).",
+        pal,
+    );
+    ui.add_enabled_ui(config.modules.embeds, |ui| {
+        switch_row(
+            ui,
+            &mut config.show_embed_images,
+            "Show images in embeds",
+            "Thumbnails and pictures in link previews. Off saves memory.",
+            pal,
+        );
+    });
+    ui.add_space(12.0);
+    label(ui, pal, "REPLIES");
+    switch_row(
+        ui,
+        &mut config.mention_on_reply,
+        "Mention author when replying",
+        "New replies ping the person you reply to. You can still switch it per reply \
+         with the @ ON / OFF button above the message box.",
+        pal,
+    );
+    ui.add_space(12.0);
+    label(ui, pal, "LINKS");
+    switch_row(
+        ui,
+        &mut config.warn_before_links,
+        "Warn before opening links",
+        "Asks before opening links from messages in your browser. Discord's own \
+         domains always open straight away.",
+        pal,
+    );
+    if !config.trusted_domains.is_empty() {
+        ui.label(RichText::new("Trusted domains").small().color(pal.muted));
+        let mut remove = None;
+        for (i, d) in config.trusted_domains.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(d).color(pal.text));
+                if ui
+                    .small_button("✕")
+                    .on_hover_text("Stop trusting")
+                    .clicked()
+                {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            config.trusted_domains.remove(i);
+        }
+    }
+}
+
+/// Privacy & Safety settings synced with Discord (user accounts only).
+fn privacy_synced(
+    ui: &mut egui::Ui,
+    synced: Option<&UserSettings>,
+    pal: &Palette,
+) -> Option<SettingsAction> {
+    let Some(s) = synced else {
+        label(ui, pal, "SAFE DIRECT MESSAGING");
+        hint(
+            ui,
+            pal,
+            "These settings are stored on your Discord account. They show up here once \
+             RustCord has loaded them (user accounts only).",
+        );
+        return None;
+    };
+    let mut action = None;
+    label(ui, pal, "SAFE DIRECT MESSAGING");
+    hint(
+        ui,
+        pal,
+        "Automatically scan and delete direct messages you receive that contain \
+         explicit media content.",
+    );
+    let current = s.explicit_content_filter;
+    for (f, text) in [
+        (
+            ExplicitFilter::Everyone,
+            "Keep me safe — scan direct messages from everyone",
+        ),
+        (
+            ExplicitFilter::NonFriends,
+            "My friends are nice — scan messages from everyone unless they're a friend",
+        ),
+        (
+            ExplicitFilter::Off,
+            "Do not scan — direct messages will not be scanned",
+        ),
+    ] {
+        if ui.radio(current == Some(f), text).clicked() && current != Some(f) {
+            action = Some(SettingsAction::Sync(SyncChange::ExplicitFilter(f)));
+        }
+    }
+    ui.add_space(12.0);
+    label(ui, pal, "SERVER PRIVACY DEFAULTS");
+    let mut allow = s.allow_dms_from_guild_members;
+    switch_row(
+        ui,
+        &mut allow,
+        "Allow direct messages from server members",
+        "Applies to servers you join from now on. Changing it saves it to your account.",
+        pal,
+    );
+    if allow != s.allow_dms_from_guild_members {
+        action = Some(SettingsAction::Sync(SyncChange::AllowGuildDms(allow)));
+    }
+    action
 }
 
 fn section_title(s: Section) -> &'static str {

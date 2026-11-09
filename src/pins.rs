@@ -144,10 +144,12 @@ impl PinsPopup {
         }
     }
 
+    #[cfg(test)]
     pub fn state(&self) -> &PinsState {
         &self.state
     }
 
+    #[cfg(test)]
     pub fn pins(&self) -> &[PinnedMessage] {
         match &self.state {
             PinsState::Loaded(p) => p,
@@ -354,11 +356,14 @@ fn pin_row(
                         .strong()
                         .color(colour.unwrap_or(pal.text)),
                 );
-                ui.label(
-                    RichText::new(embed::format_timestamp(&m.timestamp))
+                let time = ui.label(
+                    RichText::new(crate::timefmt::full(m.time))
                         .small()
                         .color(pal.muted),
                 );
+                if let Some(at) = &pin.pinned_at {
+                    time.on_hover_text(format!("Pinned {}", crate::timefmt::full_iso(at)));
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if view.can_unpin
                         && confirm.as_deref() != Some(m.id.as_str())

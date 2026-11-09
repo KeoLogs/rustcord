@@ -73,6 +73,8 @@ pub struct Role {
     pub position: i64,
     /// Shown as its own group in the member list.
     pub hoist: bool,
+    /// Permission bits (see `perms.rs`).
+    pub permissions: u64,
 }
 
 impl Role {
@@ -91,6 +93,7 @@ impl Role {
             color,
             position: v.get("position").and_then(Value::as_i64).unwrap_or(0),
             hoist: v.get("hoist").and_then(Value::as_bool).unwrap_or(false),
+            permissions: crate::perms::parse_bits(&v["permissions"]),
         }
     }
 
@@ -254,6 +257,11 @@ impl MemberCache {
 
     pub fn clear(&mut self) {
         *self = Self::default();
+    }
+
+    /// Everyone cached for a server (autocomplete).
+    pub fn guild(&self, guild_id: &str) -> impl Iterator<Item = (&String, &CachedMember)> {
+        self.guilds.get(guild_id).into_iter().flatten()
     }
 
     #[cfg(test)]

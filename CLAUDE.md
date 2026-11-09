@@ -39,6 +39,8 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   font atlas).
 - Times: `Message::time` is unix seconds; format with `src/timefmt.rs`
   (local time zone via `chrono::Local`), never by slicing the ISO string.
+  `timefmt::set_12_hour` (from Settings → Chat) switches every formatter,
+  including markdown `<t:…>` timestamps; use `timefmt::hm()` for new ones.
 - UI look (Discord-like): `layout.rs` sets per-panel margins (channels and
   messages draw their own full-width headers via `header_bar`). Server rail:
   `rail_item` (icon-only below `RAIL_NAMES_WIDTH`). Messages: `message_row`
@@ -63,6 +65,33 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   and the popout card. Gateway ops from the UI go `ToBackend` → backend →
   an mpsc into `gateway::run_session`, sent only after READY/RESUMED. The
   Member list module gates op 14 and presence storage.
+- Messages render through `src/markdown.rs`: `State::md_cache`
+  (`ParseCache`, keyed by message id; reply snippets use `reply:<id>`) is
+  filled in a first pass in `messages_pane`, then drawn with a `ChatLookup`
+  (nicknames, role colours, channel names, `user_names` learned from
+  messages). Use `markdown::to_plain_text` for any one-line text
+  (notifications, inbox, pins, reply previews). Embeds (`src/embed.rs`) draw
+  under the content when the Embeds module is on; their image URIs are freed
+  with the message (`forget_message_images`).
+- Every link a user clicks goes through `State::open_link` →
+  `links::check` (trusted domains in `Config::trusted_domains`, the "Leaving
+  RustCord" modal otherwise). Never call `ctx.open_url` on message data
+  directly.
+- Pins: `src/pins.rs` popup under the 📌 button (`State::pins`), `perms.rs`
+  decides who may pin (DM, or Manage Messages from roles + overwrites).
+  `State::jump_to` scrolls to a message (or loads `messages?around=`).
+- Synced settings: `src/settings_proto.rs` (`UserSettings`, from READY or
+  `ToBackend::LoadUserSettings`). Change them only from user actions via a
+  `patch_*` → `apply_patch` (optimistic) → `ToBackend::PatchUserSettings`.
+  Status changes also send op 3 (`ToBackend::SetPresence`,
+  `status::presence_op`). The server rail uses `settings_proto::ordered_guilds`
+  for folders. Synced compact mode lands in `Config::compact_messages` via
+  `ConfigUpdate` (State only has `&Config`; the app applies
+  `state.config_updates` each frame).
+- `src/quick_switcher.rs` (Ctrl+K, fuzzy `score`/`rank`), `src/autocomplete.rs`
+  (`find_query` / `apply` are pure + tested; candidates are gathered in
+  `State::update_autocomplete`), `src/status.rs` (status menu, custom status
+  dialog). Autocomplete and Embeds are modules.
 - `docs/PORTING.md` is the roadmap of features to port from Discord
   Messenger (MIT, credit kept in README/About).
 
@@ -115,7 +144,9 @@ typing with `xdotool type`, focus the window first:
 `xdotool windowfocus $(xdotool search --name RustCord | head -1)`.) Use a
 release build for RAM numbers. Images show as red warning icons offline;
 that's expected. The demo has two people start typing in #general after 4 s
-and Sam mentions you after 6 s. Then tell Leo exactly
+and Sam mentions you after 6 s. #welcome has the Batch C showcase (markdown,
+embeds, links, an image, pins, blocked messages); the profile bar avatar
+opens the status picker; Ctrl+K opens the switcher. Then tell Leo exactly
 what to check when he runs it locally against Discord.
 
 ## Hard rules

@@ -6,7 +6,35 @@
 //! seconds (`Message::time`) and converted with `chrono::Local`, which reads
 //! the OS time zone on Windows, macOS and Linux.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
+
+/// "Use 12-hour time" (Settings → Chat). A global so every formatter
+/// (messages, embeds, pins, `<t:…>` timestamps) follows it.
+static TWELVE_HOUR: AtomicBool = AtomicBool::new(false);
+
+pub fn set_12_hour(on: bool) {
+    TWELVE_HOUR.store(on, Ordering::Relaxed);
+}
+
+/// strftime pattern for hours and minutes ("15:05" / "3:05 PM").
+pub fn hm() -> &'static str {
+    if TWELVE_HOUR.load(Ordering::Relaxed) {
+        "%-I:%M %p"
+    } else {
+        "%H:%M"
+    }
+}
+
+/// strftime pattern for hours, minutes and seconds.
+pub fn hms() -> &'static str {
+    if TWELVE_HOUR.load(Ordering::Relaxed) {
+        "%-I:%M:%S %p"
+    } else {
+        "%H:%M:%S"
+    }
+}
 
 /// Unix seconds from Discord's ISO-8601 timestamp, or 0 if it doesn't parse.
 pub fn parse_iso(ts: &str) -> i64 {
@@ -30,10 +58,10 @@ pub fn local_day(unix: i64) -> Option<NaiveDate> {
     local(unix).map(|t| t.date_naive())
 }
 
-/// "HH:MM" in local time.
+/// "HH:MM" (or "3:05 PM") in local time.
 pub fn clock(unix: i64) -> String {
     local(unix)
-        .map(|t| t.format("%H:%M").to_string())
+        .map(|t| t.format(hm()).to_string())
         .unwrap_or_default()
 }
 
@@ -52,7 +80,7 @@ where
 {
     let day = t.date_naive();
     let today = now.date_naive();
-    let time = t.format("%H:%M");
+    let time = t.format(hm());
     if day == today {
         format!("Today at {time}")
     } else if today.pred_opt() == Some(day) {
@@ -65,8 +93,17 @@ where
 /// "Monday, 9 November 2026 19:05" (timestamp tooltip).
 pub fn long(unix: i64) -> String {
     local(unix)
-        .map(|t| t.format("%A, %-d %B %Y %H:%M").to_string())
+        .map(|t| t.format(&format!("%A, %-d %B %Y {}", hm())).to_string())
         .unwrap_or_default()
+}
+
+/// Local time of an ISO-8601 timestamp like `full` ("Today at 19:05"),
+/// or the raw string if it doesn't parse.
+pub fn full_iso(ts: &str) -> String {
+    match parse_iso(ts) {
+        0 => ts.to_string(),
+        unix => full(unix),
+    }
 }
 
 /// "9 November 2026" for the line between days.

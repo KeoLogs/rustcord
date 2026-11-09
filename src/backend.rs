@@ -12,11 +12,31 @@ use crate::members;
 use crate::profile::Profile;
 use crate::types::{ToBackend, ToUi};
 
+/// "Save image": native save dialog, then download into the chosen file.
+async fn save_file(api: &Api, url: &str, filename: &str) -> anyhow::Result<Option<ToUi>> {
+    let Some(target) = rfd::AsyncFileDialog::new()
+        .set_title("Save image")
+        .set_file_name(filename)
+        .save_file()
+        .await
+    else {
+        return Ok(None); // Cancelled.
+    };
+    let bytes = api.download(url).await?;
+    tokio::fs::write(target.path(), &bytes).await?;
+    Ok(Some(ToUi::Notice(format!(
+        "Saved {}",
+        target.path().display()
+    ))))
+}
+
 /// Options read from the config at login.
 #[derive(Clone, Copy, Default)]
 pub struct Options {
     /// Bots: ask for the Server Members + Presence intents.
     pub bot_member_intents: bool,
+    /// "Show as" (IDENTIFY properties; user accounts).
+    pub identity: crate::config::ClientIdentity,
 }
 
 pub fn spawn(
@@ -76,6 +96,7 @@ async fn run(
                 token,
                 is_bot,
                 member_intents: is_bot && options.bot_member_intents,
+                identity: options.identity,
             };
             let repaint = || ctx.request_repaint();
             // Kept across connections so we can RESUME instead of re-identifying.
@@ -120,6 +141,10 @@ async fn run(
                 }
                 Some(members::request_member_list_op(guild_id))
             }
+            // Op 3: show the status the user just picked straight away.
+            ToBackend::SetPresence { status, custom } => {
+                Some(crate::status::presence_op(status, custom.as_ref()))
+            }
             _ => None,
         };
         if let Some(op) = op {
@@ -143,9 +168,16 @@ async fn run(
                     channel_id,
                     content,
                     reply_to,
+                    reply_ping,
                     files,
                 } => api
-                    .send_message(&channel_id, &content, reply_to.as_deref(), &files)
+                    .send_message(
+                        &channel_id,
+                        &content,
+                        reply_to.as_deref(),
+                        reply_ping,
+                        &files,
+                    )
                     .await
                     .map(|_| None),
                 ToBackend::PickFiles => {
@@ -207,7 +239,74 @@ async fn run(
                 }
                 ToBackend::SubscribeMembers { .. }
                 | ToBackend::RequestMembers { .. }
-                | ToBackend::RequestMemberList { .. } => Ok(None),
+                | ToBackend::RequestMemberList { .. }
+                | ToBackend::SetPresence { .. } => Ok(None),
+                ToBackend::LoadAround {
+                    channel_id,
+                    message_id,
+                } => api
+                    .history_around(&channel_id, &message_id)
+                    .await
+                    .map(|messages| {
+                        Some(ToUi::HistoryAround {
+                            channel_id,
+                            message_id,
+                            messages,
+                        })
+                    }),
+                ToBackend::LoadPins { channel_id } => {
+                    Ok(Some(match api.get_pins(&channel_id).await {
+                        Ok(pins) => ToUi::Pins { channel_id, pins },
+                        Err(e) => ToUi::PinsFailed {
+                            channel_id,
+                            error: e.to_string(),
+                        },
+                    }))
+                }
+                ToBackend::SetPinned {
+                    channel_id,
+                    message_id,
+                    pinned,
+                } => {
+                    let r = if pinned {
+                        api.pin_message(&channel_id, &message_id).await
+                    } else {
+                        api.unpin_message(&channel_id, &message_id).await
+                    };
+                    Ok(Some(match r {
+                        Ok(()) => ToUi::PinChanged {
+                            channel_id,
+                            message_id,
+                            pinned,
+                        },
+                        Err(e) => ToUi::PinFailed {
+                            channel_id,
+                            message_id,
+                            error: e.to_string(),
+                        },
+                    }))
+                }
+                // Synced settings only exist for user accounts.
+                ToBackend::LoadUserSettings | ToBackend::PatchUserSettings { .. } if is_bot => {
+                    Ok(None)
+                }
+                ToBackend::LoadUserSettings => api.settings_proto().await.and_then(|v| {
+                    Ok(Some(ToUi::UserSettings(Box::new(
+                        crate::settings_proto::UserSettings::from_rest(&v)?,
+                    ))))
+                }),
+                ToBackend::PatchUserSettings { settings_b64 } => {
+                    api.patch_settings_proto(&settings_b64).await.and_then(|v| {
+                        Ok(Some(ToUi::UserSettings(Box::new(
+                            crate::settings_proto::UserSettings::from_rest(&v)?,
+                        ))))
+                    })
+                }
+                ToBackend::LeaveGuild { guild_id } => api
+                    .leave_guild(&guild_id)
+                    .await
+                    .map(|_| Some(ToUi::GuildRemoved(guild_id))),
+                ToBackend::SaveFile { url, filename } => save_file(&api, &url, &filename).await,
                 // Profiles and notes are user-account endpoints.
                 ToBackend::LoadProfile { user_id, .. } if is_bot => {
                     Ok(Some(ToUi::ProfileUnavailable(user_id)))

@@ -28,10 +28,12 @@ use tokio_tungstenite::{
     tungstenite::{Message as WsMessage, protocol::WebSocketConfig},
 };
 
+use crate::config::ClientIdentity;
 use crate::members::{self, ListUpdate, Member, Role};
 use crate::notify::GuildSettings;
 use crate::presence::{self, Presence};
 use crate::read_state::ReadStateEntry;
+use crate::settings_proto::UserSettings;
 use crate::types::{Channel, Guild, Message, MessagePatch, ToUi, User};
 
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json&compress=zlib-stream";
@@ -69,6 +71,8 @@ pub struct GatewayConfig {
     pub is_bot: bool,
     /// Bots: also ask for the Server Members and Presence intents.
     pub member_intents: bool,
+    /// "Show as" for user accounts (bots always identify as RustCord).
+    pub identity: ClientIdentity,
 }
 
 /// What we need to resume a session. Lives across reconnects.
@@ -240,6 +244,9 @@ pub async fn run_session(
                         for ev in member_events(event, d) {
                             send_ui(ev);
                         }
+                        for ev in account_events(event, d) {
+                            send_ui(ev);
+                        }
                     }
                     Some(OP_HEARTBEAT) => {
                         write.send(WsMessage::Text(json!({ "op": OP_HEARTBEAT, "d": session.seq }).to_string().into())).await?;
@@ -266,7 +273,8 @@ pub async fn run_session(
 fn identify(cfg: &GatewayConfig) -> Value {
     let mut d = json!({
         "token": cfg.token,
-        "properties": { "os": std::env::consts::OS, "browser": "RustCord", "device": "RustCord" },
+        "properties": if cfg.is_bot { ClientIdentity::Web } else { cfg.identity }
+            .properties(std::env::consts::OS),
     });
     if cfg.is_bot {
         let extra = if cfg.member_intents {
@@ -337,6 +345,10 @@ fn handle_dispatch(event: &str, d: &Value, my_id: &str) -> Option<ToUi> {
                 dms,
                 read_state: ReadStateEntry::parse_ready(&d["read_state"]),
                 guild_settings: GuildSettings::parse_ready(&d["user_guild_settings"]),
+                blocked: blocked_ids(&d["relationships"]),
+                // User accounts may get their settings right in READY;
+                // otherwise the UI asks for them over REST.
+                user_settings: UserSettings::from_ready(d).ok().map(Box::new),
             })
         }
         "GUILD_CREATE" => {
@@ -348,7 +360,7 @@ fn handle_dispatch(event: &str, d: &Value, my_id: &str) -> Option<ToUi> {
             guild_id: d["guild_id"].as_str().map(str::to_string),
             channel: Channel::from_json(d),
         }),
-        "MESSAGE_CREATE" => Some(ToUi::NewMessage(Message::from_json(d))),
+        "MESSAGE_CREATE" => Some(ToUi::NewMessage(Box::new(Message::from_json(d)))),
         "MESSAGE_UPDATE" => Some(ToUi::MessageUpdated(MessagePatch::from_json(d))),
         "MESSAGE_DELETE" => Some(ToUi::MessageDeleted {
             channel_id: d["channel_id"].as_str().unwrap_or_default().to_string(),
@@ -385,6 +397,48 @@ fn handle_dispatch(event: &str, d: &Value, my_id: &str) -> Option<ToUi> {
         }
         _ => None,
     }
+}
+
+/// Ids of blocked users (relationship type 2) in READY `relationships`.
+fn blocked_ids(relationships: &Value) -> Vec<String> {
+    relationships
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|r| r["type"].as_u64() == Some(RELATIONSHIP_BLOCKED))
+                .filter_map(|r| r["id"].as_str().or(r["user"]["id"].as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+const RELATIONSHIP_BLOCKED: u64 = 2;
+
+/// Synced settings, pins, blocks and leaving servers.
+fn account_events(event: &str, d: &Value) -> Vec<ToUi> {
+    let id = |key: &str| d[key].as_str().unwrap_or_default().to_string();
+    let mut out = Vec::new();
+    match event {
+        "USER_SETTINGS_PROTO_UPDATE" => out.push(ToUi::UserSettingsUpdate(d.clone())),
+        "CHANNEL_PINS_UPDATE" => out.push(ToUi::PinsUpdated(id("channel_id"))),
+        "RELATIONSHIP_ADD" => out.push(ToUi::Blocked {
+            user_id: id("id"),
+            blocked: d["type"].as_u64() == Some(RELATIONSHIP_BLOCKED),
+        }),
+        "RELATIONSHIP_REMOVE" if d["type"].as_u64() == Some(RELATIONSHIP_BLOCKED) => {
+            out.push(ToUi::Blocked {
+                user_id: id("id"),
+                blocked: false,
+            })
+        }
+        // `unavailable: true` is an outage, not leaving.
+        "GUILD_DELETE" if !d["unavailable"].as_bool().unwrap_or(false) => {
+            out.push(ToUi::GuildRemoved(id("id")))
+        }
+        _ => {}
+    }
+    out
 }
 
 /// Members, roles, presence and notes (see `members.rs`, `presence.rs`).
@@ -564,6 +618,14 @@ impl Inflater {
     }
 }
 
+/// WebSocket limits. The default 16 MB frame / 64 MB message caps are too
+/// small for accounts in many servers: their READY payload alone can be 18 MB+.
+fn ws_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_frame_size(Some(256 << 20))
+        .max_message_size(Some(256 << 20))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,12 +687,19 @@ mod tests {
             token: "t".into(),
             is_bot: true,
             member_intents: false,
+            identity: ClientIdentity::Mobile,
         };
+        // Bots ignore "Show as".
+        assert_eq!(identify(&cfg)["d"]["properties"]["browser"], "RustCord");
         assert_eq!(identify(&cfg)["d"]["intents"], json!(BOT_INTENTS));
         cfg.member_intents = true;
         assert_eq!(identify(&cfg)["d"]["intents"], json!(BOT_INTENTS | 2 | 256));
         cfg.is_bot = false;
         assert!(identify(&cfg)["d"].get("intents").is_none());
+        assert_eq!(
+            identify(&cfg)["d"]["properties"]["browser"],
+            "Discord Android"
+        );
     }
 
     /// Compress messages the way Discord does: one zlib stream, each message
@@ -712,12 +781,4 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
     }
-}
-
-/// WebSocket limits. The default 16 MB frame / 64 MB message caps are too
-/// small for accounts in many servers: their READY payload alone can be 18 MB+.
-fn ws_config() -> WebSocketConfig {
-    WebSocketConfig::default()
-        .max_frame_size(Some(256 << 20))
-        .max_message_size(Some(256 << 20))
 }

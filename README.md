@@ -22,7 +22,7 @@ Usable day to day. It has:
   - channel list: collapsible categories (▾ / ▸), hover and selected rows,
     DMs with avatars and status; voice / stage channels listed (greyed out,
     joining comes later)
-  - chat header with the channel topic, 🔔 inbox, 📌 pins (coming next) and
+  - chat header with the channel topic, 🔔 inbox, 📌 pinned messages and
     👥 to hide / show the member list
   - messages: local-time timestamps ("Today at 19:05"), date lines between
     days, hover highlight, a floating Reply / Edit / ⋯ bar, Discord-style
@@ -63,9 +63,36 @@ Usable day to day. It has:
   default)
 - gateway **transport compression** (`zlib-stream`): a big account's READY is
   several times smaller on the wire
+- **markdown** like Discord's: bold / italic / underline / strike, spoilers,
+  inline and fenced code, quotes, headings, lists, `-#` subtext, masked links,
+  `<t:…>` timestamps, user / role / channel mentions (click a user for their
+  profile, a channel to go there); Settings → Chat → *Disable formatting*
+- **embeds and link previews** (YouTube-style video cards, bot embeds with
+  fields, colours, authors and footers); *Show embeds* / *Show images in
+  embeds* in Settings → Chat (Embeds module)
+- **link warnings**: links outside Discord ask first ("Leaving RustCord"),
+  with "Trust this domain"; trusted domains are listed in Settings → Chat
+- **pinned messages**: 📌 popup with Jump and Unpin; *Pin message* in the
+  message menu where you're allowed to (DMs, or Manage Messages)
+- **status picker**: click your avatar → Online / Idle / Do Not Disturb /
+  Invisible and *Set custom status* (with "clear after"); synced with your
+  account (user accounts)
+- **server folders** in the rail, in your Discord order (click to open)
+- **Ctrl+K quick switcher** for channels, DMs and servers
+- **autocomplete** in the message box: `@` people / roles, `#` channels,
+  `:` emoji (incl. server emoji); `@ ON / OFF` reply ping switch
+- message menu: pin, copy message link, copy user ID, save image
+- **blocked users'** messages hidden behind "N blocked messages — Show"
+- **compact** message display (synced), 12-hour time, *Privacy & Safety*
+  (DM scanning, DMs from server members; synced), leave server (right-click
+  a server)
+- opt-in **"Show as"** (Settings → Privacy & Safety): which platform icon
+  friends see (Web by default; Desktop / Mobile make RustCord identify as
+  Discord's official app, which misrepresents the client to Discord and may
+  slightly raise the chance of your account being flagged)
 
-Next up: see [docs/PORTING.md](docs/PORTING.md) — markdown, embeds, pins,
-settings sync. Voice comes last.
+What's left: see [docs/PORTING.md](docs/PORTING.md) — reactions, search,
+threads / forums, voice (comes last).
 
 ## Running
 
@@ -118,6 +145,15 @@ On Linux you may need GUI dev packages first:
 | `src/theme.rs` | Discord colours, bundled font (Noto Sans) and the `bold` font family |
 | `src/timefmt.rs` | Local-time message timestamps and date-divider labels |
 | `src/emoji.rs` | Splits text into text + emoji images |
+| `src/markdown.rs` | Discord markdown: parser, renderer, parse cache |
+| `src/embed.rs` | Embeds / link previews: parsing and drawing |
+| `src/links.rs` | Trusted domains and the "Leaving RustCord" link warning |
+| `src/pins.rs` | Pinned messages popup |
+| `src/perms.rs` | Permission bits (Manage Messages for pinning) |
+| `src/settings_proto.rs` | Discord's synced settings (protobuf): status, folders, privacy, compact |
+| `src/status.rs` | Status picker and custom status dialog, op 3 presence |
+| `src/quick_switcher.rs` | Ctrl+K switcher with fuzzy search |
+| `src/autocomplete.rs` | `@` / `#` / `:` suggestions in the message box |
 | `src/read_state.rs` | Unread / mention counts per channel |
 | `src/notify.rs` | Mutes, mention detection, notification rules, inbox, desktop popups |
 | `src/members.rs` | Roles + name colours, member cache, member list (op 14 / GUILD_MEMBER_LIST_UPDATE), list UI |
@@ -125,7 +161,7 @@ On Linux you may need GUI dev packages first:
 | `src/profile.rs` | Profiles, notes and the profile popout card |
 | `src/backend.rs` | Tokio runtime thread; runs the gateway and handles UI requests |
 | `src/gateway.rs` | WebSocket connection to Discord's gateway (identify / resume, zlib-stream) |
-| `src/api.rs` | REST calls: history, send / edit / delete, typing, acks, profiles, notes |
+| `src/api.rs` | REST calls: history, send / edit / delete, typing, acks, profiles, notes, pins, settings, leave server |
 | `src/types.rs` | Guild / Channel / Message types and UI↔backend messages |
 
 The UI and the network never block each other: the backend sends `ToUi`

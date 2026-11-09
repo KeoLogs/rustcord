@@ -38,6 +38,52 @@ impl Api {
         bail!("{what} failed: HTTP {status} - {msg}")
     }
 
+    /// Up to 50 messages around `message_id` (oldest first), for jumping to
+    /// a message that isn't loaded.
+    pub async fn history_around(&self, channel_id: &str, message_id: &str) -> Result<Vec<Message>> {
+        let url = format!("{API_BASE}/channels/{channel_id}/messages?around={message_id}&limit=50");
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", &self.auth)
+            .send()
+            .await
+            .context("history request failed")?;
+        let body: Value = Self::check(resp, "Loading messages").await?.json().await?;
+        let mut messages: Vec<Message> = body
+            .as_array()
+            .map(|arr| arr.iter().map(Message::from_json).collect())
+            .unwrap_or_default();
+        messages.sort_by_key(|m| m.id.parse::<u64>().unwrap_or(0));
+        Ok(messages)
+    }
+
+    /// Leave a server (`DELETE users/@me/guilds/{id}`, like Discord Messenger
+    /// DI:1647). Only called after the user confirmed.
+    pub async fn leave_guild(&self, guild_id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .delete(format!("{API_BASE}/users/@me/guilds/{guild_id}"))
+            .header("Authorization", &self.auth)
+            .json(&json!({ "lurking": false }))
+            .send()
+            .await
+            .context("leave request failed")?;
+        Self::check(resp, "Leaving server").await?;
+        Ok(())
+    }
+
+    /// Download a file from Discord's CDN (no auth header: CDN links are
+    /// signed and the token must never go to other hosts).
+    pub async fn download(&self, url: &str) -> Result<Vec<u8>> {
+        let resp = self.http.get(url).send().await.context("download failed")?;
+        Ok(Self::check(resp, "Downloading")
+            .await?
+            .bytes()
+            .await?
+            .to_vec())
+    }
+
     /// Last `limit` messages in a channel, oldest first.
     pub async fn channel_history(&self, channel_id: &str, limit: u8) -> Result<Vec<Message>> {
         let url = format!("{API_BASE}/channels/{channel_id}/messages?limit={limit}");
@@ -66,11 +112,17 @@ impl Api {
         channel_id: &str,
         content: &str,
         reply_to: Option<&str>,
+        reply_ping: bool,
         files: &[PathBuf],
     ) -> Result<()> {
         let mut body = json!({ "content": content });
         if let Some(id) = reply_to {
             body["message_reference"] = json!({ "message_id": id, "fail_if_not_exists": false });
+            // Discord's default parse list plus the reply ping switch.
+            body["allowed_mentions"] = json!({
+                "parse": ["users", "roles", "everyone"],
+                "replied_user": reply_ping,
+            });
         }
         let request = self
             .http
@@ -258,7 +310,6 @@ impl Api {
     /// Messenger does) but also accepts the newer paged shape
     /// `{ items: [{ pinned_at, message }] }`, copying `pinned_at` into each
     /// message.
-    #[allow(dead_code)] // wired up with the pins popup
     pub async fn get_pins(&self, channel_id: &str) -> Result<Vec<Value>> {
         let resp = self
             .http
@@ -275,7 +326,6 @@ impl Api {
     }
 
     /// Pin a message. Only called when the user picks "Pin".
-    #[allow(dead_code)] // wired up with the pins popup
     pub async fn pin_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
         let resp = self
             .http
@@ -292,7 +342,6 @@ impl Api {
     }
 
     /// Unpin a message. Only called when the user picks "Unpin".
-    #[allow(dead_code)] // wired up with the pins popup
     pub async fn unpin_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
         let resp = self
             .http
@@ -309,7 +358,6 @@ impl Api {
 
     /// My synced settings (`{"settings": "<b64 PreloadedUserSettings>"}`).
     /// User accounts only; see `settings_proto::UserSettings::from_rest`.
-    #[allow(dead_code)] // Batch D: not wired yet
     pub async fn settings_proto(&self) -> Result<Value> {
         let resp = self
             .http
@@ -324,7 +372,6 @@ impl Api {
     /// Change synced settings. `settings_b64` holds only the changed
     /// top-level sub-messages (built by `settings_proto::UserSettings::patch_*`
     /// from a user action). Returns `{"settings": "<full b64>"}`.
-    #[allow(dead_code)] // Batch D: not wired yet
     pub async fn patch_settings_proto(&self, settings_b64: &str) -> Result<Value> {
         let resp = self
             .http
@@ -353,7 +400,6 @@ impl Api {
 }
 
 /// Message objects from either pins response shape (see `Api::get_pins`).
-#[allow(dead_code)]
 fn pins_from_body(body: Value) -> Vec<Value> {
     match body {
         Value::Array(messages) => messages.into_iter().filter(Value::is_object).collect(),

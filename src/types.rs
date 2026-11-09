@@ -107,6 +107,43 @@ pub struct Guild {
     pub my_roles: Vec<String>,
     /// The server's roles, highest first (name colours, member list groups).
     pub roles: Vec<Role>,
+    /// Server owner (has every permission).
+    pub owner_id: String,
+    /// Custom emoji (for the composer's `:` autocomplete).
+    pub emojis: Vec<GuildEmoji>,
+}
+
+/// A server's custom emoji.
+#[derive(Debug, Clone)]
+pub struct GuildEmoji {
+    pub id: String,
+    pub name: String,
+    pub animated: bool,
+}
+
+impl GuildEmoji {
+    fn parse_list(v: &Value) -> Vec<Self> {
+        v.as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter(|e| e["available"].as_bool() != Some(false))
+                    .filter_map(|e| {
+                        Some(Self {
+                            id: e["id"].as_str()?.to_string(),
+                            name: e["name"].as_str()?.to_string(),
+                            animated: e["animated"].as_bool().unwrap_or(false),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// What goes into the message: `<:name:id>` / `<a:name:id>`.
+    pub fn markup(&self) -> String {
+        let a = if self.animated { "a" } else { "" };
+        format!("<{a}:{}:{}>", self.name, self.id)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +159,8 @@ pub struct Channel {
     pub last_message_id: u64,
     /// Channel topic (shown in the chat header). Empty if none.
     pub topic: String,
+    /// Permission overwrites (servers only).
+    pub overwrites: Vec<crate::perms::Overwrite>,
 }
 
 /// A category header (if any) and the text and voice channels under it.
@@ -166,6 +205,17 @@ impl Guild {
                     .or_else(|| v.pointer("/properties/roles"))
                     .unwrap_or(&Value::Null),
             ),
+            owner_id: v
+                .get("owner_id")
+                .or_else(|| v.pointer("/properties/owner_id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            emojis: GuildEmoji::parse_list(
+                v.get("emojis")
+                    .or_else(|| v.pointer("/properties/emojis"))
+                    .unwrap_or(&Value::Null),
+            ),
             channels: v
                 .get("channels")
                 .and_then(Value::as_array)
@@ -185,6 +235,8 @@ impl Guild {
             default_notifications: 0,
             my_roles: Vec::new(),
             roles: Vec::new(),
+            owner_id: String::new(),
+            emojis: Vec::new(),
             channels,
         };
         guild.sort_channels();
@@ -293,6 +345,7 @@ impl Channel {
             recipients,
             last_message_id: snowflake(v, "last_message_id").unwrap_or(0),
             topic: str_of(v, "topic").trim().to_string(),
+            overwrites: crate::perms::Overwrite::parse_list(&v["permission_overwrites"]),
         }
     }
 
@@ -421,9 +474,12 @@ impl Attachment {
 /// Short preview of the message being replied to.
 #[derive(Debug, Clone)]
 pub struct ReplyPreview {
+    pub id: String,
     pub author: String,
     pub author_id: String,
     pub avatar_url: String,
+    /// Raw (markdown) content, cut to a few hundred characters; the UI turns
+    /// it into one line of plain text. Empty: attachment / embed only.
     pub content: String,
 }
 
@@ -442,12 +498,17 @@ pub struct Message {
     pub guild_id: Option<String>,
     /// Ids of mentioned users.
     pub mentions: Vec<String>,
+    /// (id, display name) of mentioned users, for showing `<@id>` mentions.
+    pub mention_names: Vec<(String, String)>,
     pub mention_roles: Vec<String>,
     /// @everyone / @here.
     pub mention_everyone: bool,
     /// The author's server member info (MESSAGE_CREATE in servers). The UI
     /// moves it into the member cache.
     pub member: Option<Box<CachedMember>>,
+    /// Link previews and bot embeds (see `embed.rs`).
+    pub embeds: Vec<crate::embed::Embed>,
+    pub pinned: bool,
 }
 
 impl Message {
@@ -457,14 +518,12 @@ impl Message {
             .filter(|r| r.is_object())
             .map(|r| {
                 let author = User::from_json(&r["author"]);
-                let mut content = str_of(r, "content").replace('\n', " ");
-                if content.chars().count() > 80 {
-                    content = content.chars().take(80).collect::<String>() + "…";
-                }
-                if content.is_empty() {
-                    content = "(attachment)".into();
+                let mut content = str_of(r, "content");
+                if content.chars().count() > 300 {
+                    content = content.chars().take(300).collect::<String>() + "…";
                 }
                 ReplyPreview {
+                    id: str_of(r, "id"),
                     author: author.name,
                     author_id: author.id,
                     avatar_url: author.avatar_url,
@@ -495,6 +554,19 @@ impl Message {
                         .collect()
                 })
                 .unwrap_or_default(),
+            mention_names: v
+                .get("mentions")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|u| u.is_object())
+                        .map(|u| {
+                            let u = User::from_json(u);
+                            (u.id, u.name)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             mention_roles: v
                 .get("mention_roles")
                 .and_then(Value::as_array)
@@ -517,7 +589,19 @@ impl Message {
                     joined_at: m.joined_at,
                 })
             }),
+            embeds: crate::embed::parse_embeds(v),
+            pinned: v.get("pinned").and_then(Value::as_bool).unwrap_or(false),
         }
+    }
+
+    /// `https://discord.com/channels/<guild or @me>/<channel>/<message>`.
+    pub fn link(&self, guild_id: Option<&str>) -> String {
+        format!(
+            "https://discord.com/channels/{}/{}/{}",
+            guild_id.unwrap_or(DM_GUILD_ID),
+            self.channel_id,
+            self.id
+        )
     }
 
     /// "HH:MM" in local time.
@@ -537,6 +621,12 @@ impl Message {
         if patch.edited {
             self.edited = true;
         }
+        if let Some(embeds) = &patch.embeds {
+            self.embeds = embeds.clone();
+        }
+        if let Some(p) = patch.pinned {
+            self.pinned = p;
+        }
     }
 }
 
@@ -554,6 +644,9 @@ pub struct MessagePatch {
     pub content: Option<String>,
     pub attachments: Option<Vec<Attachment>>,
     pub edited: bool,
+    /// New embeds (link previews arrive this way a moment after the message).
+    pub embeds: Option<Vec<crate::embed::Embed>>,
+    pub pinned: Option<bool>,
 }
 
 impl MessagePatch {
@@ -564,6 +657,8 @@ impl MessagePatch {
             content: v.get("content").and_then(Value::as_str).map(str::to_string),
             attachments: parse_attachments(v),
             edited: v.get("edited_timestamp").is_some_and(|t| !t.is_null()),
+            embeds: crate::embed::embeds_patch(v),
+            pinned: v.get("pinned").and_then(Value::as_bool),
         }
     }
 }
@@ -586,6 +681,10 @@ pub enum ToUi {
         read_state: Vec<ReadStateEntry>,
         /// Mute / notification settings (user accounts only).
         guild_settings: Vec<GuildSettings>,
+        /// Users I blocked (READY `relationships` with type 2).
+        blocked: Vec<String>,
+        /// Synced settings if READY had them (`user_settings_proto`).
+        user_settings: Option<Box<crate::settings_proto::UserSettings>>,
     },
     /// The gateway resumed the old session; missed events are replayed.
     Resumed,
@@ -607,7 +706,7 @@ pub enum ToUi {
     },
     /// Files chosen in the "+" file picker.
     FilesPicked(Vec<PathBuf>),
-    NewMessage(Message),
+    NewMessage(Box<Message>),
     MessageUpdated(MessagePatch),
     MessageDeleted {
         channel_id: String,
@@ -647,6 +746,47 @@ pub enum ToUi {
         user_id: String,
         note: String,
     },
+    /// I left a server, or it went away (GUILD_DELETE without `unavailable`).
+    GuildRemoved(String),
+    /// Messages around `message_id` (jump to a pinned message).
+    HistoryAround {
+        channel_id: String,
+        message_id: String,
+        messages: Vec<Message>,
+    },
+    /// Pinned messages of a channel (raw message objects).
+    Pins {
+        channel_id: String,
+        pins: Vec<serde_json::Value>,
+    },
+    PinsFailed {
+        channel_id: String,
+        error: String,
+    },
+    /// A pin / unpin went through.
+    PinChanged {
+        channel_id: String,
+        message_id: String,
+        pinned: bool,
+    },
+    PinFailed {
+        channel_id: String,
+        message_id: String,
+        error: String,
+    },
+    /// CHANNEL_PINS_UPDATE.
+    PinsUpdated(String),
+    /// My synced settings (READY, GET or PATCH answer): full message.
+    UserSettings(Box<crate::settings_proto::UserSettings>),
+    /// USER_SETTINGS_PROTO_UPDATE payload (`d`).
+    UserSettingsUpdate(serde_json::Value),
+    /// A short message for the user (shown briefly), e.g. "Saved …".
+    Notice(String),
+    /// RELATIONSHIP_ADD / RELATIONSHIP_REMOVE for blocked users.
+    Blocked {
+        user_id: String,
+        blocked: bool,
+    },
 }
 
 /// Requests the UI sends to the backend.
@@ -659,6 +799,9 @@ pub enum ToBackend {
         channel_id: String,
         content: String,
         reply_to: Option<String>,
+        /// Ping the author of the replied-to message (allowed_mentions
+        /// `replied_user`).
+        reply_ping: bool,
         /// Files to upload with the message.
         files: Vec<PathBuf>,
     },
@@ -723,5 +866,40 @@ pub enum ToBackend {
     SetNote {
         user_id: String,
         note: String,
+    },
+    /// GET messages around one (jump to a pin that isn't loaded).
+    LoadAround {
+        channel_id: String,
+        message_id: String,
+    },
+    /// GET channels/{id}/pins.
+    LoadPins {
+        channel_id: String,
+    },
+    /// Pin (`true`) or unpin a message. Only from a confirmed menu choice.
+    SetPinned {
+        channel_id: String,
+        message_id: String,
+        pinned: bool,
+    },
+    /// GET users/@me/settings-proto/1 (user accounts, after READY).
+    LoadUserSettings,
+    /// PATCH users/@me/settings-proto/1. Only from an explicit user action.
+    PatchUserSettings {
+        settings_b64: String,
+    },
+    /// Op 3 presence update (after the user picked a status).
+    SetPresence {
+        status: String,
+        custom: Option<crate::settings_proto::CustomStatus>,
+    },
+    /// DELETE users/@me/guilds/{id}. Only after the confirmation dialog.
+    LeaveGuild {
+        guild_id: String,
+    },
+    /// "Save image": ask where, then download it there.
+    SaveFile {
+        url: String,
+        filename: String,
     },
 }

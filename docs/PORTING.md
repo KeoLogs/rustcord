@@ -58,22 +58,57 @@ avatars/banners, op 37 (newer bulk subscribe), member search.
   Messenger; written from Discord's gateway docs)
 - Local-time timestamps ("Today at …") and date dividers
 
-## Batch C — message richness
-- Markdown (`core/text/FormattedText.cpp`) + DisableFormatting toggle
-- Embeds (`windows/MessageList.cpp`) + ShowEmbedContent / ShowEmbedImages
+**Batch C — message richness** (`src/markdown.rs`, `src/embed.rs`,
+`src/links.rs`, `src/pins.rs`, `src/autocomplete.rs`) — done:
+- Markdown (`core/text/FormattedText.cpp`, cross-checked with Discord's
+  simple-markdown rules) incl. spoilers, code blocks, quotes, headings, lists,
+  subtext, masked links, `<t:…>` timestamps; mentions resolved through a
+  `Lookup` (nicknames, role colours, channels, `mentions` names). Plain text
+  (`to_plain_text`) for reply previews, notifications, the inbox and pins.
+  DisableFormatting → Settings → Chat
+- Embeds (`windows/MessageList.cpp`) incl. MESSAGE_UPDATE link previews;
+  ShowEmbedContent = the Embeds module / "Show embeds", ShowEmbedImages
 - Link warning + TrustedDomains (`MessageList::ConfirmOpenLink` 1927, LS:215)
-- Pins: `GET channels/{id}/pins`, `PUT/DELETE channels/{c}/messages/pins/{m}` (`windows/PinList.cpp`)
-  — the 📌 header button is already there, disabled until this lands
-- Mention/emoji autocomplete (`windows/AutoComplete.cpp`, `core/utils/Emoji.cpp`)
-- Context menu extras: mark unread, copy link, save image
-- Use12HourTime, ShowBlockedMessages, ReplyMentionDefault
+  for message links, embed links and attachments
+- Pins: `GET channels/{id}/pins` (old array and new `items` shapes),
+  `PUT/DELETE channels/{c}/messages/pins/{m}` (`windows/PinList.cpp`),
+  `CHANNEL_PINS_UPDATE`; Jump loads `messages?around=` when needed. Pinning
+  needs a DM or Manage Messages (`src/perms.rs`: roles + channel overwrites)
+- Autocomplete for `@` (members, roles, @everyone/@here), `#`, `:` emoji
+  (`windows/AutoComplete.cpp`; Unicode via the `emojis` crate + server emoji)
+- Context menu: mark unread, copy message link, copy user ID, save image
+  (native save dialog, `rfd`)
+- Use12HourTime, ShowBlockedMessages (READY `relationships` type 2,
+  RELATIONSHIP_ADD/REMOVE), ReplyMentionDefault (`allowed_mentions.replied_user`)
 
-## Batch D — account & settings sync
-- `PATCH users/@me/settings-proto/1` + `USER_SETTINGS_PROTO_UPDATE` (DI:1876, 2743,
-  `core/config/SettingsManager.*`): status picker, custom status, guild folders,
-  explicit content filter, DMs from server members, compact/cozy
-- Remaining OD tabs: Window (start minimised, tray), Connection (custom API URL)
-- Quick switcher Ctrl+K (`windows/QuickSwitcher.cpp`), leave guild (DI:1647)
+**Batch D — account & settings sync** (`src/settings_proto.rs`,
+`src/status.rs`, `src/quick_switcher.rs`) — done:
+- Settings proto from READY `user_settings_proto` or
+  `GET users/@me/settings-proto/1`; `PATCH` (DI:1876) only from user actions;
+  `USER_SETTINGS_PROTO_UPDATE` (DI:2743)
+- Status picker + custom status (with "clear after"); also gateway op 3 so
+  it shows at once
+- Server folders in the rail (read-only: Discord's order, open / close)
+- Explicit content filter, "Allow DMs from server members" (Privacy &
+  Safety), compact / cozy (Appearance)
+- Quick switcher Ctrl+K (`windows/QuickSwitcher.cpp`), leave server (DI:1647)
+
+Not done from C/D: creating / editing folders and dragging servers between
+them, per-server "Allow DMs" overrides, the remaining Options tabs (Window:
+start minimised / tray; Connection: custom API URL), reactions in embeds,
+video playback (embeds show the thumbnail and open the link). Jumping to an
+old pin replaces the cached history with the messages around it (new
+messages still append; older history isn't paged back in).
+
+## Remaining gaps
+- Reactions (show / add / remove)
+- Search
+- Threads and forum channels
+- Voice (needs DAVE E2EE since March 2026)
+- Loading older history when scrolling up
+- Stickers, polls, GIF picker, emoji picker
+- Friends list and friend requests; blocking / unblocking from RustCord
+- Email / 2FA / QR login
 
 ## Not in Discord Messenger (we'd write from scratch)
 Reactions, search, voice (needs DAVE E2EE since March 2026), email/2FA login,

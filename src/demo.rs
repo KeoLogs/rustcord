@@ -21,6 +21,17 @@
 //!   ~15 s after start Olly comes online (DELETE / INSERT / UPDATE ops).
 //! - Other servers have no list, so they show "recently active".
 //! - Clicking a name or avatar opens a fake profile; notes are kept in memory.
+//!
+//! Message richness, account settings (Batches C and D) in the demo:
+//! - #welcome has markdown (headings, quotes, lists, code, spoilers,
+//!   mentions, timestamps), a CI bot embed with fields, a YouTube-style
+//!   link preview, links (one untrusted → link warning), an image, two
+//!   messages from a blocked user and two pinned messages (📌).
+//! - You have Manage Messages in the Test Server (Contributor role), so
+//!   "Pin message" shows there; in Gaming Hangout it doesn't.
+//! - Synced settings: a custom status, Gaming Hangout + Big Public Server in
+//!   a "Games" folder, DM safety settings. Patches are applied and echoed.
+//! - The Test Server has a custom :pepe: emoji for `:` autocomplete.
 
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
@@ -34,6 +45,7 @@ use crate::notify::GuildSettings;
 use crate::presence::Presence;
 use crate::profile::Profile;
 use crate::read_state::ReadStateEntry;
+use crate::settings_proto::{self as sp, ExplicitFilter, RailItem, UserSettings};
 use crate::types::{Channel, Guild, Message, ToBackend, ToUi, User};
 
 // Snowflake-like ids so "Member since" shows believable dates.
@@ -41,6 +53,8 @@ const ME: &str = "460000000000000001";
 const SAM: &str = "300000000000000002";
 const ALEX: &str = "520000000000000003";
 const TEST_GUILD: &str = "100";
+/// Someone you've blocked (their messages are hidden behind "Show").
+const TROLL: &str = "950000000000000010";
 
 /// Demo people in the Test Server.
 /// (id, name, role ids, status, activity as (type, text)).
@@ -217,37 +231,43 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                 "last_message_id": last_id(id).to_string() })
     };
     send(ToUi::Status("Demo mode (offline)".into()));
+    // Me: Contributor (Manage Messages) in the Test Server.
+    let mut test_guild = Guild::from_json(&json!({
+        "id": TEST_GUILD,
+        "name": "RustCord Test Server",
+        "owner_id": SAM,
+        "emojis": [{ "id": "123", "name": "pepe" }],
+        "roles": [
+            { "id": TEST_GUILD, "name": "@everyone", "color": 0, "position": 0, "permissions": "104324673" },
+            { "id": "500", "name": "Admin", "color": 0xf1c40f, "position": 5, "hoist": true, "permissions": "8" },
+            { "id": "501", "name": "Moderators", "color": 0x3498db, "position": 4, "hoist": true, "permissions": "8192" },
+            { "id": "502", "name": "Bots", "color": 0x9b59b6, "position": 3, "hoist": true },
+            // Manage Messages: you can pin here.
+            { "id": "503", "name": "Contributor", "color": 0x2ecc71, "position": 2, "permissions": "8192" },
+            { "id": "504", "name": "Rustacean", "color": 0xe67e22, "position": 1 },
+        ],
+        "channels": [
+            ch("200", "welcome", 0, None),
+            { "id": "300", "name": "TEXT CHANNELS", "type": 4, "position": 1 },
+            { "id": "201", "name": "general", "type": 0, "position": 0, "parent_id": "300",
+              "last_message_id": last_id("201").to_string(),
+              "topic": "Chat about anything. Be nice, no spoilers without tags." },
+            ch("202", "memes", 1, Some("300")),
+            { "id": "301", "name": "Dev", "type": 4, "position": 2 },
+            { "id": "203", "name": "rust", "type": 0, "position": 0, "parent_id": "301",
+              "last_message_id": last_id("203").to_string(),
+              "topic": "RustCord development · egui 0.37 · PRs welcome" },
+            { "id": "302", "name": "Voice Channels", "type": 4, "position": 3 },
+            { "id": "230", "name": "General", "type": 2, "position": 0, "parent_id": "302" },
+            { "id": "231", "name": "Gaming", "type": 2, "position": 1, "parent_id": "302" },
+            { "id": "232", "name": "Town Hall", "type": 13, "position": 2, "parent_id": "302" },
+        ]
+    }));
+    test_guild.my_roles = vec!["503".into()];
     send(ToUi::Ready {
         me: User::from_json(&me),
         guilds: vec![
-            Guild::from_json(&json!({
-                "id": TEST_GUILD,
-                "name": "RustCord Test Server",
-                "roles": [
-                    { "id": TEST_GUILD, "name": "@everyone", "color": 0, "position": 0 },
-                    { "id": "500", "name": "Admin", "color": 0xf1c40f, "position": 5, "hoist": true },
-                    { "id": "501", "name": "Moderators", "color": 0x3498db, "position": 4, "hoist": true },
-                    { "id": "502", "name": "Bots", "color": 0x9b59b6, "position": 3, "hoist": true },
-                    { "id": "503", "name": "Contributor", "color": 0x2ecc71, "position": 2 },
-                    { "id": "504", "name": "Rustacean", "color": 0xe67e22, "position": 1 },
-                ],
-                "channels": [
-                    ch("200", "welcome", 0, None),
-                    { "id": "300", "name": "TEXT CHANNELS", "type": 4, "position": 1 },
-                    { "id": "201", "name": "general", "type": 0, "position": 0, "parent_id": "300",
-                      "last_message_id": last_id("201").to_string(),
-                      "topic": "Chat about anything. Be nice, no spoilers without tags." },
-                    ch("202", "memes", 1, Some("300")),
-                    { "id": "301", "name": "Dev", "type": 4, "position": 2 },
-                    { "id": "203", "name": "rust", "type": 0, "position": 0, "parent_id": "301",
-                      "last_message_id": last_id("203").to_string(),
-                      "topic": "RustCord development · egui 0.37 · PRs welcome" },
-                    { "id": "302", "name": "Voice Channels", "type": 4, "position": 3 },
-                    { "id": "230", "name": "General", "type": 2, "position": 0, "parent_id": "302" },
-                    { "id": "231", "name": "Gaming", "type": 2, "position": 1, "parent_id": "302" },
-                    { "id": "232", "name": "Town Hall", "type": 13, "position": 2, "parent_id": "302" },
-                ]
-            })),
+            test_guild,
             Guild::from_json(&json!({
                 "id": "101",
                 "name": "Gaming Hangout",
@@ -286,6 +306,8 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             { "guild_id": "102", "muted": true,
               "mute_config": { "end_time": null, "selected_time_window": -1 } },
         ], "version": 1 })),
+        blocked: vec![TROLL.into()],
+        user_settings: None,
     });
 
     // READY_SUPPLEMENTAL: presences for DM friends and the Test Server.
@@ -300,6 +322,9 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             })
             .collect(),
     ));
+    let mut settings = demo_settings();
+    // Pinned state per (channel, message), seeded from the sample history.
+    let mut pinned: HashMap<(String, String), bool> = HashMap::new();
     let mut notes: HashMap<String, String> = HashMap::new();
     notes.insert(SAM.into(), "Owes me a code review".into());
 
@@ -309,7 +334,7 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
     let emit = |v: Value, created: &mut HashMap<String, Vec<Value>>| {
         let cid = v["channel_id"].as_str().unwrap_or_default().to_string();
         created.entry(cid).or_default().push(v.clone());
-        send(ToUi::NewMessage(Message::from_json(&v)));
+        send(ToUi::NewMessage(Box::new(Message::from_json(&v))));
     };
     let start = tokio::time::Instant::now();
     // Scripted events: (seconds after start, step).
@@ -371,18 +396,75 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
         };
         match req {
             ToBackend::LoadHistory { channel_id } => {
-                let mut messages = sample_messages(&channel_id);
-                messages.extend(
-                    created
-                        .get(&channel_id)
-                        .into_iter()
-                        .flatten()
-                        .map(Message::from_json),
-                );
+                let messages = history(&channel_id, &created, &pinned);
                 send(ToUi::History {
                     messages,
                     channel_id,
                 })
+            }
+            ToBackend::LoadAround {
+                channel_id,
+                message_id,
+            } => {
+                // The demo history is short, so "around" is all of it.
+                let messages = history(&channel_id, &created, &pinned);
+                send(ToUi::HistoryAround {
+                    channel_id,
+                    message_id,
+                    messages,
+                })
+            }
+            ToBackend::LoadPins { channel_id } => {
+                let pins = sample_values(&channel_id)
+                    .into_iter()
+                    .filter(|v| is_pinned(&pinned, &channel_id, v))
+                    .rev()
+                    .collect();
+                send(ToUi::Pins { channel_id, pins });
+            }
+            ToBackend::SetPinned {
+                channel_id,
+                message_id,
+                pinned: pin,
+            } => {
+                eprintln!("demo: pin={pin} #{channel_id} {message_id}");
+                pinned.insert((channel_id.clone(), message_id.clone()), pin);
+                send(ToUi::PinChanged {
+                    channel_id: channel_id.clone(),
+                    message_id,
+                    pinned: pin,
+                });
+                // Like CHANNEL_PINS_UPDATE.
+                send(ToUi::PinsUpdated(channel_id));
+            }
+            ToBackend::LoadUserSettings => send(ToUi::UserSettings(Box::new(settings.clone()))),
+            ToBackend::PatchUserSettings { settings_b64 } => {
+                eprintln!("demo: PATCH settings-proto {settings_b64}");
+                if settings.apply_patch(&settings_b64).is_ok() {
+                    send(ToUi::UserSettings(Box::new(settings.clone())));
+                }
+            }
+            ToBackend::SetPresence { status, custom } => {
+                eprintln!("demo: op 3 status={status} custom={custom:?}");
+                let activity = custom.map(|c| {
+                    json!([{ "type": 4, "name": "Custom Status", "state": c.text,
+                             "emoji": { "name": c.emoji_name } }])
+                });
+                send(ToUi::Presences(vec![(
+                    ME.to_string(),
+                    Presence::from_json(&json!({
+                        "status": if status == "invisible" { "offline" } else { &status },
+                        "activities": activity.unwrap_or_else(|| json!([])),
+                    })),
+                )]));
+            }
+            ToBackend::LeaveGuild { guild_id } => {
+                eprintln!("demo: leave server {guild_id}");
+                send(ToUi::GuildRemoved(guild_id));
+            }
+            ToBackend::SaveFile { url, filename } => {
+                eprintln!("demo: save {url} as {filename}");
+                send(ToUi::Notice(format!("Demo mode: would save {filename}")));
             }
             ToBackend::Send {
                 channel_id,
@@ -504,7 +586,79 @@ fn user(id: &str, name: &str, avatar: Option<&str>) -> Value {
     json!({ "id": id, "username": name.to_lowercase(), "global_name": name, "avatar": avatar })
 }
 
-fn sample_messages(channel_id: &str) -> Vec<Message> {
+/// Synced settings for the demo account: a custom status, a "Games"
+/// folder and DM safety settings.
+fn demo_settings() -> UserSettings {
+    let mut s = UserSettings::default();
+    let custom = sp::CustomStatus {
+        text: "porting Discord Messenger".into(),
+        emoji_name: Some("🦀".into()),
+        ..Default::default()
+    };
+    // Each patch carries a whole top-level section, so build each one from
+    // the state after the previous one.
+    let steps: [&dyn Fn(&UserSettings) -> String; 5] = [
+        &|s| s.patch_status(sp::Status::Online),
+        &|s| s.patch_custom_status(Some(&custom)),
+        &|s| {
+            s.patch_guild_folders(&[
+                RailItem::Guild(TEST_GUILD.into()),
+                RailItem::Folder {
+                    id: 4242,
+                    name: Some("Games".into()),
+                    color: Some(0xeb459e),
+                    guild_ids: vec!["101".into(), "102".into()],
+                },
+            ])
+        },
+        &|s| s.patch_explicit_filter(ExplicitFilter::NonFriends),
+        &|s| s.patch_compact(false),
+    ];
+    for step in steps {
+        let p = step(&s);
+        let _ = s.apply_patch(&p);
+    }
+    s
+}
+
+fn is_pinned(pinned: &HashMap<(String, String), bool>, channel_id: &str, v: &Value) -> bool {
+    let id = v["id"].as_str().unwrap_or_default().to_string();
+    pinned
+        .get(&(channel_id.to_string(), id))
+        .copied()
+        .unwrap_or_else(|| v["pinned"].as_bool().unwrap_or(false))
+}
+
+/// Sample history plus messages sent during the demo, with pin changes.
+fn history(
+    channel_id: &str,
+    created: &HashMap<String, Vec<Value>>,
+    pinned: &HashMap<(String, String), bool>,
+) -> Vec<Message> {
+    sample_values(channel_id)
+        .into_iter()
+        .chain(created.get(channel_id).into_iter().flatten().cloned())
+        .map(|mut v| {
+            v["pinned"] = json!(is_pinned(pinned, channel_id, &v));
+            Message::from_json(&v)
+        })
+        .collect()
+}
+
+/// Minutes-ago for message `n` of 8+: two days ago, yesterday, then today,
+/// so the date lines show.
+fn minutes_ago(n: u64) -> i64 {
+    match n {
+        1 | 2 => 2 * 24 * 60 + 40 - n as i64,
+        3 | 4 => 24 * 60 + 30 - n as i64,
+        _ => 60 - 3 * n as i64,
+    }
+}
+
+fn sample_values(channel_id: &str) -> Vec<Value> {
+    if channel_id == "200" {
+        return welcome_values();
+    }
     let sam = user(SAM, "Sam", None);
     let alex = user(ALEX, "Alex", None);
     let me = user(ME, "You", None);
@@ -516,20 +670,19 @@ fn sample_messages(channel_id: &str) -> Vec<Message> {
         n += 1;
         let mut v = json!({
             "id": id.to_string(), "channel_id": channel_id, "author": author, "content": content,
-            // Two days ago, yesterday, then today, so the date lines show.
-            "timestamp": iso_minutes_ago(match n {
-                1 | 2 => 2 * 24 * 60 + 40 - n as i64,
-                3 | 4 => 24 * 60 + 30 - n as i64,
-                _ => 60 - 3 * n as i64,
-            }),
+            "timestamp": iso_minutes_ago(minutes_ago(n)),
         });
         if let (Some(obj), Some(extra)) = (v.as_object_mut(), extra.as_object()) {
             obj.extend(extra.clone());
         }
-        Message::from_json(&v)
+        v
     };
     vec![
-        msg(&sam, "hey, is the new client working?", json!({})),
+        msg(
+            &sam,
+            "hey, is the new client working?",
+            json!({ "pinned": true }),
+        ),
         msg(
             &alex,
             "Unicode: Përshëndetje! Здравствуй 你好 こんにちは 안녕하세요 مرحبا नमस्ते Γειά 😀🎉👍❤️ ✓ ★ → ♫ <:pepe:123>",
@@ -539,7 +692,8 @@ fn sample_messages(channel_id: &str) -> Vec<Message> {
         msg(
             &alex,
             "nice, does it do replies?",
-            json!({ "referenced_message": { "author": me, "content": "yeah! you can drag the panels around now" } }),
+            json!({ "referenced_message": { "id": (last - 5).to_string(), "author": me,
+                    "content": "yeah! you can drag the panels around now" } }),
         ),
         msg(
             &me,
@@ -558,4 +712,110 @@ fn sample_messages(channel_id: &str) -> Vec<Message> {
             json!({ "attachments": [{ "url": "https://example.com/build.log", "filename": "build.log", "size": 20480, "content_type": "text/plain" }] }),
         ),
     ]
+}
+
+/// #welcome: everything Batch C can draw.
+fn welcome_values() -> Vec<Value> {
+    let sam = user(SAM, "Sam", None);
+    let alex = user(ALEX, "Alex", None);
+    let maya = user("610000000000000004", "Maya", None);
+    let me = user(ME, "You", None);
+    let troll = user(TROLL, "Troll", None);
+    let mut bot = user("700000000000000006", "RustBot", None);
+    bot["bot"] = json!(true);
+    let soon = chrono::Utc::now().timestamp() + 2 * 3600;
+
+    let items: Vec<(Value, i64, &str, Value)> = vec![
+        (
+            sam.clone(),
+            2 * 24 * 60 + 39,
+            "**Welcome to the RustCord Test Server!** 🦀\nSay hi in <#201>, and ping <@&501> if something breaks.",
+            json!({ "pinned": true }),
+        ),
+        (
+            alex.clone(),
+            2 * 24 * 60 + 30,
+            "# Markdown test\nSome **bold**, *italic*, __underline__, ~~strike~~ and `inline code`.\n> quoting <@300000000000000002> here\n- lists work\n  - nested too\n||spoiler: the cake is a lie||\nRelease party <t:SOON:R> (<t:SOON:f>) :pepe: <:pepe:123>",
+            json!({ "mentions": [sam] }),
+        ),
+        (
+            me.clone(),
+            24 * 60 + 29,
+            "```rust\nfn main() {\n    println!(\"hello from RustCord\");\n}\n```",
+            json!({}),
+        ),
+        (troll.clone(), 24 * 60 + 20, "first!!1 lol", json!({})),
+        (troll, 24 * 60 + 19, "anyone there??", json!({})),
+        (
+            bot,
+            50,
+            "",
+            json!({ "embeds": [{
+                "type": "rich",
+                "title": "Build #128 passed",
+                "url": "https://github.com/KeoLogs/rustcord/actions",
+                "description": "All checks are green on `feat/messenger-complete`.\n**3** jobs · ~~2~~ 0 warnings",
+                "color": 0x57f287,
+                "author": { "name": "GitHub Actions", "url": "https://github.com/KeoLogs/rustcord" },
+                "fields": [
+                    { "name": "Linux", "value": "✅ 2m 10s", "inline": true },
+                    { "name": "Windows", "value": "✅ 4m 02s", "inline": true },
+                    { "name": "macOS", "value": "✅ 3m 31s", "inline": true },
+                    { "name": "Commit", "value": "[`df82209`](https://github.com/KeoLogs/rustcord/commit/df82209) Polish pass" }
+                ],
+                "footer": { "text": "RustCord CI" },
+                "timestamp": iso_minutes_ago(50),
+            }] }),
+        ),
+        (
+            maya,
+            30,
+            "this never gets old https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            json!({ "pinned": true, "embeds": [{
+                "type": "video",
+                "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "title": "Rick Astley - Never Gonna Give You Up (Official Video)",
+                "description": "The official video for “Never Gonna Give You Up” by Rick Astley.",
+                "color": 0xff0000,
+                "provider": { "name": "YouTube", "url": "https://www.youtube.com" },
+                "author": { "name": "Rick Astley", "url": "https://www.youtube.com/@RickAstleyYT" },
+                "thumbnail": { "url": "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg", "width": 480, "height": 360 },
+                "video": { "url": "https://www.youtube.com/embed/dQw4w9WgXcQ", "width": 1280, "height": 720 }
+            }] }),
+        ),
+        (
+            sam,
+            20,
+            "egui docs: [docs.rs/egui](https://docs.rs/egui) · Discord's own (trusted, opens straight away): <https://discord.com/developers/docs> · dev chat in <#203>",
+            json!({}),
+        ),
+        (
+            alex,
+            10,
+            "new screenshot",
+            json!({ "attachments": [{
+                "url": "https://cdn.discordapp.com/attachments/1/2/screenshot.png",
+                "proxy_url": "https://media.discordapp.net/attachments/1/2/screenshot.png",
+                "filename": "screenshot.png", "content_type": "image/png",
+                "width": 1280, "height": 800, "size": 245000
+            }] }),
+        ),
+    ];
+    let last = last_id("200");
+    let first = last + 1 - items.len() as u64;
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(i, (author, ago, content, extra))| {
+            let mut v = json!({
+                "id": (first + i as u64).to_string(), "channel_id": "200", "author": author,
+                "content": content.replace("SOON", &soon.to_string()),
+                "timestamp": iso_minutes_ago(ago),
+            });
+            if let (Some(obj), Some(extra)) = (v.as_object_mut(), extra.as_object()) {
+                obj.extend(extra.clone());
+            }
+            v
+        })
+        .collect()
 }

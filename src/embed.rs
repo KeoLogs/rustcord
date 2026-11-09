@@ -408,21 +408,6 @@ pub fn field_rows(fields: &[EmbedField], per_row: usize) -> Vec<Range<usize>> {
     rows
 }
 
-/// "2024-03-01 12:34" from an ISO-8601 timestamp (shown as UTC, like
-/// message times). Falls back to the raw string if it doesn't look right.
-pub fn format_timestamp(ts: &str) -> String {
-    let ok = ts.len() >= 16
-        && ts.is_char_boundary(16)
-        && ts.as_bytes()[4] == b'-'
-        && ts.as_bytes()[10] == b'T'
-        && ts.as_bytes()[13] == b':';
-    if ok {
-        format!("{} {}", &ts[..10], &ts[11..16])
-    } else {
-        ts.to_string()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Drawing
 // ---------------------------------------------------------------------------
@@ -667,7 +652,7 @@ fn body_text(ui: &mut egui::Ui, text: &str, ctx: &EmbedCtx, out: &mut EmbedOutpu
 }
 
 fn footer(ui: &mut egui::Ui, embed: &Embed, ctx: &EmbedCtx) {
-    let time = embed.timestamp.as_deref().map(format_timestamp);
+    let time = embed.timestamp.as_deref().map(crate::timefmt::full_iso);
     let text = match (&embed.footer, time) {
         (Some(f), Some(t)) => format!("{} • {t}", f.text),
         (Some(f), None) => f.text.clone(),
@@ -932,9 +917,9 @@ mod tests {
         assert_eq!(e.fields[5].name, "");
         assert_eq!(e.fields[5].value, "no name");
         assert!(e.fields[0].inline && !e.fields[3].inline);
-        assert_eq!(
-            format_timestamp(e.timestamp.as_deref().unwrap()),
-            "2026-11-09 14:05"
+        assert_ne!(
+            crate::timefmt::parse_iso(e.timestamp.as_deref().unwrap()),
+            0
         );
         assert_eq!(field_rows(&e.fields, 3), vec![0..3, 3..4, 4..6]);
         assert_eq!(field_rows(&e.fields, 2), vec![0..2, 2..3, 3..4, 4..6]);
@@ -1061,9 +1046,8 @@ mod tests {
 
     #[test]
     fn timestamps() {
-        assert_eq!(format_timestamp("2024-03-01T12:34:56Z"), "2024-03-01 12:34");
-        assert_eq!(format_timestamp("garbage"), "garbage");
-        assert_eq!(format_timestamp("2024-03-01Tαβ:γδ"), "2024-03-01Tαβ:γδ");
+        assert_eq!(crate::timefmt::full_iso("garbage"), "garbage");
+        assert!(!crate::timefmt::full_iso("2024-03-01T12:34:56Z").is_empty());
     }
 
     #[test]

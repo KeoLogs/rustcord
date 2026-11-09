@@ -17,9 +17,6 @@
 //! The renderer never opens links itself: clicks come back as
 //! [`MarkdownAction`]s so the app can show its link warning.
 
-// Not wired into the message list yet; remove once app.rs uses it.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -32,6 +29,7 @@ use eframe::egui::{
 
 use crate::emoji::{self, Segment};
 use crate::theme::Palette;
+use crate::timefmt;
 
 // ---------------------------------------------------------------------------
 // AST
@@ -935,8 +933,10 @@ pub trait Lookup {
     }
 }
 
+#[cfg(test)]
 /// A [`Lookup`] that knows nothing.
 pub struct NoLookup;
+#[cfg(test)]
 impl Lookup for NoLookup {}
 
 fn user_label(lookup: &dyn Lookup, id: &str) -> String {
@@ -1023,7 +1023,8 @@ pub fn to_plain_text(blocks: &[Block], lookup: &dyn Lookup) -> String {
     out
 }
 
-/// Format `<t:unix:style>` like Discord (UK English, 24-hour clock).
+/// Format `<t:unix:style>` like Discord (UK English; 24-hour clock unless
+/// "Use 12-hour time" is on, see `timefmt::set_12_hour`).
 /// `now` sets the time zone and the reference for relative times.
 pub fn format_timestamp<Tz: TimeZone>(
     unix: i64,
@@ -1038,12 +1039,16 @@ where
     };
     let t = utc.with_timezone(&now.timezone());
     match style {
-        TimestampStyle::ShortTime => t.format("%H:%M").to_string(),
-        TimestampStyle::LongTime => t.format("%H:%M:%S").to_string(),
+        TimestampStyle::ShortTime => t.format(timefmt::hm()).to_string(),
+        TimestampStyle::LongTime => t.format(timefmt::hms()).to_string(),
         TimestampStyle::ShortDate => t.format("%d/%m/%Y").to_string(),
         TimestampStyle::LongDate => t.format("%-d %B %Y").to_string(),
-        TimestampStyle::ShortDateTime => t.format("%-d %B %Y %H:%M").to_string(),
-        TimestampStyle::LongDateTime => t.format("%A, %-d %B %Y %H:%M").to_string(),
+        TimestampStyle::ShortDateTime => t
+            .format(&format!("%-d %B %Y {}", timefmt::hm()))
+            .to_string(),
+        TimestampStyle::LongDateTime => t
+            .format(&format!("%A, %-d %B %Y {}", timefmt::hm()))
+            .to_string(),
         TimestampStyle::Relative => relative_time(unix - now.timestamp()),
     }
 }
@@ -1165,10 +1170,12 @@ impl ParseCache {
         self.map.clear();
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
@@ -1590,7 +1597,7 @@ impl Renderer<'_, '_> {
     }
 
     /// Text colour for bold when there's no bold font.
-    fn strong(&self) -> Color32 {
+    fn bold_color(&self) -> Color32 {
         self.pal().unread
     }
 
@@ -1620,7 +1627,7 @@ impl Renderer<'_, '_> {
         } else if style.subtext {
             pal.muted
         } else if style.bold && self.ctx.bold_family.is_none() {
-            self.strong()
+            self.bold_color()
         } else {
             pal.text
         };
