@@ -212,6 +212,9 @@ pub struct Modules {
     /// Threads, forum channels and the thread browser.
     #[serde(default = "on")]
     pub threads: bool,
+    /// Invite cards, Join a Server, rules screening and onboarding.
+    #[serde(default = "on")]
+    pub invites: bool,
 }
 
 impl Default for Modules {
@@ -231,6 +234,7 @@ impl Default for Modules {
             search: true,
             friends: true,
             threads: true,
+            invites: true,
         }
     }
 }
@@ -250,6 +254,7 @@ pub mod live {
     pub static SEARCH: AtomicBool = AtomicBool::new(true);
     pub static FRIENDS: AtomicBool = AtomicBool::new(true);
     pub static THREADS: AtomicBool = AtomicBool::new(true);
+    pub static INVITES: AtomicBool = AtomicBool::new(true);
     // (end of flags)
 
     pub fn sync(m: &super::Modules) {
@@ -257,6 +262,7 @@ pub mod live {
         SEARCH.store(m.search, Relaxed);
         FRIENDS.store(m.friends, Relaxed);
         THREADS.store(m.threads, Relaxed);
+        INVITES.store(m.invites, Relaxed);
     }
 
     pub fn on(flag: &AtomicBool) -> bool {
@@ -341,6 +347,11 @@ pub const MODULES: &[ModuleInfo] = &[
         name: "Threads & forums",
         description: "Threads under their channels, forum channels with posts, the Threads browser and Create Thread. Off = threads and forums hidden, nothing loaded.",
         get: |m| &mut m.threads,
+    },
+    ModuleInfo {
+        name: "Invites & onboarding",
+        description: "Invite cards under messages, the rail's Add a Server button, server rules screening and onboarding questions. Off = invite links stay plain links, nothing loaded.",
+        get: |m| &mut m.invites,
     },
 ];
 

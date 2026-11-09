@@ -273,7 +273,7 @@ pub async fn run_session(
                         for ev in account_events(event, d) {
                             send_ui(ev);
                         }
-                        for ev in module_events(event, d) {
+                        for ev in module_events(event, d, &session.my_id) {
                             send_ui(ev);
                         }
                     }
@@ -332,6 +332,24 @@ fn jitter_ms(max: u64) -> u64 {
     nanos % max.max(1)
 }
 
+/// My member object in a list of member objects (`user.id` or `user_id`).
+fn my_member<'a>(members: &'a Value, my_id: &str) -> Option<&'a Value> {
+    members
+        .as_array()?
+        .iter()
+        .find(|m| m["user_id"].as_str().or(m["user"]["id"].as_str()) == Some(my_id))
+}
+
+/// Rules-screening `pending` and member `flags` from my member object.
+fn my_gate(members: &Value, my_id: &str) -> (bool, u64) {
+    my_member(members, my_id).map_or((false, 0), |m| {
+        (
+            crate::screening::member_is_pending(m),
+            m["flags"].as_u64().unwrap_or(0),
+        )
+    })
+}
+
 /// My role ids from a list of member objects (`user.id` or `user_id`).
 fn my_roles(members: &Value, my_id: &str) -> Vec<String> {
     members
@@ -366,6 +384,8 @@ fn handle_dispatch(event: &str, d: &Value, my_id: &str) -> Option<ToUi> {
                         .map(|(i, g)| {
                             let mut guild = Guild::from_json(g);
                             guild.my_roles = my_roles(&d["merged_members"][i], my_id);
+                            (guild.my_pending, guild.my_member_flags) =
+                                my_gate(&d["merged_members"][i], my_id);
                             guild
                         })
                         .collect()
@@ -391,6 +411,7 @@ fn handle_dispatch(event: &str, d: &Value, my_id: &str) -> Option<ToUi> {
         "GUILD_CREATE" => {
             let mut guild = Guild::from_json(d);
             guild.my_roles = my_roles(&d["members"], my_id);
+            (guild.my_pending, guild.my_member_flags) = my_gate(&d["members"], my_id);
             Some(ToUi::GuildAdded(guild))
         }
         "CHANNEL_CREATE" | "CHANNEL_UPDATE" => Some(ToUi::ChannelUpserted {
@@ -484,9 +505,22 @@ fn account_events(event: &str, d: &Value) -> Vec<ToUi> {
 
 /// Events of optional modules. Each block checks its module's live flag
 /// first, so a module that is off does no gateway work.
-fn module_events(event: &str, d: &Value) -> Vec<ToUi> {
+fn module_events(event: &str, d: &Value, my_id: &str) -> Vec<ToUi> {
     use crate::config::live;
     let mut out = Vec::new();
+
+    // --- onboarding --- my rules-screening / onboarding state.
+    if event == "GUILD_MEMBER_UPDATE"
+        && live::on(&live::INVITES)
+        && !my_id.is_empty()
+        && d["user"]["id"].as_str() == Some(my_id)
+    {
+        out.push(ToUi::MyMemberUpdate {
+            guild_id: d["guild_id"].as_str().unwrap_or_default().to_string(),
+            pending: d["pending"].as_bool().unwrap_or(false),
+            flags: d["flags"].as_u64().unwrap_or(0),
+        });
+    }
 
     // --- friends ---
     if live::on(&live::FRIENDS) {

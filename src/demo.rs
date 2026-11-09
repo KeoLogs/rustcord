@@ -624,6 +624,35 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             ToBackend::LoadProfile { user_id, guild_id } => {
                 send(ToUi::Profile(Box::new(fake_profile(&user_id, guild_id))))
             }
+            // --- onboarding --- (preview works; joining is off in the demo)
+            ToBackend::ResolveInvite { code } => send(ToUi::InviteResolved {
+                result: crate::invites::classify_fetch(
+                    200,
+                    &json!({
+                        "code": code, "type": 0,
+                        "guild": { "id": "103", "name": "Rust Lounge", "features": [] },
+                        "approximate_member_count": 1234, "approximate_presence_count": 321
+                    }),
+                ),
+                code,
+            }),
+            ToBackend::JoinInvite { code } => send(ToUi::InviteJoined {
+                code,
+                outcome: crate::invites::JoinOutcome::Failed("Demo mode: not joining".into()),
+            }),
+            ToBackend::LoadScreening { guild_id } => send(ToUi::ScreeningLoaded {
+                guild_id,
+                result: Err("Demo mode".into()),
+            }),
+            ToBackend::LoadOnboarding { guild_id, page } => send(ToUi::OnboardingLoaded {
+                guild_id,
+                page,
+                result: Err("Demo mode".into()),
+            }),
+            ToBackend::SubmitScreening { guild_id, .. }
+            | ToBackend::SubmitOnboarding { guild_id, .. } => {
+                eprintln!("demo: submit for {guild_id}");
+            }
             // --- threads --- (the demo has no threads; nothing to load)
             ToBackend::LoadActiveThreads { guild_id } => {
                 send(ToUi::ThreadsUnavailable { guild_id });
@@ -834,7 +863,7 @@ fn sample_values(channel_id: &str) -> Vec<Value> {
     vec![
         msg(
             &sam,
-            "hey, is the new client working?",
+            "hey, is the new client working? the test lounge: https://discord.gg/rustcord",
             json!({ "pinned": true }),
         ),
         msg(

@@ -111,6 +111,12 @@ pub struct Guild {
     pub owner_id: String,
     /// Custom emoji (for the composer's `:` autocomplete).
     pub emojis: Vec<GuildEmoji>,
+    /// Server feature flags (GUILD_ONBOARDING, MEMBER_VERIFICATION_GATE_ENABLED…).
+    pub features: Vec<String>,
+    /// I haven't passed rules screening yet (member `pending`): can't talk.
+    pub my_pending: bool,
+    /// My member `flags` (onboarding started / completed bits).
+    pub my_member_flags: u64,
 }
 
 /// A server's custom emoji.
@@ -226,6 +232,19 @@ impl Guild {
                 .and_then(Value::as_array)
                 .map(|arr| arr.iter().map(Channel::from_json).collect())
                 .unwrap_or_default(),
+            features: v
+                .get("features")
+                .or_else(|| v.pointer("/properties/features"))
+                .and_then(Value::as_array)
+                .map(|f| {
+                    f.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            my_pending: false,
+            my_member_flags: 0,
         };
         guild.sort_channels();
         guild
@@ -243,6 +262,9 @@ impl Guild {
             owner_id: String::new(),
             emojis: Vec::new(),
             channels,
+            features: Vec::new(),
+            my_pending: false,
+            my_member_flags: 0,
         };
         guild.sort_channels();
         guild
@@ -875,6 +897,39 @@ pub enum ToUi {
         burst: bool,
         error: String,
     },
+    // --- onboarding ---
+    InviteResolved {
+        code: String,
+        result: crate::invites::InviteFetch,
+    },
+    InviteJoined {
+        code: String,
+        outcome: crate::invites::JoinOutcome,
+    },
+    ScreeningLoaded {
+        guild_id: String,
+        result: Result<crate::screening::VerificationForm, String>,
+    },
+    ScreeningSubmitted {
+        guild_id: String,
+        result: Result<crate::screening::ScreeningOutcome, String>,
+    },
+    /// `page`: for the Channels & Roles page (else the join flow).
+    OnboardingLoaded {
+        guild_id: String,
+        page: bool,
+        result: Result<crate::onboarding::Onboarding, String>,
+    },
+    OnboardingSaved {
+        guild_id: String,
+        result: Result<Vec<String>, String>,
+    },
+    /// GUILD_MEMBER_UPDATE for me: rules screening / onboarding state.
+    MyMemberUpdate {
+        guild_id: String,
+        pending: bool,
+        flags: u64,
+    },
     // --- threads ---
     /// THREAD_* events, READY / GUILD_CREATE thread lists.
     Thread(crate::threads::ThreadEvent),
@@ -1101,6 +1156,32 @@ pub enum ToBackend {
         emoji: crate::emoji_picker::EmojiRef,
         add: bool,
         burst: bool,
+    },
+    // --- onboarding ---
+    /// Invite preview (shown when an invite card appears).
+    ResolveInvite {
+        code: String,
+    },
+    /// Join through an invite. Only after the user pressed Join.
+    JoinInvite {
+        code: String,
+    },
+    LoadScreening {
+        guild_id: String,
+    },
+    /// Only after the user ticked "I agree" and pressed Submit.
+    SubmitScreening {
+        guild_id: String,
+        body: serde_json::Value,
+    },
+    LoadOnboarding {
+        guild_id: String,
+        page: bool,
+    },
+    /// Only after the user pressed Finish / Save.
+    SubmitOnboarding {
+        guild_id: String,
+        body: serde_json::Value,
     },
     // --- threads ---
     /// Thread / forum request from a click (join, leave, create, post) or

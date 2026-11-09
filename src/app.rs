@@ -21,12 +21,14 @@ use crate::friends::{
 };
 use crate::gif_picker::{GifAction, GifPicker};
 use crate::home::{self, HomeAction, HomeCtx, HomeSelected, HomeState};
+use crate::invites::{self, AddServerAction, AddServerDialog, CardCtx, InviteAction, InviteCache};
 use crate::layout::{self, LAYOUT_KEY, LayoutBehavior, Pane};
 use crate::links::{self, LinkCheck, LinkDecision, LinkWarning};
 use crate::login::{LoginAction, LoginForm};
 use crate::markdown::{self, Block, MarkdownAction, ParseCache};
 use crate::members::{self, Member, MemberCache, MemberList, Row};
 use crate::notify::{self, Inbox, InboxItem, Mutes, NotifyCheck};
+use crate::onboarding::{ChannelsRoles, OnboardingAction, OnboardingFlow};
 use crate::perms;
 use crate::pins::{PinnedMessage, PinsAction, PinsPopup, PinsView};
 use crate::presence::{Presences, Status};
@@ -34,6 +36,7 @@ use crate::profile::{self, Popout, PopoutAction, ProfileCache};
 use crate::quick_switcher::{self, QuickSwitcher};
 use crate::reactions::{self, PendingReactions, ReactionAction, ReactionCtx};
 use crate::read_state::ReadState;
+use crate::screening::{ScreeningAction, ScreeningDialog};
 use crate::search::{SearchAction, SearchCtx, SearchPanel, SearchScope, Suggestion};
 use crate::settings::{SettingsAction, SettingsPage, SyncChange};
 use crate::settings_proto::{self as sp, RailItem, UserSettings};
@@ -266,6 +269,7 @@ impl eframe::App for RustCordApp {
         state.set_reactions_module(self.config.modules.reactions);
         state.set_friends_module(self.config.modules.friends);
         state.set_threads_module(self.config.modules.threads);
+        state.set_invites_module(self.config.modules.invites);
         if !self.config.modules.search {
             state.search = None;
         }
@@ -504,6 +508,8 @@ enum MessageAction {
     JumpTo(String),
     /// "Create Thread" from a message: (message id, content).
     CreateThread(String, String),
+    /// An invite card under a message.
+    Invite(InviteAction),
     /// Reaction bar / add-reaction picker on message (id).
     React(String, ReactionAction),
 }
@@ -529,6 +535,28 @@ struct ReactionState {
     reactors: HashMap<(String, EmojiRef, bool), Vec<String>>,
     /// Reactor lists already requested (each is asked for once).
     asked: HashSet<(String, EmojiRef, bool)>,
+}
+
+// --- onboarding ---
+/// Invites / screening / onboarding module state (`None` while off).
+#[derive(Default)]
+struct InvitesState {
+    cache: InviteCache,
+    add_server: Option<AddServerDialog>,
+    screening: Option<ScreeningDialog>,
+    onboarding: Option<OnboardingFlow>,
+    channels_roles: Option<ChannelsRoles>,
+    /// Just joined this server and it has rules screening: open it once
+    /// the onboarding questions are done (onboarding -> screening).
+    screening_next: Option<String>,
+}
+
+/// What a message row needs to draw invite cards.
+struct InviteParts<'a> {
+    cache: &'a InviteCache,
+    is_member: &'a dyn Fn(&str) -> bool,
+    can_join: bool,
+    my_id: &'a str,
 }
 
 // --- threads ---
@@ -662,6 +690,8 @@ pub struct State {
     friends: Option<FriendsState>,
     /// Threads module state; `None` while the module is off.
     threads: Option<ThreadsState>,
+    /// Invites / onboarding module state; `None` while the module is off.
+    invites: Option<InvitesState>,
     last_typing_sent: Option<(String, Instant)>,
     confirm_delete: Option<(String, String)>,
 
@@ -782,6 +812,7 @@ impl State {
             search: None,
             friends: None,
             threads: None,
+            invites: None,
             last_typing_sent: None,
             confirm_delete: None,
             reads: ReadState::default(),
@@ -1258,6 +1289,64 @@ impl State {
                 }
                 self.emoji_groups = None;
             }
+            // --- onboarding ---
+            ToUi::InviteResolved { code, result } => {
+                if let Some(s) = &mut self.invites {
+                    s.cache.set_fetched(&code, result);
+                }
+            }
+            ToUi::InviteJoined { code, outcome } => self.invite_joined(code, outcome, ctx),
+            ToUi::ScreeningLoaded { guild_id, result } => {
+                if let Some(d) = self
+                    .invites
+                    .as_mut()
+                    .and_then(|s| s.screening.as_mut())
+                    .filter(|d| d.guild_id == guild_id)
+                {
+                    match result {
+                        Ok(form) => d.set_loaded(form),
+                        Err(e) => d.set_failed(e),
+                    }
+                }
+            }
+            ToUi::ScreeningSubmitted { guild_id, result } => {
+                if let Some(d) = self
+                    .invites
+                    .as_mut()
+                    .and_then(|s| s.screening.as_mut())
+                    .filter(|d| d.guild_id == guild_id)
+                {
+                    d.set_result(result);
+                }
+            }
+            ToUi::OnboardingLoaded {
+                guild_id,
+                page,
+                result,
+            } => self.onboarding_loaded(guild_id, page, result),
+            ToUi::OnboardingSaved { guild_id, result } => {
+                if let Some(s) = &mut self.invites {
+                    if let Some(f) = s.onboarding.as_mut().filter(|f| f.guild_id() == guild_id) {
+                        f.set_saved(result);
+                    } else if let Some(p) = s
+                        .channels_roles
+                        .as_mut()
+                        .filter(|p| p.guild_id() == guild_id)
+                    {
+                        p.set_saved(result);
+                    }
+                }
+            }
+            ToUi::MyMemberUpdate {
+                guild_id,
+                pending,
+                flags,
+            } => {
+                if let Some(g) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
+                    g.my_pending = pending;
+                    g.my_member_flags = flags;
+                }
+            }
             // --- threads ---
             ToUi::Thread(ev) => {
                 if let Some(ts) = &mut self.threads {
@@ -1437,6 +1526,220 @@ impl State {
                     rs.reactors.insert((message_id, emoji, burst), names);
                 }
             }
+        }
+    }
+
+    // --- onboarding ---
+    /// Turn the module's state on / off (off frees everything it held).
+    fn set_invites_module(&mut self, on: bool) {
+        match (on, self.invites.is_some()) {
+            (true, false) => self.invites = Some(InvitesState::default()),
+            (false, true) => self.invites = None,
+            _ => {}
+        }
+    }
+
+    /// An invite card / Join a Server action. Joining only from the user's
+    /// click, one at a time, nothing while rate limited.
+    fn invite_action(&mut self, a: InviteAction, ctx: &egui::Context, config: &Config) {
+        let slow = self.slow_down_secs().is_some();
+        let Some(s) = &mut self.invites else {
+            return;
+        };
+        match a {
+            InviteAction::Fetch(code) | InviteAction::Retry(code) => {
+                if s.cache.begin_fetch(&code) {
+                    let _ = self.tx.send(ToBackend::ResolveInvite { code });
+                }
+            }
+            InviteAction::Join(code) => {
+                if !slow && s.cache.begin_join(&code) {
+                    let _ = self.tx.send(ToBackend::JoinInvite { code });
+                }
+            }
+            InviteAction::Open(code) => {
+                let target = s
+                    .cache
+                    .invite(&code)
+                    .and_then(|i| i.target_id())
+                    .map(str::to_string);
+                if let Some(id) = target {
+                    s.add_server = None;
+                    if self.guilds.iter().any(|g| g.id == id) {
+                        self.select_guild(id);
+                    } else if self.dms.channel(&id).is_some() {
+                        self.select_guild(DM_GUILD_ID.to_string());
+                        self.select_channel(id, ctx, config);
+                    }
+                }
+            }
+            InviteAction::OpenLink(url) => self.open_link(&url, ctx, config),
+        }
+    }
+
+    /// Joined: onboarding questions first, then rules screening (each
+    /// only asks; answers are sent when the user presses the button).
+    fn invite_joined(&mut self, code: String, outcome: invites::JoinOutcome, ctx: &egui::Context) {
+        let _ = ctx;
+        let Some(s) = &mut self.invites else {
+            return;
+        };
+        s.cache.set_join_result(&code, &outcome);
+        let invites::JoinOutcome::Joined {
+            guild_id: Some(gid),
+            show_verification_form,
+            features,
+            ..
+        } = outcome
+        else {
+            return;
+        };
+        s.add_server = None;
+        let screening = show_verification_form || crate::screening::guild_has_screening(&features);
+        // Just joined: member flags are 0 (nothing completed yet).
+        if crate::onboarding::needs_onboarding(&features, 0) {
+            s.screening_next = screening.then(|| gid.clone());
+            let _ = self.tx.send(ToBackend::LoadOnboarding {
+                guild_id: gid,
+                page: false,
+            });
+        } else if screening {
+            self.open_screening(&gid);
+        }
+    }
+
+    fn open_screening(&mut self, guild_id: &str) {
+        let (name, icon) = self
+            .guilds
+            .iter()
+            .find(|g| g.id == guild_id)
+            .map(|g| (g.name.clone(), g.icon_url.clone()))
+            .unwrap_or_default();
+        if let Some(s) = &mut self.invites {
+            s.screening = Some(ScreeningDialog::new(guild_id, &name, icon));
+            let _ = self.tx.send(ToBackend::LoadScreening {
+                guild_id: guild_id.to_string(),
+            });
+        }
+    }
+
+    fn onboarding_loaded(
+        &mut self,
+        guild_id: String,
+        page: bool,
+        result: Result<crate::onboarding::Onboarding, String>,
+    ) {
+        let (name, roles) = self
+            .guilds
+            .iter()
+            .find(|g| g.id == guild_id)
+            .map(|g| (g.name.clone(), g.my_roles.clone()))
+            .unwrap_or_default();
+        let Some(s) = &mut self.invites else {
+            return;
+        };
+        match result {
+            Ok(onb) => {
+                let prior = crate::onboarding::guess_selected(&onb, &roles);
+                if page {
+                    s.channels_roles = Some(ChannelsRoles::new(onb, &name, prior));
+                } else {
+                    s.onboarding = Some(OnboardingFlow::new(onb, &name, prior));
+                }
+            }
+            Err(e) => {
+                if !page && let Some(gid) = s.screening_next.take() {
+                    // No questions after all: straight to the rules.
+                    self.open_screening(&gid);
+                } else if self.slow_down_secs().is_none() {
+                    self.toast = Some((e, Instant::now()));
+                }
+            }
+        }
+    }
+
+    /// The join / screening / onboarding / Channels & Roles dialogs.
+    fn invite_dialogs(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let Some(mut s) = self.invites.take() else {
+            return;
+        };
+        let slow = self.slow_down_secs().is_some();
+        let mut invite_action = None;
+        let mut screening_after = None;
+        if let Some(d) = &mut s.add_server {
+            let guilds = &self.guilds;
+            let dms = &self.dms;
+            let is_member =
+                |id: &str| guilds.iter().any(|g| g.id == id) || dms.channel(id).is_some();
+            let cx = CardCtx {
+                pal,
+                cache: &s.cache,
+                is_member: &is_member,
+                can_join: !self.me.as_ref().is_some_and(|u| u.bot),
+                sent_by_me: false,
+                button: true,
+            };
+            match d.show(ctx, &cx) {
+                Some(AddServerAction::Invite(a)) => invite_action = Some(a),
+                Some(AddServerAction::Close) => s.add_server = None,
+                None => {}
+            }
+        }
+        if let Some(f) = &mut s.onboarding {
+            match f.show(ctx, pal) {
+                Some(OnboardingAction::Submit { guild_id, body }) if !slow => {
+                    let _ = self.tx.send(ToBackend::SubmitOnboarding { guild_id, body });
+                }
+                Some(OnboardingAction::Close) => {
+                    s.onboarding = None;
+                    screening_after = s.screening_next.take();
+                }
+                _ => {}
+            }
+            if s.onboarding.as_ref().is_some_and(|f| f.is_done()) {
+                s.onboarding = None;
+                screening_after = s.screening_next.take();
+            }
+        }
+        if let Some(d) = &mut s.screening {
+            match d.show(ctx, pal) {
+                Some(ScreeningAction::Submit { guild_id, body }) if !slow => {
+                    let _ = self.tx.send(ToBackend::SubmitScreening { guild_id, body });
+                }
+                Some(ScreeningAction::Retry { guild_id }) => {
+                    let _ = self.tx.send(ToBackend::LoadScreening { guild_id });
+                }
+                Some(ScreeningAction::Close) => s.screening = None,
+                _ => {}
+            }
+        }
+        if let Some(p) = &mut s.channels_roles {
+            let mut open = true;
+            let mut act = None;
+            egui::Modal::new(egui::Id::unique("rc_channels_roles"))
+                .frame(widgets::menu_frame(pal))
+                .show(ctx, |ui| {
+                    ui.set_width(520.0);
+                    ui.set_max_height(ctx.content_rect().height() * 0.8);
+                    act = p.show(ui, pal);
+                });
+            match act {
+                Some(OnboardingAction::Submit { guild_id, body }) if !slow => {
+                    let _ = self.tx.send(ToBackend::SubmitOnboarding { guild_id, body });
+                }
+                Some(OnboardingAction::Close) => open = false,
+                _ => {}
+            }
+            if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                s.channels_roles = None;
+            }
+        }
+        self.invites = Some(s);
+        if let Some(gid) = screening_after {
+            self.open_screening(&gid);
+        }
+        if let Some(a) = invite_action {
+            self.invite_action(a, ctx, config);
         }
     }
 
@@ -2836,7 +3139,25 @@ impl State {
                         }
                     }
                 }
+                // --- onboarding --- Add a Server.
+                if self.invites.is_some() {
+                    let wide = ui.available_width() >= RAIL_NAMES_WIDTH;
+                    if invites::rail_add_button(ui, pal, wide).clicked() {
+                        ev.add_server = true;
+                    }
+                }
             });
+        if ev.add_server
+            && let Some(s) = &mut self.invites
+        {
+            s.add_server = Some(AddServerDialog::new());
+        }
+        if let Some(gid) = ev.channels_roles {
+            let _ = self.tx.send(ToBackend::LoadOnboarding {
+                guild_id: gid,
+                page: true,
+            });
+        }
         if let Some(id) = ev.toggle_folder
             && !self.open_folders.remove(&id)
         {
@@ -2891,6 +3212,19 @@ impl State {
                     widgets::menu_note(ui, icons::BELL_SLASH, "Muted", pal);
                 }
                 widgets::menu_separator(ui, pal);
+                if self.invites.is_some()
+                    && g.features.iter().any(|f| f == crate::onboarding::FEATURE)
+                    && widgets::menu_item(
+                        ui,
+                        Some(icons::SQUARES_FOUR),
+                        "Channels & Roles",
+                        Tone::Normal,
+                        pal,
+                    )
+                    .clicked()
+                {
+                    ev.channels_roles = Some(g.id.clone());
+                }
                 if widgets::menu_item(ui, Some(icons::ID), "Copy Server ID", Tone::Normal, pal)
                     .clicked()
                 {
@@ -3736,6 +4070,16 @@ impl State {
                     .is_some_and(|(_, c)| matches!(c.kind, 0 | 5))
                 && self.has_perm(&channel_id, perms::CREATE_PUBLIC_THREADS),
         };
+        let guilds = &self.guilds;
+        let dms = &self.dms;
+        let is_member = |id: &str| guilds.iter().any(|g| g.id == id) || dms.channel(id).is_some();
+        let is_bot = self.me.as_ref().is_some_and(|u| u.bot);
+        let invite_parts = self.invites.as_ref().map(|s| InviteParts {
+            cache: &s.cache,
+            is_member: &is_member,
+            can_join: !is_bot,
+            my_id: &my_id,
+        });
         let react_parts = self.reactions.as_ref().map(|state| ReactParts {
             images: config.modules.emoji_images,
             can_react: self.has_perm(&channel_id, perms::ADD_REACTIONS)
@@ -3868,6 +4212,7 @@ impl State {
                         highlight: flash.as_ref() == Some(&m.id),
                         menu: &menu,
                         reactions: react_parts.as_ref(),
+                        invites: invite_parts.as_ref(),
                     };
                     let body = Body {
                         blocks: &parsed[i].0,
@@ -3960,6 +4305,7 @@ impl State {
                 self.revealed_blocked.insert(id);
             }
             Some(MessageAction::JumpTo(id)) => self.jump_to(channel_id.clone(), id),
+            Some(MessageAction::Invite(a)) => self.invite_action(a, &ctx, config),
             Some(MessageAction::CreateThread(id, content)) => {
                 if let Some(ts) = &mut self.threads {
                     ts.dialog = Some(ThreadDialog::from_message(&channel_id, &id, &content));
@@ -4163,6 +4509,20 @@ impl State {
 
     fn composer_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         if self.home_page_open() || self.selected_is_forum() {
+            return;
+        }
+        // --- onboarding --- rules screening not done: no composer, just the
+        // "Complete these steps" banner (sending is disabled).
+        if self.invites.is_some()
+            && let Some(gid) = self
+                .current_guild()
+                .filter(|g| g.my_pending)
+                .map(|g| g.id.clone())
+        {
+            ui.add_space(8.0);
+            if crate::screening::pending_banner(ui, pal) {
+                self.open_screening(&gid);
+            }
             return;
         }
         let Some(channel_id) = self.selected_channel.clone() else {
@@ -5131,6 +5491,7 @@ impl State {
             self.search_popup(ctx, config, pal);
         }
         self.thread_dialogs(ctx, config, pal);
+        self.invite_dialogs(ctx, config, pal);
         if let Some(w) = &mut self.link_warning
             && let Some(decision) = w.show(ctx, pal)
         {
@@ -6327,6 +6688,10 @@ struct RailEvents {
     toggle_folder: Option<i64>,
     /// (id, name) of a server to leave (after confirming).
     leave: Option<(String, String)>,
+    /// The rail's "+" (Add a Server).
+    add_server: bool,
+    /// Guild context menu → Channels & Roles.
+    channels_roles: Option<String>,
 }
 
 /// Up to three initials of a server name ("RustCord Test Server" → "RTS").
@@ -6527,6 +6892,8 @@ struct RowCtx<'a> {
     menu: &'a MenuCtx,
     /// Reactions module (None = off).
     reactions: Option<&'a ReactParts<'a>>,
+    /// Invites module (None = off).
+    invites: Option<&'a InviteParts<'a>>,
 }
 
 /// A message's parsed content.
@@ -6659,6 +7026,11 @@ fn message_row(
                                 });
                             }
                             message_content(ui, m, body, rc, config, pal, &mut action);
+                            if let Some(ip) = rc.invites
+                                && let Some(a) = invite_cards(ui, m, ip, pal)
+                            {
+                                action = Some(MessageAction::Invite(a));
+                            }
                             if let Some(rp) = rc.reactions
                                 && let Some(a) = reaction_row(ui, m, rp, pal)
                             {
@@ -7258,6 +7630,40 @@ fn reaction_row(
     };
     ui.add_space(2.0);
     reactions::reaction_bar(ui, &m.reactions, &ctx)
+}
+
+// --- onboarding ---
+/// Invite cards for the invite links in a message (at most
+/// `invites::MAX_CARDS_PER_MESSAGE`).
+fn invite_cards(
+    ui: &mut egui::Ui,
+    m: &Message,
+    ip: &InviteParts,
+    pal: &Palette,
+) -> Option<InviteAction> {
+    // Cheap pre-check before the full scan.
+    if !(m.content.contains("discord.gg") || m.content.contains("/invite/")) {
+        return None;
+    }
+    let mut action = None;
+    let cx = CardCtx {
+        pal,
+        cache: ip.cache,
+        is_member: ip.is_member,
+        can_join: ip.can_join,
+        sent_by_me: m.author.id == ip.my_id,
+        button: true,
+    };
+    for code in invites::extract_invite_codes(&m.content)
+        .iter()
+        .take(invites::MAX_CARDS_PER_MESSAGE)
+    {
+        ui.add_space(4.0);
+        if let Some(a) = invites::invite_card(ui, code, &cx) {
+            action = Some(a);
+        }
+    }
+    action
 }
 
 /// The hover bar's Add Reaction button and its picker popup.

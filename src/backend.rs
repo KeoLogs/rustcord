@@ -448,6 +448,40 @@ async fn run(
                     .set_note(&user_id, &note)
                     .await
                     .map(|_| Some(ToUi::Note { user_id, note })),
+                // --- onboarding --- (user accounts; writes only from clicks)
+                ToBackend::JoinInvite { code } if is_bot => Ok(Some(ToUi::InviteJoined {
+                    code,
+                    outcome: crate::invites::JoinOutcome::Failed(
+                        "Bots can't join servers through invites".into(),
+                    ),
+                })),
+                ToBackend::ResolveInvite { code } => Ok(Some(ToUi::InviteResolved {
+                    result: crate::invites::fetch(&api, &code).await,
+                    code,
+                })),
+                ToBackend::JoinInvite { code } => Ok(Some(ToUi::InviteJoined {
+                    outcome: crate::invites::join(&api, &code).await,
+                    code,
+                })),
+                ToBackend::LoadScreening { guild_id } => Ok(Some(ToUi::ScreeningLoaded {
+                    result: crate::screening::load(&api, &guild_id).await,
+                    guild_id,
+                })),
+                ToBackend::SubmitScreening { guild_id, body } => {
+                    Ok(Some(ToUi::ScreeningSubmitted {
+                        result: crate::screening::submit(&api, &guild_id, &body).await,
+                        guild_id,
+                    }))
+                }
+                ToBackend::LoadOnboarding { guild_id, page } => Ok(Some(ToUi::OnboardingLoaded {
+                    result: crate::onboarding::load(&api, &guild_id).await,
+                    guild_id,
+                    page,
+                })),
+                ToBackend::SubmitOnboarding { guild_id, body } => Ok(Some(ToUi::OnboardingSaved {
+                    result: crate::onboarding::submit(&api, &guild_id, &body).await,
+                    guild_id,
+                })),
                 // --- threads ---
                 ToBackend::LoadActiveThreads { guild_id } => {
                     Ok(Some(match api.active_guild_threads(&guild_id).await {

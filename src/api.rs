@@ -500,6 +500,116 @@ impl Api {
         Ok(Self::check(resp, "Saving settings").await?.json().await?)
     }
 
+    // --- onboarding ---
+    // Invites, rules screening and server onboarding. Join / submit only
+    // after the user pressed the button; never retried.
+
+    /// Send a request and return the HTTP status with the JSON body (`Null`
+    /// if the body isn't JSON). For callers that need Discord's error codes
+    /// (invites: captcha, unknown invite, banned…) instead of a flat error.
+    /// Goes through the 429 layer (a 429 comes back as `RateLimited`).
+    async fn status_and_json(
+        &self,
+        request: reqwest::RequestBuilder,
+        what: &str,
+    ) -> Result<(u16, Value)> {
+        let resp = self
+            .send(request.header("Authorization", &self.auth))
+            .await
+            .with_context(|| format!("{what} request failed"))?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
+    }
+
+    /// Invite preview (`GET invites/{code}?with_counts&with_expiration`).
+    /// Status + body; `invites::classify_fetch` turns it into a result.
+    /// `code` must come from `invites::parse_invite_input` / extraction
+    /// (only `[A-Za-z0-9-]`).
+    pub async fn get_invite(&self, code: &str) -> Result<(u16, Value)> {
+        let url = format!("{API_BASE}/invites/{code}?with_counts=true&with_expiration=true");
+        self.status_and_json(self.http.get(url), "invite").await
+    }
+
+    /// Join through an invite (`POST invites/{code}` with `{}`). User
+    /// accounts only, and only after the user pressed Join. Status + body;
+    /// see `invites::classify_join`.
+    pub async fn join_invite(&self, code: &str) -> Result<(u16, Value)> {
+        let req = self
+            .http
+            .post(format!("{API_BASE}/invites/{code}"))
+            .json(&json!({}));
+        self.status_and_json(req, "join").await
+    }
+
+    /// Membership screening form (rules) of a server.
+    pub async fn member_verification(&self, guild_id: &str) -> Result<Value> {
+        let resp = self
+            .send(
+                self.http
+                    .get(format!(
+                        "{API_BASE}/guilds/{guild_id}/member-verification?with_guild=false"
+                    ))
+                    .header("Authorization", &self.auth),
+            )
+            .await
+            .context("rules request failed")?;
+        Ok(Self::check(resp, "Loading server rules")
+            .await?
+            .json()
+            .await?)
+    }
+
+    /// Submit the screening form (`PUT guilds/{id}/requests/@me`); `body`
+    /// is `screening::ScreeningForm::payload`. Only after the user pressed
+    /// Submit.
+    pub async fn submit_member_verification(&self, guild_id: &str, body: &Value) -> Result<Value> {
+        let resp = self
+            .send(
+                self.http
+                    .put(format!("{API_BASE}/guilds/{guild_id}/requests/@me"))
+                    .header("Authorization", &self.auth)
+                    .json(body),
+            )
+            .await
+            .context("rules request failed")?;
+        let resp = Self::check(resp, "Submitting server rules").await?;
+        Ok(resp.json().await.unwrap_or(Value::Null))
+    }
+
+    /// Server onboarding questions (`GET guilds/{id}/onboarding`).
+    pub async fn guild_onboarding(&self, guild_id: &str) -> Result<Value> {
+        let resp = self
+            .send(
+                self.http
+                    .get(format!("{API_BASE}/guilds/{guild_id}/onboarding"))
+                    .header("Authorization", &self.auth),
+            )
+            .await
+            .context("onboarding request failed")?;
+        Ok(Self::check(resp, "Loading onboarding")
+            .await?
+            .json()
+            .await?)
+    }
+
+    /// Save onboarding answers (`PUT guilds/{id}/onboarding-responses`);
+    /// `body` is `onboarding::OnboardingFlow::payload`. Only after the user
+    /// pressed Finish / Save.
+    pub async fn put_onboarding_responses(&self, guild_id: &str, body: &Value) -> Result<Value> {
+        let resp = self
+            .send(
+                self.http
+                    .put(format!("{API_BASE}/guilds/{guild_id}/onboarding-responses"))
+                    .header("Authorization", &self.auth)
+                    .json(body),
+            )
+            .await
+            .context("onboarding request failed")?;
+        let resp = Self::check(resp, "Saving onboarding answers").await?;
+        Ok(resp.json().await.unwrap_or(Value::Null))
+    }
+
     /// Show the typing indicator to others for ~10 seconds.
     pub async fn trigger_typing(&self, channel_id: &str) -> Result<()> {
         let resp = self
