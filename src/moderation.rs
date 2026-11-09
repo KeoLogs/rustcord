@@ -199,7 +199,11 @@ pub fn member_context_menu(ui: &mut egui::Ui, ctx: &AdminCtx, t: &ModTarget) -> 
     let mut out = None;
     let me = t.user_id == a.user_id;
     if a.can_change_nick(&t.user_id, &t.roles) {
-        let label = if me { "Change Nickname" } else { "Change Nickname…" };
+        let label = if me {
+            "Change Nickname"
+        } else {
+            "Change Nickname…"
+        };
         if ui.button(label).clicked() {
             out = Some(ModAction::Nickname(t.clone()));
             ui.close();
@@ -212,19 +216,21 @@ pub fn member_context_menu(ui: &mut egui::Ui, ctx: &AdminCtx, t: &ModTarget) -> 
         .collect();
     if !assignable.is_empty() {
         ui.menu_button("Roles", |ui| {
-            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                for r in assignable {
-                    let mut has = t.roles.contains(&r.id);
-                    let text = RichText::new(&r.name).color(r.color32().unwrap_or(pal.text));
-                    if ui.checkbox(&mut has, text).changed() {
-                        out = Some(ModAction::SetRole {
-                            user_id: t.user_id.clone(),
-                            role_id: r.id.clone(),
-                            add: has,
-                        });
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    for r in assignable {
+                        let mut has = t.roles.contains(&r.id);
+                        let text = RichText::new(&r.name).color(r.color32().unwrap_or(pal.text));
+                        if ui.checkbox(&mut has, text).changed() {
+                            out = Some(ModAction::SetRole {
+                                user_id: t.user_id.clone(),
+                                role_id: r.id.clone(),
+                                add: has,
+                            });
+                        }
                     }
-                }
-            });
+                });
         });
     }
     let can_timeout = a.can_timeout(&t.user_id, &t.roles);
@@ -268,10 +274,24 @@ pub fn member_context_menu(ui: &mut egui::Ui, ctx: &AdminCtx, t: &ModTarget) -> 
 
 #[derive(Debug, Clone)]
 enum Dialog {
-    Nickname { t: ModTarget, text: String },
-    Timeout { t: ModTarget, secs: u32, reason: String },
-    Kick { t: ModTarget, reason: String },
-    Ban { t: ModTarget, delete_secs: u32, reason: String },
+    Nickname {
+        t: ModTarget,
+        text: String,
+    },
+    Timeout {
+        t: ModTarget,
+        secs: u32,
+        reason: String,
+    },
+    Kick {
+        t: ModTarget,
+        reason: String,
+    },
+    Ban {
+        t: ModTarget,
+        delete_secs: u32,
+        reason: String,
+    },
 }
 
 /// The nickname / timeout / kick / ban dialogs.
@@ -614,7 +634,11 @@ impl MembersPage {
 
     /// Draw the page. Returns a REST action and/or a moderation pick (pass
     /// the latter to `ModDialogs::handle`).
-    pub fn show(&mut self, ui: &mut egui::Ui, ctx: &AdminCtx) -> (Option<AdminAction>, Option<ModAction>) {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &AdminCtx,
+    ) -> (Option<AdminAction>, Option<ModAction>) {
         let pal = ctx.pal;
         let gid = ctx.guild_id().to_string();
         let mut action = None;
@@ -629,7 +653,13 @@ impl MembersPage {
         ui.heading("Server Members");
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let r = ga::search_box(ui, &mut self.query, "Search by username or nickname", 300.0, pal);
+            let r = ga::search_box(
+                ui,
+                &mut self.query,
+                "Search by username or nickname",
+                300.0,
+                pal,
+            );
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui.button("Search").clicked() || enter {
                 let q = self.query.trim().to_string();
@@ -696,7 +726,15 @@ impl MembersPage {
                     );
                     let t = m.target();
                     let ui = &mut child;
-                    ga::avatar(ui, 32.0, &m.user.id, m.name(), &m.user.avatar_url, ctx, &mut self.uris);
+                    ga::avatar(
+                        ui,
+                        32.0,
+                        &m.user.id,
+                        m.name(),
+                        &m.user.avatar_url,
+                        ctx,
+                        &mut self.uris,
+                    );
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             let col = role_color(ctx.actor.roles, &m.roles).unwrap_or(pal.text);
@@ -893,7 +931,13 @@ impl BansPage {
                 .color(pal.muted),
         );
         ui.add_space(8.0);
-        ga::search_box(ui, &mut self.filter, "Search bans by user ID or username", 320.0, pal);
+        ga::search_box(
+            ui,
+            &mut self.filter,
+            "Search bans by user ID or username",
+            320.0,
+            pal,
+        );
         if let Some(e) = &self.error {
             ui.add_space(4.0);
             ga::error_line(ui, pal, e);
@@ -917,7 +961,9 @@ impl BansPage {
         ui.label(pal.section_label(&format!("{} bans", shown.len())));
         if rows.is_empty() {
             ui.add_space(20.0);
-            ui.label(RichText::new("No bans. Nobody has been banned from this server.").color(pal.muted));
+            ui.label(
+                RichText::new("No bans. Nobody has been banned from this server.").color(pal.muted),
+            );
         }
         egui::ScrollArea::vertical()
             .id_salt("rc_admin_bans")
@@ -934,7 +980,15 @@ impl BansPage {
                             .max_rect(rect.shrink2(vec2(8.0, 4.0)))
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     );
-                    ga::avatar(&mut child, 32.0, &b.user.id, &b.user.name, &b.user.avatar_url, ctx, &mut self.uris);
+                    ga::avatar(
+                        &mut child,
+                        32.0,
+                        &b.user.id,
+                        &b.user.name,
+                        &b.user.avatar_url,
+                        ctx,
+                        &mut self.uris,
+                    );
                     child.vertical(|ui| {
                         ui.label(RichText::new(&b.user.name).bold().color(pal.text));
                         ui.label(RichText::new(&b.user.username).small().color(pal.muted));
@@ -983,7 +1037,10 @@ impl BansPage {
                 pal,
                 "unban",
                 "Revoke Ban",
-                &format!("Unban {}? They will be able to rejoin with an invite.", b.user.name),
+                &format!(
+                    "Unban {}? They will be able to rejoin with an invite.",
+                    b.user.name
+                ),
                 "Revoke Ban",
             ) {
                 Some(true) => {
@@ -1016,7 +1073,10 @@ mod tests {
         assert_eq!(timeout_until(now, 86_400).unwrap(), "2025-11-10T12:00:00Z");
         assert_eq!(timeout_until(now, 604_800).unwrap(), "2025-11-16T12:00:00Z");
         // Clamped to 28 days.
-        assert_eq!(timeout_until(now, u32::MAX).unwrap(), "2025-12-07T12:00:00Z");
+        assert_eq!(
+            timeout_until(now, u32::MAX).unwrap(),
+            "2025-12-07T12:00:00Z"
+        );
         // Round trip through the ISO parser.
         let s = timeout_until(now, 3600).unwrap();
         assert_eq!(timefmt::parse_iso(&s), now + 3600);

@@ -67,7 +67,13 @@ pub fn name_from_file(file_name: &str) -> String {
     };
     let mut name: String = stem
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(MAX_NAME)
         .collect();
     while name.chars().count() < MIN_NAME {
@@ -95,7 +101,9 @@ impl ImageKind {
             Some(ImageKind::Gif)
         } else if b.len() >= 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" {
             Some(ImageKind::Webp)
-        } else if b.len() >= 12 && &b[4..8] == b"ftyp" && (&b[8..12] == b"avif" || &b[8..12] == b"avis")
+        } else if b.len() >= 12
+            && &b[4..8] == b"ftyp"
+            && (&b[8..12] == b"avif" || &b[8..12] == b"avis")
         {
             Some(ImageKind::Avif)
         } else {
@@ -206,7 +214,10 @@ impl EmojiRow {
     /// Same URL as the chat uses, so the texture is shared.
     pub fn url(&self) -> String {
         let ext = if self.animated { "gif" } else { "png" };
-        format!("https://cdn.discordapp.com/emojis/{}.{ext}?size=48", self.id)
+        format!(
+            "https://cdn.discordapp.com/emojis/{}.{ext}?size=48",
+            self.id
+        )
     }
 }
 
@@ -324,7 +335,10 @@ impl EmojiPage {
         ui.horizontal(|ui| {
             let full = st >= max && an >= max;
             if ui
-                .add_enabled(can_upload && !full && self.upload.is_none(), pal.primary_button("Upload Emoji"))
+                .add_enabled(
+                    can_upload && !full && self.upload.is_none(),
+                    pal.primary_button("Upload Emoji"),
+                )
                 .clicked()
             {
                 action = Some(AdminAction::PickEmojiFile);
@@ -391,7 +405,10 @@ impl EmojiPage {
                     }
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(problem.is_none() && !self.uploading, pal.primary_button("Upload"))
+                            .add_enabled(
+                                problem.is_none() && !self.uploading,
+                                pal.primary_button("Upload"),
+                            )
                             .clicked()
                         {
                             self.uploading = true;
@@ -408,10 +425,8 @@ impl EmojiPage {
                         }
                     });
                 });
-            if cancel {
-                if let Some(u) = self.upload.take() {
-                    ui.ctx().forget_image(&u.preview_uri);
-                }
+            if cancel && let Some(u) = self.upload.take() {
+                ui.ctx().forget_image(&u.preview_uri);
             }
         }
 
@@ -435,7 +450,8 @@ impl EmojiPage {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 for animated in [false, true] {
-                    let rows: Vec<&EmojiRow> = list.iter().filter(|e| e.animated == animated).collect();
+                    let rows: Vec<&EmojiRow> =
+                        list.iter().filter(|e| e.animated == animated).collect();
                     let n = if animated { an } else { st };
                     ui.add_space(8.0);
                     ui.label(pal.section_label(&format!(
@@ -477,7 +493,12 @@ impl EmojiPage {
         action
     }
 
-    fn emoji_row(&mut self, ui: &mut egui::Ui, ctx: &AdminCtx, e: &EmojiRow) -> Option<AdminAction> {
+    fn emoji_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &AdminCtx,
+        e: &EmojiRow,
+    ) -> Option<AdminAction> {
         let pal = ctx.pal;
         let mut action = None;
         let can = ctx
@@ -597,7 +618,10 @@ mod tests {
         webp[20] = 0;
         assert!(!is_animated(ImageKind::Webp, &webp));
 
-        assert_eq!(ImageKind::detect(b"\0\0\0\x1cftypavif"), Some(ImageKind::Avif));
+        assert_eq!(
+            ImageKind::detect(b"\0\0\0\x1cftypavif"),
+            Some(ImageKind::Avif)
+        );
         assert!(prepare_upload("x.txt", b"hello world").is_err());
 
         // 256 KB exactly is fine, one byte more isn't.
@@ -611,7 +635,10 @@ mod tests {
 
     #[test]
     fn slots_and_list() {
-        assert_eq!([slots(0), slots(1), slots(2), slots(3)], [50, 100, 150, 250]);
+        assert_eq!(
+            [slots(0), slots(1), slots(2), slots(3)],
+            [50, 100, 150, 250]
+        );
         let v = json!([
             { "id": "1", "name": "pog", "animated": false, "user": { "id": "9", "username": "leo" } },
             { "id": "2", "name": "dance", "animated": true, "available": false },
@@ -622,11 +649,19 @@ mod tests {
         assert_eq!(used(&list), (1, 1));
         assert_eq!(list[0].uploader.as_ref().unwrap().id, "9");
         assert!(!list[1].available);
-        assert_eq!(list[1].url(), "https://cdn.discordapp.com/emojis/2.gif?size=48");
+        assert_eq!(
+            list[1].url(),
+            "https://cdn.discordapp.com/emojis/2.gif?size=48"
+        );
 
         let mut page = EmojiPage::default();
         let g = "g".to_string();
-        page.on_result(&AdminAction::LoadEmojis { guild_id: g.clone() }, &Ok(AdminOutcome::Json(v)));
+        page.on_result(
+            &AdminAction::LoadEmojis {
+                guild_id: g.clone(),
+            },
+            &Ok(AdminOutcome::Json(v)),
+        );
         page.on_result(
             &AdminAction::RenameEmoji {
                 guild_id: g.clone(),

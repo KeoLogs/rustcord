@@ -92,7 +92,12 @@ impl RoleInfo {
     pub fn parse_list(v: &Value) -> Vec<RoleInfo> {
         let mut list: Vec<RoleInfo> = v
             .as_array()
-            .map(|a| a.iter().map(RoleInfo::from_json).filter(|r| !r.role.id.is_empty()).collect())
+            .map(|a| {
+                a.iter()
+                    .map(RoleInfo::from_json)
+                    .filter(|r| !r.role.id.is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
         sort_infos(&mut list);
         list
@@ -348,7 +353,11 @@ impl RolesPage {
 
     fn remove(&mut self, role_id: &str) {
         if let Some(list) = self.roles.get() {
-            let list = list.iter().filter(|r| r.role.id != role_id).cloned().collect();
+            let list = list
+                .iter()
+                .filter(|r| r.role.id != role_id)
+                .cloned()
+                .collect();
             self.set_roles(list);
         }
         self.member_ids.remove(role_id);
@@ -403,7 +412,8 @@ impl RolesPage {
                 match action {
                     LoadRoles { .. } => self.roles = Load::Failed(e.clone()),
                     LoadRoleMemberIds { role_id, .. } => {
-                        self.member_ids.insert(role_id.clone(), Load::Failed(e.clone()));
+                        self.member_ids
+                            .insert(role_id.clone(), Load::Failed(e.clone()));
                     }
                     SearchMembers { .. } => self.found = Load::Failed(e.clone()),
                     _ => self.error = Some(e.clone()),
@@ -441,7 +451,12 @@ impl RolesPage {
             LoadRoleMemberIds { role_id, .. } => {
                 let ids = value
                     .as_array()
-                    .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
                     .unwrap_or_default();
                 self.member_ids.insert(role_id.clone(), Load::Loaded(ids));
             }
@@ -535,7 +550,9 @@ impl RolesPage {
                 pal,
                 "delete_role",
                 "Delete Role",
-                &format!("Are you sure you want to delete the role '{name}'? This cannot be undone."),
+                &format!(
+                    "Are you sure you want to delete the role '{name}'? This cannot be undone."
+                ),
                 "Okay",
             ) {
                 Some(true) => {
@@ -555,7 +572,12 @@ impl RolesPage {
     }
 
     /// The role list.
-    fn overview(&mut self, ui: &mut egui::Ui, ctx: &AdminCtx, actor: &Actor) -> Option<AdminAction> {
+    fn overview(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &AdminCtx,
+        actor: &Actor,
+    ) -> Option<AdminAction> {
         let pal = ctx.pal;
         let gid = ctx.guild_id().to_string();
         let mut action = None;
@@ -583,7 +605,11 @@ impl RolesPage {
                         let (r, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
                         ga::paint_icon(ui.painter(), r, Icon::Shield, pal.muted);
                         ui.vertical(|ui| {
-                            ui.label(RichText::new("Default Permissions").bold().color(pal.strong));
+                            ui.label(
+                                RichText::new("Default Permissions")
+                                    .bold()
+                                    .color(pal.strong),
+                            );
                             ui.label(
                                 RichText::new("@everyone · applies to all server members")
                                     .small()
@@ -620,9 +646,11 @@ impl RolesPage {
         let list = movable(&roles, &gid);
         ui.label(pal.section_label(&format!("Roles — {}", list.len())));
         ui.label(
-            RichText::new("Drag roles to reorder them. You can only move roles below your highest role.")
-                .small()
-                .color(pal.muted),
+            RichText::new(
+                "Drag roles to reorder them. You can only move roles below your highest role.",
+            )
+            .small()
+            .color(pal.muted),
         );
         ui.add_space(4.0);
         let filter = self.filter.trim().to_lowercase();
@@ -663,7 +691,10 @@ impl RolesPage {
                         if editable {
                             ga::paint_icon(
                                 ui.painter(),
-                                egui::Rect::from_center_size(egui::pos2(x + 6.0, cy), vec2(12.0, 14.0)),
+                                egui::Rect::from_center_size(
+                                    egui::pos2(x + 6.0, cy),
+                                    vec2(12.0, 14.0),
+                                ),
                                 Icon::Grip,
                                 pal.muted,
                             );
@@ -677,7 +708,8 @@ impl RolesPage {
                         } else {
                             rgb(info.role.color)
                         };
-                        ui.painter().circle_filled(egui::pos2(x + 7.0, cy), 7.0, col);
+                        ui.painter()
+                            .circle_filled(egui::pos2(x + 7.0, cy), 7.0, col);
                         x += 22.0;
                         let galley = ui.painter().layout_no_wrap(
                             info.role.name.clone(),
@@ -685,8 +717,11 @@ impl RolesPage {
                             pal.text,
                         );
                         let w = galley.size().x;
-                        ui.painter()
-                            .galley(egui::pos2(x, cy - galley.size().y / 2.0), galley, pal.text);
+                        ui.painter().galley(
+                            egui::pos2(x, cy - galley.size().y / 2.0),
+                            galley,
+                            pal.text,
+                        );
                         if let Some(tag) = kind_label(info.kind) {
                             ui.painter().text(
                                 egui::pos2(x + w + 8.0, cy),
@@ -722,8 +757,7 @@ impl RolesPage {
                         let ok = can_move(actor, &roles, p.0, to);
                         let y = if below { rect.bottom() } else { rect.top() };
                         let col = if ok { pal.accent } else { pal.danger };
-                        ui.painter()
-                            .hline(rect.x_range(), y, Stroke::new(2.0, col));
+                        ui.painter().hline(rect.x_range(), y, Stroke::new(2.0, col));
                     }
                     if let Some(p) = resp.dnd_release_payload::<RoleDrag>() {
                         let below = ui
@@ -753,7 +787,13 @@ impl RolesPage {
     }
 
     /// The role editor: role list on the left, tabs on the right.
-    fn editor(&mut self, ui: &mut egui::Ui, ctx: &AdminCtx, actor: &Actor, sel: &str) -> Option<AdminAction> {
+    fn editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &AdminCtx,
+        actor: &Actor,
+        sel: &str,
+    ) -> Option<AdminAction> {
         let pal = ctx.pal;
         let gid = ctx.guild_id().to_string();
         let roles = self.roles.get().cloned().unwrap_or_default();
@@ -823,8 +863,10 @@ impl RolesPage {
                 ui.label(pal.section_label(&format!("Edit role — {title}")));
                 if !editable {
                     ui.label(
-                        RichText::new("You can't edit this role: it's at or above your highest role.")
-                            .color(pal.idle),
+                        RichText::new(
+                            "You can't edit this role: it's at or above your highest role.",
+                        )
+                        .color(pal.idle),
                     );
                 }
                 ui.add_space(6.0);
@@ -912,9 +954,9 @@ impl RolesPage {
                                                 .fill(pal.online)
                                                 .corner_radius(4),
                                             )
-                                            .on_disabled_hover_text(problem.unwrap_or(
-                                                "You can't edit this role.",
-                                            ));
+                                            .on_disabled_hover_text(
+                                                problem.unwrap_or("You can't edit this role."),
+                                            );
                                         if save.clicked() {
                                             action = Some(AdminAction::EditRole {
                                                 guild_id: gid.clone(),
@@ -966,9 +1008,11 @@ impl RolesPage {
         ui.add_space(14.0);
         ui.label(pal.section_label("Role colour *"));
         ui.label(
-            RichText::new("Members use the colour of the highest role they have on the roles list.")
-                .small()
-                .color(pal.muted),
+            RichText::new(
+                "Members use the colour of the highest role they have on the roles list.",
+            )
+            .small()
+            .color(pal.muted),
         );
         ui.add_space(4.0);
         ui.add_enabled_ui(editable, |ui| {
@@ -1007,7 +1051,13 @@ impl RolesPage {
         None
     }
 
-    fn permissions_tab(&mut self, ui: &mut egui::Ui, ctx: &AdminCtx, actor: &Actor, editable: bool) {
+    fn permissions_tab(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &AdminCtx,
+        actor: &Actor,
+        editable: bool,
+    ) {
         let pal = ctx.pal;
         let grantable = actor.grantable();
         let Some(d) = &mut self.draft else {
@@ -1018,7 +1068,10 @@ impl RolesPage {
             ga::search_box(ui, &mut self.perm_filter, "Search permissions", 260.0, pal);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add_enabled(editable, egui::Button::new("Clear permissions").frame(false))
+                    .add_enabled(
+                        editable,
+                        egui::Button::new("Clear permissions").frame(false),
+                    )
                     .clicked()
                 {
                     d.clear_permissions(grantable);
@@ -1093,7 +1146,13 @@ impl RolesPage {
         }
     }
 
-    fn members_tab(&mut self, ui: &mut egui::Ui, ctx: &AdminCtx, actor: &Actor, orig: &RoleInfo) -> Option<AdminAction> {
+    fn members_tab(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &AdminCtx,
+        actor: &Actor,
+        orig: &RoleInfo,
+    ) -> Option<AdminAction> {
         let pal = ctx.pal;
         let gid = ctx.guild_id().to_string();
         let rid = orig.role.id.clone();
@@ -1114,7 +1173,13 @@ impl RolesPage {
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let r = ga::search_box(ui, &mut self.member_query, "Search members to add", 260.0, pal);
+            let r = ga::search_box(
+                ui,
+                &mut self.member_query,
+                "Search members to add",
+                260.0,
+                pal,
+            );
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (ui.button("Search").clicked() || enter) && !self.member_query.trim().is_empty() {
                 self.found = Load::Loading;
@@ -1138,13 +1203,24 @@ impl RolesPage {
                 for m in rows.clone() {
                     let has = m.roles.contains(&rid);
                     ui.horizontal(|ui| {
-                        ga::avatar(ui, 24.0, &m.user.id, m.name(), &m.user.avatar_url, ctx, &mut self.uris);
+                        ga::avatar(
+                            ui,
+                            24.0,
+                            &m.user.id,
+                            m.name(),
+                            &m.user.avatar_url,
+                            ctx,
+                            &mut self.uris,
+                        );
                         ui.label(RichText::new(m.name()).color(pal.text));
                         ui.label(RichText::new(&m.user.username).small().color(pal.muted));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if has {
                                 ui.label(RichText::new("Has role").small().color(pal.muted));
-                            } else if ui.add_enabled(can_assign, egui::Button::new("Add")).clicked() {
+                            } else if ui
+                                .add_enabled(can_assign, egui::Button::new("Add"))
+                                .clicked()
+                            {
                                 action = Some(AdminAction::AddMemberRole {
                                     guild_id: gid.clone(),
                                     user_id: m.user.id.clone(),
@@ -1236,7 +1312,14 @@ fn lock_icon(painter: &egui::Painter, c: egui::Pos2, col: Color32) {
 }
 
 /// A title (+ optional note) with a toggle on the right.
-fn setting_row(ui: &mut egui::Ui, pal: &Palette, title: &str, note: Option<&str>, on: &mut bool, enabled: bool) {
+fn setting_row(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    title: &str,
+    note: Option<&str>,
+    on: &mut bool,
+    enabled: bool,
+) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.set_width((ui.available_width() - 56.0).max(100.0));
@@ -1267,16 +1350,21 @@ pub fn color_picker(ui: &mut egui::Ui, color: &mut u32, pal: &Palette) {
         ui.vertical(|ui| {
             let r = egui::color_picker::color_edit_button_srgb(ui, &mut rgb3);
             if r.changed() {
-                *color = (u32::from(rgb3[0]) << 16) | (u32::from(rgb3[1]) << 8) | u32::from(rgb3[2]);
+                *color =
+                    (u32::from(rgb3[0]) << 16) | (u32::from(rgb3[1]) << 8) | u32::from(rgb3[2]);
                 // 0 would mean "no colour".
                 if *color == 0 {
                     *color = 1;
                 }
             }
             ui.label(
-                RichText::new(if custom { "Custom (selected)" } else { "Custom" })
-                    .small()
-                    .color(pal.muted),
+                RichText::new(if custom {
+                    "Custom (selected)"
+                } else {
+                    "Custom"
+                })
+                .small()
+                .color(pal.muted),
             );
         });
         ui.add_space(6.0);
@@ -1305,18 +1393,32 @@ pub fn color_picker(ui: &mut egui::Ui, color: &mut u32, pal: &Palette) {
     );
 }
 
-fn swatch(ui: &mut egui::Ui, size: egui::Vec2, col: Color32, selected: bool, pal: &Palette) -> egui::Response {
+fn swatch(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    col: Color32,
+    selected: bool,
+    pal: &Palette,
+) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if ui.is_rect_visible(rect) {
         ui.painter().rect_filled(rect, 4, col);
         if resp.hovered() {
-            ui.painter()
-                .rect_stroke(rect, 4, Stroke::new(1.5, pal.strong), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(
+                rect,
+                4,
+                Stroke::new(1.5, pal.strong),
+                egui::StrokeKind::Inside,
+            );
         }
         if selected {
             // Check mark in black or white, whichever reads on the colour.
             let lum = 0.299 * col.r() as f32 + 0.587 * col.g() as f32 + 0.114 * col.b() as f32;
-            let mark = if lum > 150.0 { Color32::BLACK } else { Color32::WHITE };
+            let mark = if lum > 150.0 {
+                Color32::BLACK
+            } else {
+                Color32::WHITE
+            };
             let c = rect.center();
             let s = (size.y * 0.22).min(8.0);
             let st = Stroke::new(2.0, mark);
@@ -1395,12 +1497,22 @@ mod tests {
     #[test]
     fn reorder_with_gaps_and_duplicates() {
         // Gaps keep the existing slots.
-        let mut roles = vec![info("g", 0, 0), info("x", 10, 0), info("y", 7, 0), info("z", 2, 0)];
+        let mut roles = vec![
+            info("g", 0, 0),
+            info("x", 10, 0),
+            info("y", 7, 0),
+            info("z", 2, 0),
+        ];
         sort_infos(&mut roles);
         let p = reorder_payload(&roles, "g", 2, 0);
         assert_eq!(p, vec![("z".into(), 10), ("x".into(), 7), ("y".into(), 2)]);
         // Duplicate positions: renumber everything n..1.
-        let mut roles = vec![info("g", 0, 0), info("1", 1, 0), info("2", 1, 0), info("3", 1, 0)];
+        let mut roles = vec![
+            info("g", 0, 0),
+            info("1", 1, 0),
+            info("2", 1, 0),
+            info("3", 1, 0),
+        ];
         sort_infos(&mut roles);
         // Order (same position, older id first): 1 2 3. Move 3 to the top.
         let p = reorder_payload(&roles, "g", 2, 0);
@@ -1422,7 +1534,10 @@ mod tests {
         // c (2) and d (3) are below b (1).
         assert!(can_move(&me, &roles, 3, 2));
         assert!(can_move(&me, &roles, 2, 3));
-        assert!(!can_move(&me, &roles, 3, 1), "can't go to my own role's slot");
+        assert!(
+            !can_move(&me, &roles, 3, 1),
+            "can't go to my own role's slot"
+        );
         assert!(!can_move(&me, &roles, 3, 0), "can't go above my role");
         assert!(!can_move(&me, &roles, 1, 3), "can't move my own top role");
         assert!(!can_move(&me, &roles, 0, 3), "can't move a higher role");
@@ -1456,7 +1571,10 @@ mod tests {
         let mut d = RoleDraft::from_role(&orig);
         d.toggle_permission(pt::KICK_MEMBERS, pt::KICK_MEMBERS);
         d.toggle_permission(pt::ADMINISTRATOR, pt::KICK_MEMBERS);
-        assert_eq!(d.patch(&orig), json!({ "permissions": (8192 | 2).to_string() }));
+        assert_eq!(
+            d.patch(&orig),
+            json!({ "permissions": (8192 | 2).to_string() })
+        );
         d.clear_permissions(pt::KICK_MEMBERS);
         assert_eq!(d.permissions, 8192, "can't clear bits I don't have");
         d.clear_permissions(u64::MAX);

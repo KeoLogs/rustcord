@@ -49,6 +49,9 @@ pub const MAX_REASON: usize = 512;
 /// Discord's epoch (2015-01-01) in unix milliseconds.
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
+/// Looks up a display name (user or channel) for an id.
+pub type NameFn<'a> = &'a dyn Fn(&str) -> Option<String>;
+
 /// Everything a page needs to know about the server and me.
 pub struct AdminCtx<'a> {
     pub pal: &'a Palette,
@@ -61,9 +64,9 @@ pub struct AdminCtx<'a> {
     pub premium_tier: Option<u8>,
     /// Display name of a user id we already know (member cache), for ids
     /// the pages haven't seen in their own results.
-    pub name_of: Option<&'a dyn Fn(&str) -> Option<String>>,
+    pub name_of: Option<NameFn<'a>>,
     /// Channel name for an id (audit log targets).
-    pub channel_name: Option<&'a dyn Fn(&str) -> Option<String>>,
+    pub channel_name: Option<NameFn<'a>>,
 }
 
 impl<'a> AdminCtx<'a> {
@@ -373,7 +376,11 @@ impl AdminAction {
                 reason,
             } => RestRequest {
                 reason: encode_reason(reason),
-                ..req(Delete, format!("/guilds/{guild_id}/members/{user_id}"), None)
+                ..req(
+                    Delete,
+                    format!("/guilds/{guild_id}/members/{user_id}"),
+                    None,
+                )
             },
             Ban {
                 guild_id,
@@ -435,9 +442,11 @@ impl AdminAction {
                 format!("/guilds/{guild_id}/emojis/{emoji_id}"),
                 Some(json!({ "name": name })),
             ),
-            DeleteEmoji { guild_id, emoji_id } => {
-                req(Delete, format!("/guilds/{guild_id}/emojis/{emoji_id}"), None)
-            }
+            DeleteEmoji { guild_id, emoji_id } => req(
+                Delete,
+                format!("/guilds/{guild_id}/emojis/{emoji_id}"),
+                None,
+            ),
         })
     }
 
@@ -665,7 +674,12 @@ pub struct ServerAdmin {
 
 impl ServerAdmin {
     /// Draw one section (and any open moderation dialog).
-    pub fn show(&mut self, ui: &mut egui::Ui, ctx: &AdminCtx, section: Section) -> Option<AdminAction> {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &AdminCtx,
+        section: Section,
+    ) -> Option<AdminAction> {
         let action = match section {
             Section::Roles => self.roles.show(ui, ctx),
             Section::Members => {
@@ -777,8 +791,18 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
 }
 
 /// A square icon button with a hover background and tooltip.
-pub fn icon_button(ui: &mut egui::Ui, icon: Icon, tip: &str, pal: &Palette, enabled: bool) -> egui::Response {
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
+pub fn icon_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    tip: &str,
+    pal: &Palette,
+    enabled: bool,
+) -> egui::Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
     let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), sense);
     if ui.is_rect_visible(rect) {
         if enabled && resp.hovered() {
@@ -799,7 +823,11 @@ pub fn icon_button(ui: &mut egui::Ui, icon: Icon, tip: &str, pal: &Palette, enab
 /// Discord's toggle switch. Returns true when flipped.
 pub fn toggle(ui: &mut egui::Ui, on: &mut bool, enabled: bool, pal: &Palette) -> egui::Response {
     let size = vec2(40.0, 24.0);
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
     let (rect, mut resp) = ui.allocate_exact_size(size, sense);
     if enabled && resp.clicked() {
         *on = !*on;
@@ -813,7 +841,8 @@ pub fn toggle(ui: &mut egui::Ui, on: &mut bool, enabled: bool, pal: &Palette) ->
         if !enabled {
             track = track.gamma_multiply(0.5);
         }
-        ui.painter().rect_filled(rect, CornerRadius::same(12), track);
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(12), track);
         let x = egui::lerp(rect.left() + 12.0..=rect.right() - 12.0, t);
         ui.painter()
             .circle_filled(Pos2::new(x, rect.center().y), 9.0, Color32::WHITE);
@@ -822,7 +851,13 @@ pub fn toggle(ui: &mut egui::Ui, on: &mut bool, enabled: bool, pal: &Palette) ->
 }
 
 /// Single-line search field with a magnifier.
-pub fn search_box(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32, pal: &Palette) -> egui::Response {
+pub fn search_box(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+    pal: &Palette,
+) -> egui::Response {
     egui::Frame::new()
         .fill(pal.servers)
         .corner_radius(4)
@@ -896,7 +931,15 @@ pub fn confirm(
 }
 
 /// A round avatar (or coloured initial when images are off / no URL).
-pub fn avatar(ui: &mut egui::Ui, size: f32, user_id: &str, name: &str, url: &str, ctx: &AdminCtx, uris: &mut ImageUris) {
+pub fn avatar(
+    ui: &mut egui::Ui,
+    size: f32,
+    user_id: &str,
+    name: &str,
+    url: &str,
+    ctx: &AdminCtx,
+    uris: &mut ImageUris,
+) {
     let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
     if !ui.is_rect_visible(rect) {
         return;
@@ -915,7 +958,12 @@ pub fn avatar(ui: &mut egui::Ui, size: f32, user_id: &str, name: &str, url: &str
             .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
         let col = egui::ecolor::Hsva::new((hue % 360) as f32 / 360.0, 0.45, 0.6, 1.0);
         ui.painter().circle_filled(rect.center(), size / 2.0, col);
-        let letter = name.chars().next().unwrap_or('?').to_uppercase().to_string();
+        let letter = name
+            .chars()
+            .next()
+            .unwrap_or('?')
+            .to_uppercase()
+            .to_string();
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -1009,7 +1057,10 @@ mod tests {
         .request()
         .unwrap();
         assert_eq!(r.method, Method::Patch);
-        assert_eq!(r.body, Some(json!({ "communication_disabled_until": null })));
+        assert_eq!(
+            r.body,
+            Some(json!({ "communication_disabled_until": null }))
+        );
 
         let r = AdminAction::ReorderRoles {
             guild_id: g(),
@@ -1055,6 +1106,9 @@ mod tests {
         }
         .request()
         .unwrap();
-        assert_eq!((r.method, r.path.as_str()), (Method::Put, "/guilds/1/members/5/roles/7"));
+        assert_eq!(
+            (r.method, r.path.as_str()),
+            (Method::Put, "/guilds/1/members/5/roles/7")
+        );
     }
 }

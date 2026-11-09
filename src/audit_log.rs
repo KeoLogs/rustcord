@@ -122,8 +122,8 @@ pub fn kind_of(t: u16) -> Kind {
     match t {
         12 | 15 | 20 | 21 | 22 | 27 | 32 | 42 | 52 | 62 | 72 | 73 | 75 | 82 | 85 | 92 | 102
         | 112 | 132 | 142 | 143 | 145 | 165 => Kind::Delete,
-        10 | 13 | 23 | 28 | 30 | 40 | 50 | 60 | 74 | 80 | 83 | 90 | 100 | 110 | 130 | 140
-        | 163 | 166 | 190 => Kind::Create,
+        10 | 13 | 23 | 28 | 30 | 40 | 50 | 60 | 74 | 80 | 83 | 90 | 100 | 110 | 130 | 140 | 163
+        | 166 | 190 => Kind::Create,
         _ => Kind::Update,
     }
 }
@@ -258,7 +258,7 @@ pub struct Lookup<'a> {
     pub users: &'a HashMap<String, User>,
     pub names: &'a HashMap<String, String>,
     pub roles: &'a [Role],
-    pub channel_name: Option<&'a dyn Fn(&str) -> Option<String>>,
+    pub channel_name: Option<crate::guild_admin::NameFn<'a>>,
 }
 
 impl Lookup<'_> {
@@ -274,7 +274,10 @@ impl Lookup<'_> {
     }
 
     fn role(&self, id: &str) -> Option<String> {
-        self.roles.iter().find(|r| r.id == id).map(|r| r.name.clone())
+        self.roles
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.name.clone())
     }
 
     fn channel(&self, id: &str) -> Option<String> {
@@ -338,7 +341,10 @@ pub fn describe(e: &AuditEntry, l: &Lookup) -> String {
                     .or_else(|| l.role(id))
                     .unwrap_or_else(|| "a role".into())
             };
-            format!("{verb} permission overrides for {subject} in {}", channel(target))
+            format!(
+                "{verb} permission overrides for {subject} in {}",
+                channel(target)
+            )
         }
         20 => format!("kicked {}", target_user()),
         21 => format!(
@@ -414,7 +420,11 @@ pub fn describe(e: &AuditEntry, l: &Lookup) -> String {
             channel(target)
         ),
         74 => format!("pinned a message by {} in {}", target_user(), opt_channel()),
-        75 => format!("unpinned a message by {} in {}", target_user(), opt_channel()),
+        75 => format!(
+            "unpinned a message by {} in {}",
+            target_user(),
+            opt_channel()
+        ),
         80..=82 => {
             let verb = ["added", "updated", "removed"][(e.action_type - 80) as usize];
             format!("{verb} the integration {}", name("an integration"))
@@ -452,8 +462,14 @@ pub fn describe(e: &AuditEntry, l: &Lookup) -> String {
                 .unwrap_or_default();
             let ch = opt_channel();
             return match e.action_type {
-                143 => format!("AutoMod blocked a message from {} in {ch}{rule}", target_user()),
-                144 => format!("AutoMod flagged a message from {} in {ch}{rule}", target_user()),
+                143 => format!(
+                    "AutoMod blocked a message from {} in {ch}{rule}",
+                    target_user()
+                ),
+                144 => format!(
+                    "AutoMod flagged a message from {} in {ch}{rule}",
+                    target_user()
+                ),
                 _ => format!("AutoMod timed out {}{rule}", target_user()),
             };
         }
@@ -727,11 +743,20 @@ impl AuditLogPage {
                                     Kind::Update => pal.idle,
                                     Kind::Delete => pal.danger,
                                 };
-                                let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                                let (r, _) =
+                                    ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
                                 ui.painter().circle_filled(r.center(), 5.0, col);
                                 let actor = e.user_id.as_deref().and_then(|id| log.users.get(id));
                                 if let Some(u) = actor {
-                                    ga::avatar(ui, 24.0, &u.id, &u.name, &u.avatar_url, ctx, &mut self.uris);
+                                    ga::avatar(
+                                        ui,
+                                        24.0,
+                                        &u.id,
+                                        &u.name,
+                                        &u.avatar_url,
+                                        ctx,
+                                        &mut self.uris,
+                                    );
                                 }
                                 ui.vertical(|ui| {
                                     ui.add(
@@ -749,7 +774,9 @@ impl AuditLogPage {
                             });
                             if let Some(r) = &e.reason {
                                 ui.label(
-                                    RichText::new(format!("Reason: {r}")).small().color(pal.muted),
+                                    RichText::new(format!("Reason: {r}"))
+                                        .small()
+                                        .color(pal.muted),
                                 );
                             }
                             if open {
@@ -760,7 +787,9 @@ impl AuditLogPage {
                                 for c in &e.changes {
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(describe_change(c)).small().color(pal.text),
+                                            RichText::new(describe_change(c))
+                                                .small()
+                                                .color(pal.text),
                                         )
                                         .wrap(),
                                     );
@@ -816,7 +845,9 @@ mod tests {
     }
 
     fn roles() -> Vec<Role> {
-        vec![Role::from_json(&json!({ "id": "r", "name": "Mods", "position": 1 }))]
+        vec![Role::from_json(
+            &json!({ "id": "r", "name": "Mods", "position": 1 }),
+        )]
     }
 
     fn d(v: Value) -> String {
@@ -848,23 +879,31 @@ mod tests {
         );
         // Deleted role: its name is only in the changes.
         assert_eq!(
-            d(json!({ "id": "9", "user_id": "1", "target_id": "gone", "action_type": 32,
-                      "changes": [{ "key": "name", "old_value": "Old" }] })),
+            d(
+                json!({ "id": "9", "user_id": "1", "target_id": "gone", "action_type": 32,
+                      "changes": [{ "key": "name", "old_value": "Old" }] })
+            ),
             "Leo deleted the role Old"
         );
         assert_eq!(
-            d(json!({ "id": "9", "user_id": "1", "target_id": "2", "action_type": 25,
-                      "changes": [{ "key": "$add", "new_value": [{ "id": "r", "name": "Mods" }] }] })),
+            d(
+                json!({ "id": "9", "user_id": "1", "target_id": "2", "action_type": 25,
+                      "changes": [{ "key": "$add", "new_value": [{ "id": "r", "name": "Mods" }] }] })
+            ),
             "Leo added the role Mods to Sam"
         );
         assert_eq!(
-            d(json!({ "id": "9", "user_id": "1", "target_id": "2", "action_type": 25,
-                      "changes": [{ "key": "$remove", "new_value": [{ "name": "A" }, { "name": "B" }] }] })),
+            d(
+                json!({ "id": "9", "user_id": "1", "target_id": "2", "action_type": 25,
+                      "changes": [{ "key": "$remove", "new_value": [{ "name": "A" }, { "name": "B" }] }] })
+            ),
             "Leo removed the roles A, B from Sam"
         );
         assert_eq!(
-            d(json!({ "id": "9", "user_id": "1", "target_id": "2", "action_type": 24,
-                      "changes": [{ "key": "communication_disabled_until", "old_value": "2030-01-01T00:00:00+00:00" }] })),
+            d(
+                json!({ "id": "9", "user_id": "1", "target_id": "2", "action_type": 24,
+                      "changes": [{ "key": "communication_disabled_until", "old_value": "2030-01-01T00:00:00+00:00" }] })
+            ),
             "Leo removed the timeout from Sam"
         );
         assert!(
@@ -873,13 +912,17 @@ mod tests {
             .starts_with("Leo timed out Sam until ")
         );
         assert_eq!(
-            d(json!({ "id": "9", "user_id": "2", "target_id": "2", "action_type": 24,
-                      "changes": [{ "key": "nick", "new_value": "Sammy" }] })),
+            d(
+                json!({ "id": "9", "user_id": "2", "target_id": "2", "action_type": 24,
+                      "changes": [{ "key": "nick", "new_value": "Sammy" }] })
+            ),
             "Sam changed their nickname to Sammy"
         );
         assert_eq!(
-            d(json!({ "id": "9", "user_id": "1", "target_id": "2", "action_type": 72,
-                      "options": { "channel_id": "c", "count": "3" } })),
+            d(
+                json!({ "id": "9", "user_id": "1", "target_id": "2", "action_type": 72,
+                      "options": { "channel_id": "c", "count": "3" } })
+            ),
             "Leo deleted 3 messages by Sam in #general"
         );
         assert_eq!(
@@ -887,8 +930,10 @@ mod tests {
             "Leo created the webhook GitHub"
         );
         assert_eq!(
-            d(json!({ "id": "9", "user_id": "1", "target_id": "e", "action_type": 62,
-                      "changes": [{ "key": "name", "old_value": "pog" }] })),
+            d(
+                json!({ "id": "9", "user_id": "1", "target_id": "e", "action_type": 62,
+                      "changes": [{ "key": "name", "old_value": "pog" }] })
+            ),
             "Leo deleted the emoji :pog:"
         );
         assert_eq!(
@@ -897,15 +942,20 @@ mod tests {
             "Leo pruned 1 member inactive for 7 days"
         );
         assert_eq!(
-            d(json!({ "id": "9", "user_id": "1", "target_id": "c", "action_type": 14,
-                      "options": { "id": "r", "type": "0", "role_name": "Mods" } })),
+            d(
+                json!({ "id": "9", "user_id": "1", "target_id": "c", "action_type": 14,
+                      "options": { "id": "r", "type": "0", "role_name": "Mods" } })
+            ),
             "Leo updated permission overrides for Mods in #general"
         );
         assert_eq!(
             d(json!({ "id": "9", "user_id": "99", "action_type": 250 })),
             "<@99> did something (type 250)"
         );
-        assert_eq!(d(json!({ "id": "9", "action_type": 1 })), "Someone updated the server");
+        assert_eq!(
+            d(json!({ "id": "9", "action_type": 1 })),
+            "Someone updated the server"
+        );
     }
 
     #[test]
@@ -919,8 +969,14 @@ mod tests {
             c(json!({ "key": "color", "old_value": 0, "new_value": 0x3498db })),
             "Changed color from #000000 to #3498db"
         );
-        assert_eq!(c(json!({ "key": "hoist", "old_value": false, "new_value": true })), "Turned on hoist");
-        assert_eq!(c(json!({ "key": "topic", "new_value": "hi" })), "Set topic to \"hi\"");
+        assert_eq!(
+            c(json!({ "key": "hoist", "old_value": false, "new_value": true })),
+            "Turned on hoist"
+        );
+        assert_eq!(
+            c(json!({ "key": "topic", "new_value": "hi" })),
+            "Set topic to \"hi\""
+        );
         assert_eq!(
             c(json!({ "key": "permissions", "old_value": "2", "new_value": "4" })),
             "Granted: Ban Members; Revoked: Kick, Approve, and Reject Members"
@@ -952,7 +1008,9 @@ mod tests {
         };
         p.on_result(
             &next,
-            &Ok(AdminOutcome::Json(json!({ "audit_log_entries": [{ "id": "5", "action_type": 22 }] }))),
+            &Ok(AdminOutcome::Json(
+                json!({ "audit_log_entries": [{ "id": "5", "action_type": 22 }] }),
+            )),
         );
         assert!(!p.more);
         assert_eq!(p.log.get().unwrap().entries.len(), PAGE + 1);
@@ -966,7 +1024,10 @@ mod tests {
             },
             before: None,
         };
-        p.on_result(&stale, &Ok(AdminOutcome::Json(json!({ "audit_log_entries": [] }))));
+        p.on_result(
+            &stale,
+            &Ok(AdminOutcome::Json(json!({ "audit_log_entries": [] }))),
+        );
         assert_eq!(p.log.get().unwrap().entries.len(), PAGE + 1);
         // Kinds and labels.
         assert_eq!(kind_of(22), Kind::Delete);

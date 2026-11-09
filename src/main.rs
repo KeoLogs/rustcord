@@ -19,13 +19,13 @@ mod layout;
 mod links;
 mod login;
 mod markdown;
+mod members;
 #[allow(dead_code)]
 mod moderation;
-mod members;
 mod notify;
-mod perms;
 #[allow(dead_code)]
 mod permissions_table;
+mod perms;
 mod pins;
 mod presence;
 mod profile;
