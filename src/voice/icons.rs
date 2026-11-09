@@ -85,24 +85,24 @@ pub fn slash(p: &Painter, rect: Rect, color: Color32, gap: Color32) {
 /// Phone handset tilted down: Discord's "Disconnect" button.
 pub fn hangup(p: &Painter, rect: Rect, color: Color32) {
     let w = rect.width();
-    let c = rect.center() + vec2(0.0, w * 0.12);
-    let lw = w * 0.16;
-    // The handset: a flat arc with thick rounded ends.
+    let c = rect.center() + vec2(0.0, w * 0.05);
+    let lw = w * 0.14;
+    // The handset lying on its back: a flat arc (the grip) with a thick,
+    // rounded ear/mouth piece at each end pointing down and outwards.
     let pts = arc(
-        c + vec2(0.0, w * 0.32),
-        w * 0.42,
-        PI + 0.55,
-        2.0 * PI - 0.55,
+        c + vec2(0.0, w * 0.38),
+        w * 0.5,
+        PI + 0.6,
+        2.0 * PI - 0.6,
         16,
     );
     p.add(Shape::line(pts.clone(), Stroke::new(lw, color)));
+    let piece = w * 0.24;
     for end in [pts[0], pts[pts.len() - 1]] {
         let outward = if end.x < c.x { -1.0 } else { 1.0 };
-        let ear = Rect::from_center_size(
-            end + vec2(outward * w * 0.02, w * 0.06),
-            vec2(w * 0.2, w * 0.2),
-        );
-        p.rect_filled(ear, w * 0.06, color);
+        let tip = end + vec2(outward * w * 0.06, w * 0.2);
+        p.line_segment([end, tip], Stroke::new(piece, color));
+        p.circle_filled(tip, piece / 2.0, color);
     }
 }
 

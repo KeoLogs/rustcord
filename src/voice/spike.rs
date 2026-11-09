@@ -93,6 +93,52 @@ impl Transport {
     }
 }
 
+/// Runtime smoke check, run by `RUSTCORD_VOICE_SPIKE=1 cargo run --features
+/// voice`: exercises Opus, both transport ciphers, a DAVE session and the
+/// real audio devices, prints the results and returns. It never touches the
+/// network. Useful on a machine with a sound card (CI/containers have none).
+pub fn smoke() {
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    let pcm = vec![0i16; protocol::FRAME_SAMPLES as usize * 2];
+    let mut packet = [0u8; 1275];
+    let encoded = opus2::Encoder::new(48_000, opus2::Channels::Stereo, opus2::Application::Voip)
+        .and_then(|mut e| e.encode(&pcm, &mut packet));
+    match encoded {
+        Ok(n) => println!("opus: encoded a 20 ms stereo frame into {n} bytes"),
+        Err(e) => println!("opus: FAILED {e}"),
+    }
+
+    for mode in [Mode::Aes256GcmRtpSize, Mode::XChaCha20Poly1305RtpSize] {
+        let t = Transport::new(mode, &[1u8; 32]).expect("32-byte key");
+        let header = protocol::RtpCounter::new(0, 0).next_header(1);
+        let sealed = t.seal(&header, &protocol::OPUS_SILENCE, &mut NonceCounter(0));
+        let ok = t
+            .open(&sealed)
+            .is_ok_and(|(_, p)| p == protocol::OPUS_SILENCE);
+        println!("transport {}: round trip {}", mode.as_str(), ok);
+    }
+
+    match std::num::NonZeroU16::new(davey::DAVE_PROTOCOL_VERSION)
+        .and_then(|v| davey::DaveSession::new(v, 1, 2, None).ok())
+    {
+        Some(mut s) => match s.create_key_package() {
+            Ok(kp) => println!("dave: key package of {} bytes", kp.len()),
+            Err(e) => println!("dave: key package FAILED {e:?}"),
+        },
+        None => println!("dave: session FAILED"),
+    }
+
+    let host = cpal::default_host();
+    println!("audio host: {:?}", host.id());
+    let name = |d: Option<cpal::Device>| {
+        d.and_then(|d| d.description().ok().map(|x| x.name().to_string()))
+            .unwrap_or_else(|| "none".into())
+    };
+    println!("default input: {}", name(host.default_input_device()));
+    println!("default output: {}", name(host.default_output_device()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

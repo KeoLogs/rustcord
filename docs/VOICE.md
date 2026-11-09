@@ -149,7 +149,7 @@ opcodes to it — `protocol.rs` already parses/builds every one of them.
 
 | Need | Pick | Licence | Build | Notes |
 |---|---|---|---|---|
-| DAVE / MLS | **davey 0.2** | MIT | pure Rust (openmls 0.8 + RustCrypto) | Used by songbird 0.6 (serenity) — the only maintained Rust DAVE impl. Last release 2 Nov 2026. Supports DAVE protocol v1. |
+| DAVE / MLS | **davey 0.2** | MIT [V: docs.rs] | pure Rust (openmls 0.8 + RustCrypto), no C deps [V] | By Snazzah; 0.2.0 built on docs.rs 2 Nov 2026 [V]. Reported to be what songbird (serenity) uses for DAVE [R — not re-checked]. Supports DAVE protocol v1. The only maintained permissive-licence Rust DAVE impl we found. |
 | Opus | **opus2 0.4** (`bundled`) | MIT/Apache-2.0; libopus BSD-3 | C, built by cmake | Same crate songbird uses. Alt: `opus` 0.4 (opusic-sys, also cmake). `mousiki` (pure Rust Opus) is too young. |
 | Transport AEAD | **aes-gcm 0.10**, **chacha20poly1305 0.10** | MIT/Apache-2.0 | pure Rust | Already in the tree via openmls_rust_crypto → no extra compile under `voice`. |
 | Audio I/O | **cpal 0.18** | Apache-2.0 | ALSA on Linux (`libasound2-dev`), WASAPI, CoreAudio | Standard choice. Linux CI needs `libasound2-dev` once enabled. |
@@ -235,8 +235,29 @@ on each OS. Debug logging of opcodes (never tokens/keys) will be essential.
 
 ## Spike numbers
 
-Filled in from `cargo build/test --features voice` on this branch — see the
-commit message / PR for the run.
+Measured on this branch (Linux x86_64 container, rustc 1.97, cmake +
+libasound2-dev installed):
+
+- `cargo build/clippy/test --features voice`: green; 4 spike tests pass
+  (both `*_rtpsize` AEAD round trips incl. tamper rejection, Opus 20 ms
+  stereo encode/decode, cpal host/device lookup, a davey `DaveSession`
+  producing a key package).
+- Dependency graph: 469 crates (default) → 600 with `voice` (+131, mostly
+  openmls/RustCrypto and cpal/ALSA). Default build compiles none of them.
+- Release binary (thin LTO, not stripped): 28.09 MB default → 29.00 MB with
+  `voice` and the smoke check linked in (**+0.9 MB**). The real client
+  will add a little more (voice WS/UDP code), not another crate stack.
+- `RUSTCORD_VOICE_SPIKE=1 ./rustcord` (release, `--features voice`) runs
+  the whole smoke check — Opus, both ciphers, DAVE key package, ALSA device
+  lookup — with a peak RSS of **13 MB** for the process (no window, no
+  network), i.e. the voice stack itself is small; the per-call estimates
+  above still need checking in a real call.
+- Windows/macOS: not built here. All chosen crates list those platforms
+  (cpal: WASAPI/CoreAudio; opus2 bundled libopus via cmake; davey and the
+  AEADs are pure Rust) [R]. First CI run with `--features voice` will tell.
+
+Run it locally: `RUSTCORD_VOICE_SPIKE=1 cargo run --release --features
+voice` prints the results and exits (no network, no window).
 
 ## Open questions [A]
 

@@ -38,6 +38,14 @@ fn main() -> eframe::Result {
     // so choose one explicitly before anything connects.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+    // Voice build spike (`--features voice`, off by default): print a local
+    // Opus / AEAD / DAVE / audio-device check and exit. No network.
+    #[cfg(feature = "voice")]
+    if std::env::var("RUSTCORD_VOICE_SPIKE").is_ok_and(|v| v == "1") {
+        voice::spike::smoke();
+        return Ok(());
+    }
+
     // Optional: skip the login screen with DISCORD_TOKEN, or run offline with
     // RUSTCORD_DEMO=1.
     let demo = std::env::var("RUSTCORD_DEMO").is_ok_and(|v| v == "1");
