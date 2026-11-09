@@ -9,6 +9,7 @@ mod emoji;
 mod gateway;
 mod layout;
 mod login;
+mod markdown;
 mod members;
 mod notify;
 mod presence;
