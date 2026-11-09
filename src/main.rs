@@ -6,7 +6,12 @@ mod backend;
 mod config;
 mod demo;
 mod emoji;
+// Friends / message requests / Home header: wired into app.rs later.
+#[allow(dead_code)]
+mod friends;
 mod gateway;
+#[allow(dead_code)]
+mod home;
 mod layout;
 mod login;
 mod members;
