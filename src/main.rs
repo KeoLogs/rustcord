@@ -11,6 +11,12 @@ mod types;
 use std::sync::mpsc;
 
 fn main() -> eframe::Result {
+    // Two dependencies enable different rustls crypto backends (aws-lc-rs via
+    // reqwest, ring via tokio-tungstenite/ehttp). With both present rustls
+    // can't pick one automatically and panics on the first TLS connection,
+    // so choose one explicitly before anything connects.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let demo = std::env::var("RUSTCORD_DEMO").is_ok_and(|v| v == "1");
     let token = match std::env::var("DISCORD_TOKEN") {
         Ok(t) if !t.trim().is_empty() => t,
