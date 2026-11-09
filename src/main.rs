@@ -23,6 +23,9 @@ mod presence;
 mod profile;
 mod read_state;
 mod settings;
+// Batch D groundwork; not wired into the UI/backend yet.
+#[allow(dead_code)]
+mod settings_proto;
 mod theme;
 mod timefmt;
 mod types;
