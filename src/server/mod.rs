@@ -290,16 +290,16 @@ impl ServerAdmin {
                 }
             }
             ServerResponse::InviteCreated { channel_id, invite } => {
-                if let Some(c) = self.channel.as_mut().filter(|c| c.channel_id == channel_id) {
-                    if let Some(list) = &mut c.invites.invites {
-                        list.insert(0, invite.clone());
-                    }
+                if let Some(c) = self.channel.as_mut().filter(|c| c.channel_id == channel_id)
+                    && let Some(list) = &mut c.invites.invites
+                {
+                    list.insert(0, invite.clone());
                 }
-                if let Some(s) = &mut self.settings {
-                    if let Some(list) = &mut s.invites.invites {
-                        list.retain(|i| i.code != invite.code);
-                        list.insert(0, invite.clone());
-                    }
+                if let Some(s) = &mut self.settings
+                    && let Some(list) = &mut s.invites.invites
+                {
+                    list.retain(|i| i.code != invite.code);
+                    list.insert(0, invite.clone());
                 }
                 if let Some(d) = &mut self.invite {
                     d.on_created(invite);

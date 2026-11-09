@@ -154,7 +154,12 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, c: Color32) {
         }
         Icon::Bell => {
             p.add(egui::Shape::line(
-                arc(at(0.0, -0.1), s * 0.3, 3.14, 6.28),
+                arc(
+                    at(0.0, -0.1),
+                    s * 0.3,
+                    std::f32::consts::PI,
+                    std::f32::consts::TAU,
+                ),
                 st,
             ));
             line(at(-0.6, -0.1), at(-0.6, 0.4));
@@ -206,7 +211,12 @@ pub fn paint_icon(p: &egui::Painter, rect: Rect, icon: Icon, c: Color32) {
             let r = Rect::from_min_max(at(-0.6, -0.1), at(0.6, 0.8));
             p.rect_filled(r, 2.0, c);
             p.add(egui::Shape::line(
-                arc(at(0.0, -0.1), s * 0.3, 3.14, 6.28),
+                arc(
+                    at(0.0, -0.1),
+                    s * 0.3,
+                    std::f32::consts::PI,
+                    std::f32::consts::TAU,
+                ),
                 st,
             ));
         }

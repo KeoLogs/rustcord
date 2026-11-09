@@ -209,7 +209,9 @@ impl OverwriteEditor {
     ) {
         let list_w = 200.0;
         ui.horizontal_top(|ui| {
-            ui.allocate_ui(vec2(list_w, ui.available_height()), |ui| {
+            // `vertical`, not `allocate_ui`: a child of a horizontal ui
+            // would lay the rows out side by side.
+            ui.vertical(|ui| {
                 ui.set_width(list_w);
                 self.target_list(ui, guild, members, pal);
             });
@@ -409,11 +411,12 @@ impl OverwriteEditor {
                     .color(pal.strong),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if (sel.allow != 0 || sel.deny != 0) && ui.small_button("Clear all").clicked() {
-                    if let Some(o) = self.draft.iter_mut().find(|o| o.id == sel.id) {
-                        o.allow = 0;
-                        o.deny = 0;
-                    }
+                if (sel.allow != 0 || sel.deny != 0)
+                    && ui.small_button("Clear all").clicked()
+                    && let Some(o) = self.draft.iter_mut().find(|o| o.id == sel.id)
+                {
+                    o.allow = 0;
+                    o.deny = 0;
                 }
             });
         });

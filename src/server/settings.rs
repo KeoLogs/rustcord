@@ -458,15 +458,15 @@ impl ServerSettings {
     ) {
         let pal = actx.pal;
         let sections = self.sections(actx, pages);
-        if !sections.contains(&self.section) {
-            if let Some(first) = sections.first() {
-                self.section = *first;
-                if let Some(r) = self.load_for(*first) {
-                    out.push(UiEvent::Request(r));
-                }
-                if !first.is_builtin() {
-                    pages.opened(*first, actx.guild);
-                }
+        if !sections.contains(&self.section)
+            && let Some(first) = sections.first()
+        {
+            self.section = *first;
+            if let Some(r) = self.load_for(*first) {
+                out.push(UiEvent::Request(r));
+            }
+            if !first.is_builtin() {
+                pages.opened(*first, actx.guild);
             }
         }
         let mut groups = vec![
@@ -541,15 +541,15 @@ impl ServerSettings {
                 (s, BarAction::Save) => pages.save(s),
             }
         }
-        if let Some(s) = res.nav {
-            if s != self.section {
-                self.section = s;
-                if let Some(r) = self.load_for(s) {
-                    out.push(UiEvent::Request(r));
-                }
-                if !s.is_builtin() {
-                    pages.opened(s, actx.guild);
-                }
+        if let Some(s) = res.nav
+            && s != self.section
+        {
+            self.section = s;
+            if let Some(r) = self.load_for(s) {
+                out.push(UiEvent::Request(r));
+            }
+            if !s.is_builtin() {
+                pages.opened(s, actx.guild);
             }
         }
         if res.close {

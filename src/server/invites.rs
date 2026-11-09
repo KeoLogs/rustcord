@@ -407,15 +407,14 @@ impl InviteDialog {
                 if ui
                     .add_enabled(!self.creating && self.channel_id.is_some(), btn)
                     .clicked()
+                    && let Some(channel_id) = self.channel_id.clone()
                 {
-                    if let Some(channel_id) = self.channel_id.clone() {
-                        self.creating = true;
-                        self.error = None;
-                        req = Some(ServerRequest::CreateInvite {
-                            channel_id,
-                            body: self.settings.body(self.created.is_some()),
-                        });
-                    }
+                    self.creating = true;
+                    self.error = None;
+                    req = Some(ServerRequest::CreateInvite {
+                        channel_id,
+                        body: self.settings.body(self.created.is_some()),
+                    });
                 }
             }
 

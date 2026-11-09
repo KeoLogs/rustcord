@@ -280,10 +280,10 @@ impl ChannelDraft {
         let mut m = Map::new();
         m.insert("name".into(), json!(normalize_name(self.kind, &self.name)));
         m.insert("type".into(), json!(self.kind.type_id()));
-        if self.kind != ChannelKind::Category {
-            if let Some(parent) = &self.parent_id {
-                m.insert("parent_id".into(), json!(parent));
-            }
+        if self.kind != ChannelKind::Category
+            && let Some(parent) = &self.parent_id
+        {
+            m.insert("parent_id".into(), json!(parent));
         }
         if self.kind.has_topic() && !self.topic.trim().is_empty() {
             m.insert("topic".into(), json!(self.topic.trim()));
