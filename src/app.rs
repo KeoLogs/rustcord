@@ -14,6 +14,7 @@ use crate::autocomplete::{self, Autocomplete, Candidate, Trigger};
 use crate::config::{CONFIG_KEY, Config};
 use crate::embed;
 use crate::emoji_picker::{self, CustomEmojiGroup, EmojiRef, Picked, PickerCtx, RecentEmoji};
+use crate::forum::ForumView;
 use crate::friends::{
     FriendsAction, FriendsCtx, FriendsPage, MessageRequestsPage, Outcome, RelationshipStore,
     RequestAction, RequestStore, RequestsCtx,
@@ -38,6 +39,7 @@ use crate::settings::{SettingsAction, SettingsPage, SyncChange};
 use crate::settings_proto::{self as sp, RailItem, UserSettings};
 use crate::status::{self, CustomStatusDialog, DialogResult};
 use crate::theme::{self, Bold, Palette, ThemeChoice};
+use crate::threads::{self, DialogOutcome, Thread, ThreadAction, ThreadDialog, ThreadStore};
 use crate::timefmt;
 use crate::types::{Attachment, CHANNEL_DM, DM_GUILD_ID, Guild, Message, ToBackend, ToUi, User};
 use crate::widgets::{self, Tone, icon_button};
@@ -263,6 +265,7 @@ impl eframe::App for RustCordApp {
         crate::config::live::sync(&self.config.modules);
         state.set_reactions_module(self.config.modules.reactions);
         state.set_friends_module(self.config.modules.friends);
+        state.set_threads_module(self.config.modules.threads);
         if !self.config.modules.search {
             state.search = None;
         }
@@ -499,6 +502,8 @@ enum MessageAction {
     ShowBlocked(String),
     /// Clicked a reply preview: scroll to the original message.
     JumpTo(String),
+    /// "Create Thread" from a message: (message id, content).
+    CreateThread(String, String),
     /// Reaction bar / add-reaction picker on message (id).
     React(String, ReactionAction),
 }
@@ -524,6 +529,25 @@ struct ReactionState {
     reactors: HashMap<(String, EmojiRef, bool), Vec<String>>,
     /// Reactor lists already requested (each is asked for once).
     asked: HashSet<(String, EmojiRef, bool)>,
+}
+
+// --- threads ---
+/// Threads module state (`None` in `State` while the module is off).
+#[derive(Default)]
+struct ThreadsState {
+    store: ThreadStore,
+    forum_view: Option<ForumView>,
+    dialog: Option<ThreadDialog>,
+    /// Thread browser popout: (channel id, header button rect).
+    browser: Option<(String, egui::Rect)>,
+    /// Servers whose active-thread list answered 403/404: READY /
+    /// GUILD_CREATE data only, "Not available here", never asked again.
+    unavailable: HashSet<String>,
+    /// Servers / channels already asked (once per session; no polling).
+    asked_active: HashSet<String>,
+    asked_archived: HashSet<String>,
+    /// More archived threads to load, per channel.
+    archived_more: HashMap<String, bool>,
 }
 
 // --- friends ---
@@ -568,6 +592,8 @@ struct MenuCtx {
     guild_id: Option<String>,
     /// May pin / unpin here (DM, or Manage Messages).
     can_pin: bool,
+    /// Threads module on and Create Public Threads here.
+    can_thread: bool,
 }
 
 /// An op 14 subscription: (guild, channel, ranges).
@@ -634,6 +660,8 @@ pub struct State {
     search: Option<SearchState>,
     /// Friends module state; `None` while the module is off.
     friends: Option<FriendsState>,
+    /// Threads module state; `None` while the module is off.
+    threads: Option<ThreadsState>,
     last_typing_sent: Option<(String, Instant)>,
     confirm_delete: Option<(String, String)>,
 
@@ -753,6 +781,7 @@ impl State {
             reactions: None,
             search: None,
             friends: None,
+            threads: None,
             last_typing_sent: None,
             confirm_delete: None,
             reads: ReadState::default(),
@@ -828,6 +857,9 @@ impl State {
             } => {
                 self.status = "Connected".into();
                 self.connected = true;
+                if let Some(ts) = &mut self.threads {
+                    ts.store.set_me(&me.id);
+                }
                 self.blocked = blocked.into_iter().collect();
                 match user_settings {
                     Some(s) => self.set_user_settings(*s),
@@ -937,6 +969,9 @@ impl State {
                 }
             }
             ToUi::NewMessage(mut msg) => {
+                if let Some(ts) = &mut self.threads {
+                    ts.store.on_message(&msg.channel_id, &msg.id);
+                }
                 if let (Some(gid), Some(member)) = (&msg.guild_id, msg.member.take()) {
                     self.member_cache
                         .insert_cached(gid, &msg.author.id, *member);
@@ -1125,6 +1160,9 @@ impl State {
                 self.profiles.set_note(&user_id, note);
             }
             ToUi::GuildRemoved(id) => {
+                if let Some(ts) = &mut self.threads {
+                    ts.store.remove_guild(&id);
+                }
                 self.guilds.retain(|g| g.id != id);
                 if self.selected_guild.as_ref() == Some(&id) {
                     self.selected_guild = Some(DM_GUILD_ID.into());
@@ -1219,6 +1257,62 @@ impl State {
                     g.emojis = emojis;
                 }
                 self.emoji_groups = None;
+            }
+            // --- threads ---
+            ToUi::Thread(ev) => {
+                if let Some(ts) = &mut self.threads {
+                    ts.store.apply(ev);
+                }
+            }
+            ToUi::ThreadPage { page } => {
+                if let Some(ts) = &mut self.threads {
+                    ts.store.apply_page(page);
+                }
+            }
+            ToUi::ArchivedThreads { channel_id, page } => {
+                if let Some(ts) = &mut self.threads {
+                    ts.archived_more.insert(channel_id, page.has_more);
+                    ts.store.apply_page(page);
+                }
+            }
+            ToUi::ForumPage {
+                forum_id,
+                query,
+                page,
+            } => {
+                if let Some(ts) = &mut self.threads {
+                    ts.store.apply_forum_page(&forum_id, &query, page);
+                }
+            }
+            ToUi::ForumPageFailed { forum_id, error } => {
+                if let Some(ts) = &mut self.threads {
+                    ts.store.fail_load(&forum_id, error);
+                }
+            }
+            ToUi::ThreadsUnavailable { guild_id } => {
+                if let Some(ts) = &mut self.threads {
+                    ts.unavailable.insert(guild_id);
+                }
+            }
+            ToUi::ThreadCreated(t) => {
+                if self.threads.is_some() {
+                    self.open_thread(t, ctx, config);
+                }
+            }
+            ToUi::ThreadJoined { thread_id, joined } => {
+                if let Some(ts) = &mut self.threads {
+                    ts.store.set_joined(&thread_id, joined);
+                }
+            }
+            ToUi::ThreadFailed { error } => {
+                if self.slow_down_secs().is_none() {
+                    self.toast = Some((error, Instant::now()));
+                }
+            }
+            ToUi::ThreadParentDeleted(id) => {
+                if let Some(ts) = &mut self.threads {
+                    ts.store.remove_parent(&id);
+                }
             }
             // --- friends ---
             ToUi::Relationships(list) => {
@@ -1346,6 +1440,226 @@ impl State {
         }
     }
 
+    // --- threads ---
+    /// Turn the module's state on / off (off frees everything it held).
+    fn set_threads_module(&mut self, on: bool) {
+        match (on, self.threads.is_some()) {
+            (true, false) => {
+                let mut ts = ThreadsState::default();
+                if let Some(me) = &self.me {
+                    ts.store.set_me(&me.id);
+                }
+                self.threads = Some(ts);
+            }
+            (false, true) => self.threads = None,
+            _ => {}
+        }
+    }
+
+    /// Make an opened thread selectable like a channel: a (hidden) channel
+    /// entry under its server, then select it.
+    fn open_thread(&mut self, t: Thread, ctx: &egui::Context, config: &Config) {
+        let channel = crate::types::Channel::from_json(&serde_json::json!({
+            "id": t.id, "name": t.name, "type": t.kind, "parent_id": t.parent_id,
+            "last_message_id": t.last_message_id.to_string(),
+        }));
+        let gid = t.guild_id.clone();
+        let id = t.id.clone();
+        if let Some(ts) = &mut self.threads {
+            ts.store.apply(threads::ThreadEvent::Upsert(t));
+        }
+        let Some(g) = self.guilds.iter_mut().find(|g| g.id == gid) else {
+            return;
+        };
+        if g.channel(&id).is_none() {
+            g.upsert_channel(channel);
+        }
+        self.select_guild(gid);
+        self.select_channel(id, ctx, config);
+    }
+
+    /// A click in a thread row, the thread browser, a forum or a dialog.
+    /// Writes only from clicks, one at a time, nothing while rate limited.
+    fn thread_action(&mut self, a: ThreadAction, ctx: &egui::Context, config: &Config) {
+        let Some(ts) = &mut self.threads else {
+            return;
+        };
+        match a {
+            ThreadAction::OpenThread { thread_id, .. } => {
+                if let Some(t) = ts.store.get(&thread_id).cloned() {
+                    self.open_thread(t, ctx, config);
+                }
+            }
+            ThreadAction::LoadMore { forum_id, query } => {
+                ts.store.begin_load(&forum_id, &query);
+                let _ = self.tx.send(ToBackend::Threads(ThreadAction::LoadMore {
+                    forum_id,
+                    query,
+                }));
+            }
+            ThreadAction::LoadArchived { .. } => {
+                let _ = self.tx.send(ToBackend::Threads(a));
+            }
+            write => {
+                if self.slow_down_secs().is_none() {
+                    let _ = self.tx.send(ToBackend::Threads(write));
+                }
+            }
+        }
+    }
+
+    /// Thread browser opened for a channel: ask for active (once per
+    /// server) and archived (once per channel) threads. No polling.
+    fn open_thread_browser(&mut self, channel_id: String, anchor: egui::Rect) {
+        let guild_id = self.selected_guild.clone().unwrap_or_default();
+        let Some(ts) = &mut self.threads else {
+            return;
+        };
+        if !ts.unavailable.contains(&guild_id) && ts.asked_active.insert(guild_id.clone()) {
+            let _ = self.tx.send(ToBackend::LoadActiveThreads { guild_id });
+        }
+        if ts.asked_archived.insert(channel_id.clone()) {
+            let _ = self.tx.send(ToBackend::Threads(ThreadAction::LoadArchived {
+                channel_id: channel_id.clone(),
+                before: None,
+            }));
+        }
+        ts.browser = Some((channel_id, anchor));
+    }
+
+    /// Forum channel: the post list instead of messages.
+    fn forum_page(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
+        let Some(cid) = self.selected_channel.clone() else {
+            return;
+        };
+        let Some(forum) = self
+            .find_channel(&cid)
+            .and_then(|(_, c)| c.forum.as_deref().cloned())
+        else {
+            ui.label(RichText::new("This forum isn't loaded yet.").color(pal.muted));
+            return;
+        };
+        let Some(mut ts) = self.threads.take() else {
+            return;
+        };
+        let reads = &self.reads;
+        let names = &self.user_names;
+        let is_unread = |id: &str| reads.is_unread(id);
+        let user_name = |id: &str| names.get(id).cloned();
+        let tctx = threads::Ctx {
+            pal,
+            selected: Some(&cid),
+            is_unread: &is_unread,
+            user_name: &user_name,
+            load_images: config.modules.images,
+            can_manage_threads: false,
+        };
+        let view = ts
+            .forum_view
+            .get_or_insert_with(|| ForumView::new(&forum.id));
+        let action = egui::Frame::new()
+            .inner_margin(egui::Margin::same(16))
+            .show(ui, |ui| view.show(ui, &forum, &ts.store, &tctx))
+            .inner;
+        self.threads = Some(ts);
+        if let Some(a) = action {
+            let ctx = ui.ctx().clone();
+            self.thread_action(a, &ctx, config);
+        }
+    }
+
+    /// The Create Thread dialog and the thread browser popout.
+    fn thread_dialogs(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let Some(mut ts) = self.threads.take() else {
+            return;
+        };
+        let mut action = None;
+        if let Some(d) = &mut ts.dialog {
+            match d.show(ctx, pal) {
+                DialogOutcome::Open => {}
+                DialogOutcome::Cancelled => ts.dialog = None,
+                DialogOutcome::Submit(a) => {
+                    action = Some(a);
+                    ts.dialog = None;
+                }
+            }
+        }
+        if let Some((cid, anchor)) = ts.browser.clone() {
+            let reads = &self.reads;
+            let names = &self.user_names;
+            let is_unread = |id: &str| reads.is_unread(id);
+            let user_name = |id: &str| names.get(id).cloned();
+            let tctx = threads::Ctx {
+                pal,
+                selected: self.selected_channel.as_deref(),
+                is_unread: &is_unread,
+                user_name: &user_name,
+                load_images: config.modules.images,
+                can_manage_threads: false,
+            };
+            let gid = self.selected_guild.clone().unwrap_or_default();
+            let width = 360.0;
+            let area = egui::Area::new(egui::Id::unique("rc_thread_browser"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(egui::pos2(
+                    (anchor.right() - width).max(8.0),
+                    anchor.bottom() + 6.0,
+                ))
+                .constrain(true)
+                .show(ctx, |ui| {
+                    widgets::menu_frame(pal)
+                        .show(ui, |ui| {
+                            ui.set_width(width);
+                            ui.label(
+                                RichText::new(icons::label(icons::CHATS, "Threads"))
+                                    .bold()
+                                    .color(pal.strong),
+                            );
+                            if ts.unavailable.contains(&gid) {
+                                ui.label(
+                                    RichText::new("Not available here (showing what Discord sent)")
+                                        .small()
+                                        .color(pal.muted),
+                                );
+                            }
+                            if ui
+                                .add(
+                                    pal.primary_button(&icons::label(icons::PLUS, "Create Thread")),
+                                )
+                                .clicked()
+                            {
+                                ts.dialog = Some(ThreadDialog::standalone(&cid));
+                            }
+                            ui.add_space(4.0);
+                            let more = ts.archived_more.get(&cid).copied().unwrap_or(false);
+                            threads::thread_browser(ui, &cid, &ts.store, &tctx, more)
+                        })
+                        .inner
+                });
+            if let Some(a) = area.inner {
+                action = Some(a);
+            }
+            let outside = ctx.input(|i| {
+                i.pointer.any_click()
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|p| !area.response.rect.contains(p) && !anchor.contains(p))
+            });
+            if outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                ts.browser = None;
+            }
+        }
+        self.threads = Some(ts);
+        if let Some(a) = action {
+            if matches!(a, ThreadAction::OpenThread { .. })
+                && let Some(ts) = &mut self.threads
+            {
+                ts.browser = None;
+            }
+            self.thread_action(a, ctx, config);
+        }
+    }
+
     // --- friends ---
     /// Turn the module's state on / off (off frees everything it held).
     fn set_friends_module(&mut self, on: bool) {
@@ -1354,6 +1668,14 @@ impl State {
             (false, true) => self.friends = None,
             _ => {}
         }
+    }
+
+    /// The open channel is a forum (no messages of its own).
+    fn selected_is_forum(&self) -> bool {
+        self.selected_channel
+            .as_deref()
+            .and_then(|id| self.find_channel(id))
+            .is_some_and(|(_, c)| c.is_forum())
     }
 
     /// The Friends or Message Requests page is showing instead of the chat.
@@ -2305,7 +2627,10 @@ impl State {
     }
 
     fn select_channel(&mut self, channel_id: String, ctx: &egui::Context, config: &Config) {
-        if !self.messages.contains_key(&channel_id) {
+        let forum = self
+            .find_channel(&channel_id)
+            .is_some_and(|(_, c)| c.is_forum());
+        if !forum && !self.messages.contains_key(&channel_id) {
             let _ = self.tx.send(ToBackend::LoadHistory {
                 channel_id: channel_id.clone(),
             });
@@ -2906,6 +3231,7 @@ impl State {
         let mut toggle_cat = None;
         let mut close_dm = None;
         let mut home_action = None;
+        let mut thread_action = None;
         let now = notify::now_iso();
         let guild_muted = self.mutes.guild_muted(&guild.id, &now);
         egui::ScrollArea::vertical()
@@ -3097,6 +3423,28 @@ impl State {
                                             ui.ctx().copy_text(u.id.clone());
                                         }
                                     });
+                                // --- threads --- rows under their channel.
+                                if !guild.is_dms()
+                                    && let Some(ts) = self.threads.as_ref()
+                                {
+                                    let reads = &self.reads;
+                                    let names = &self.user_names;
+                                    let is_unread = |id: &str| reads.is_unread(id);
+                                    let user_name = |id: &str| names.get(id).cloned();
+                                    let tctx = threads::Ctx {
+                                        pal,
+                                        selected: self.selected_channel.as_deref(),
+                                        is_unread: &is_unread,
+                                        user_name: &user_name,
+                                        load_images: config.modules.images,
+                                        can_manage_threads: false,
+                                    };
+                                    if let Some(a) =
+                                        threads::thread_rows(ui, &c.id, &ts.store, &tctx)
+                                    {
+                                        thread_action = Some(a);
+                                    }
+                                }
                             }
                         }
                     });
@@ -3133,6 +3481,10 @@ impl State {
             && let Some(fs) = friends
         {
             fs.page = HomeSelected::None;
+        }
+        if let Some(a) = thread_action {
+            let ctx = ui.ctx().clone();
+            self.thread_action(a, &ctx, config);
         }
         if let Some(id) = clicked.or(auto) {
             let ctx = ui.ctx().clone();
@@ -3174,6 +3526,28 @@ impl State {
             .clicked()
         {
             self.toggle_members = true;
+        }
+        // --- threads --- browser for server text channels.
+        let thread_parent = self
+            .selected_channel
+            .as_deref()
+            .and_then(|id| self.find_channel(id))
+            .filter(|(g, c)| !g.is_dms() && matches!(c.kind, 0 | 5))
+            .map(|(_, c)| c.id.clone());
+        if self.threads.is_some()
+            && let Some(cid) = thread_parent
+        {
+            let open = self.threads.as_ref().is_some_and(|t| t.browser.is_some());
+            let btn = icon_button(ui, icons::CHATS, "Threads", open, true, pal);
+            if btn.clicked() {
+                if open {
+                    if let Some(ts) = &mut self.threads {
+                        ts.browser = None;
+                    }
+                } else {
+                    self.open_thread_browser(cid, btn.rect);
+                }
+            }
         }
         if config.modules.search {
             let btn = icon_button(
@@ -3277,6 +3651,10 @@ impl State {
             self.home_page(ui, config, pal);
             return;
         }
+        if self.threads.is_some() && self.selected_is_forum() {
+            self.forum_page(ui, config, pal);
+            return;
+        }
         self.chat_header(ui, config, pal);
         let Some(channel_id) = self.selected_channel.clone() else {
             ui.centered_and_justified(|ui| {
@@ -3351,6 +3729,12 @@ impl State {
             mine: false,
             guild_id: guild.map(|g| g.id.clone()),
             can_pin: self.can_pin(&channel_id),
+            can_thread: self.threads.is_some()
+                && guild.is_some_and(|g| !g.is_dms())
+                && self
+                    .find_channel(&channel_id)
+                    .is_some_and(|(_, c)| matches!(c.kind, 0 | 5))
+                && self.has_perm(&channel_id, perms::CREATE_PUBLIC_THREADS),
         };
         let react_parts = self.reactions.as_ref().map(|state| ReactParts {
             images: config.modules.emoji_images,
@@ -3475,6 +3859,7 @@ impl State {
                         mine: m.author.id == my_id,
                         guild_id: menu.guild_id.clone(),
                         can_pin: menu.can_pin,
+                        can_thread: menu.can_thread,
                     };
                     let rc = RowCtx {
                         grouped,
@@ -3575,6 +3960,11 @@ impl State {
                 self.revealed_blocked.insert(id);
             }
             Some(MessageAction::JumpTo(id)) => self.jump_to(channel_id.clone(), id),
+            Some(MessageAction::CreateThread(id, content)) => {
+                if let Some(ts) = &mut self.threads {
+                    ts.dialog = Some(ThreadDialog::from_message(&channel_id, &id, &content));
+                }
+            }
             Some(MessageAction::React(id, a)) => {
                 let now = ctx.input(|i| i.time);
                 self.react(&channel_id, &id, a, now);
@@ -3772,7 +4162,7 @@ impl State {
     }
 
     fn composer_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
-        if self.home_page_open() {
+        if self.home_page_open() || self.selected_is_forum() {
             return;
         }
         let Some(channel_id) = self.selected_channel.clone() else {
@@ -4740,6 +5130,7 @@ impl State {
         if config.modules.search {
             self.search_popup(ctx, config, pal);
         }
+        self.thread_dialogs(ctx, config, pal);
         if let Some(w) = &mut self.link_warning
             && let Some(decision) = w.show(ctx, pal)
         {
@@ -7052,6 +7443,15 @@ fn message_menu(
         n,
         MessageAction::Reply(m.id.clone(), m.author.name.clone()),
     );
+    if menu.can_thread {
+        pick(
+            ui,
+            icons::CHATS,
+            "Create Thread",
+            n,
+            MessageAction::CreateThread(m.id.clone(), m.content.clone()),
+        );
+    }
     if menu.can_pin {
         if m.pinned {
             pick(

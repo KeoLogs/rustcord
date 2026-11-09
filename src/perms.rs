@@ -12,6 +12,7 @@ use crate::members::Role;
 
 pub const ADMINISTRATOR: u64 = 1 << 3;
 pub const ADD_REACTIONS: u64 = 1 << 6;
+pub const CREATE_PUBLIC_THREADS: u64 = 1 << 35;
 pub const MANAGE_MESSAGES: u64 = 1 << 13;
 
 /// Overwrite target: a role or a member.

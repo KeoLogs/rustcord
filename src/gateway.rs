@@ -518,6 +518,36 @@ fn module_events(event: &str, d: &Value) -> Vec<ToUi> {
         }
     }
 
+    // --- threads ---
+    if live::on(&live::THREADS) {
+        use crate::threads::ThreadEvent;
+        match event {
+            "READY" => {
+                for g in d["guilds"].as_array().into_iter().flatten() {
+                    if let Some(ev) = ThreadEvent::from_guild(g) {
+                        out.push(ToUi::Thread(ev));
+                    }
+                }
+            }
+            "GUILD_CREATE" => {
+                if let Some(ev) = ThreadEvent::from_guild(d) {
+                    out.push(ToUi::Thread(ev));
+                }
+            }
+            "CHANNEL_DELETE" => {
+                if let Some(id) = d["id"].as_str() {
+                    out.push(ToUi::ThreadParentDeleted(id.to_string()));
+                }
+            }
+            _ if event.starts_with("THREAD_") => {
+                if let Some(ev) = ThreadEvent::from_dispatch(event, d) {
+                    out.push(ToUi::Thread(ev));
+                }
+            }
+            _ => {}
+        }
+    }
+
     // --- reactions ---
     if event.starts_with("MESSAGE_REACTION_")
         && live::on(&live::REACTIONS)

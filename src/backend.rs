@@ -30,6 +30,104 @@ async fn save_file(api: &Api, url: &str, filename: &str) -> anyhow::Result<Optio
     ))))
 }
 
+// --- threads ---
+/// A 403 / 404: the endpoint isn't available to this account here.
+fn not_available(e: &anyhow::Error) -> bool {
+    let text = format!("{e:#}");
+    text.contains("HTTP 403") || text.contains("HTTP 404")
+}
+
+/// Run one thread / forum request. Writes come only from clicks and are
+/// never retried; a 429 also sends `ToUi::RateLimited`.
+async fn thread_request(
+    api: &Api,
+    tx: &Sender<ToUi>,
+    action: crate::threads::ThreadAction,
+) -> Option<ToUi> {
+    use crate::threads::ThreadAction as A;
+    let fail = |e: anyhow::Error| {
+        if let Some(rl) = crate::ratelimit::rate_limited(&e) {
+            let _ = tx.send(ToUi::RateLimited(rl));
+        }
+        ToUi::ThreadFailed {
+            error: crate::ratelimit::user_message(&e),
+        }
+    };
+    Some(match action {
+        // Navigation only; handled in the UI.
+        A::OpenThread { .. } => return None,
+        A::JoinThread { thread_id } => match api.join_thread(&thread_id).await {
+            Ok(()) => ToUi::ThreadJoined {
+                thread_id,
+                joined: true,
+            },
+            Err(e) => fail(e),
+        },
+        A::LeaveThread { thread_id } => match api.leave_thread(&thread_id).await {
+            Ok(()) => ToUi::ThreadJoined {
+                thread_id,
+                joined: false,
+            },
+            Err(e) => fail(e),
+        },
+        A::CreateThread {
+            channel_id,
+            message_id,
+            name,
+            private,
+            auto_archive_minutes,
+        } => {
+            let r = match message_id {
+                Some(m) => {
+                    api.create_thread_from_message(&channel_id, &m, &name, auto_archive_minutes)
+                        .await
+                }
+                None => {
+                    api.create_thread(&channel_id, &name, private, auto_archive_minutes)
+                        .await
+                }
+            };
+            r.map_or_else(fail, ToUi::ThreadCreated)
+        }
+        A::CreatePost {
+            forum_id,
+            name,
+            content,
+            applied_tags,
+        } => api
+            .create_forum_post(&forum_id, &name, &content, &applied_tags)
+            .await
+            .map_or_else(fail, ToUi::ThreadCreated),
+        A::LoadMore { forum_id, query } => match api.forum_threads(&forum_id, &query).await {
+            Ok(page) => ToUi::ForumPage {
+                forum_id,
+                query,
+                page,
+            },
+            Err(e) => ToUi::ForumPageFailed {
+                forum_id,
+                error: if not_available(&e) {
+                    "Not available here".into()
+                } else {
+                    crate::ratelimit::user_message(&e)
+                },
+            },
+        },
+        A::LoadArchived { channel_id, before } => {
+            match api
+                .archived_public_threads(&channel_id, before.as_deref(), 25)
+                .await
+            {
+                Ok(page) => ToUi::ArchivedThreads { channel_id, page },
+                Err(e) if not_available(&e) => ToUi::ThreadFailed {
+                    error: "Archived threads: not available here".into(),
+                },
+                Err(e) => fail(e),
+            }
+        }
+    })
+}
+
 /// Options read from the config at login.
 #[derive(Clone, Copy, Default)]
 pub struct Options {
@@ -350,6 +448,17 @@ async fn run(
                     .set_note(&user_id, &note)
                     .await
                     .map(|_| Some(ToUi::Note { user_id, note })),
+                // --- threads ---
+                ToBackend::LoadActiveThreads { guild_id } => {
+                    Ok(Some(match api.active_guild_threads(&guild_id).await {
+                        Ok(page) => ToUi::ThreadPage { page },
+                        Err(e) if not_available(&e) => ToUi::ThreadsUnavailable { guild_id },
+                        Err(e) => ToUi::ThreadFailed {
+                            error: crate::ratelimit::user_message(&e),
+                        },
+                    }))
+                }
+                ToBackend::Threads(action) => Ok(thread_request(&api, &tx, action).await),
                 // --- friends ---
                 ToBackend::Friends(_) | ToBackend::MessageRequest(_) if is_bot => {
                     Ok(Some(ToUi::Notice("Friends need a user account".into())))

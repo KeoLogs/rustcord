@@ -164,6 +164,8 @@ pub struct Channel {
     /// A DM that is a message request (or spam request). Never acked
     /// automatically.
     pub is_request: bool,
+    /// Forum / media channel settings (Threads module only).
+    pub forum: Option<Box<crate::forum::ForumChannel>>,
 }
 
 /// A category header (if any) and the text and voice channels under it.
@@ -350,6 +352,9 @@ impl Channel {
             topic: str_of(v, "topic").trim().to_string(),
             overwrites: crate::perms::Overwrite::parse_list(&v["permission_overwrites"]),
             is_request: crate::friends::is_request(v),
+            forum: (crate::forum::is_forum_kind(kind)
+                && crate::config::live::on(&crate::config::live::THREADS))
+            .then(|| Box::new(crate::forum::ForumChannel::from_json(v, None))),
         }
     }
 
@@ -357,7 +362,12 @@ impl Channel {
         matches!(
             self.kind,
             CHANNEL_TEXT | CHANNEL_ANNOUNCEMENT | CHANNEL_DM | CHANNEL_GROUP_DM
-        )
+        ) || crate::threads::is_thread_kind(self.kind)
+    }
+
+    /// Forum or media channel (a list of posts, no messages of its own).
+    pub fn is_forum(&self) -> bool {
+        crate::forum::is_forum_kind(self.kind)
     }
 
     pub fn is_dm(&self) -> bool {
@@ -371,7 +381,9 @@ impl Channel {
 
     /// Shown in the channel list.
     fn is_listed(&self) -> bool {
-        self.is_text() || self.is_voice()
+        (self.is_text() && !crate::threads::is_thread_kind(self.kind))
+            || self.is_voice()
+            || (self.is_forum() && crate::config::live::on(&crate::config::live::THREADS))
     }
 
     /// Icon in front of the name in the channel list and chat header.
@@ -382,6 +394,8 @@ impl Channel {
             CHANNEL_ANNOUNCEMENT => crate::icons::MEGAPHONE,
             CHANNEL_VOICE => crate::icons::SPEAKER,
             CHANNEL_STAGE => crate::icons::BROADCAST,
+            k if crate::forum::is_forum_kind(k) => crate::icons::CHATS,
+            k if crate::threads::is_thread_kind(k) => crate::icons::CHAT_CIRCLE,
             _ => crate::icons::HASH,
         }
     }
@@ -861,6 +875,45 @@ pub enum ToUi {
         burst: bool,
         error: String,
     },
+    // --- threads ---
+    /// THREAD_* events, READY / GUILD_CREATE thread lists.
+    Thread(crate::threads::ThreadEvent),
+    /// Active threads of a server (GET /guilds/{id}/threads/active).
+    ThreadPage {
+        page: crate::threads::ThreadPage,
+    },
+    /// A page of a channel's archived threads (thread browser).
+    ArchivedThreads {
+        channel_id: String,
+        page: crate::threads::ThreadPage,
+    },
+    /// A page of forum posts.
+    ForumPage {
+        forum_id: String,
+        query: crate::forum::ForumQuery,
+        page: crate::threads::ThreadPage,
+    },
+    ForumPageFailed {
+        forum_id: String,
+        error: String,
+    },
+    /// A server answered 403/404 to the thread list: use READY /
+    /// GUILD_CREATE data only and say "Not available here". Not retried.
+    ThreadsUnavailable {
+        guild_id: String,
+    },
+    /// I created a thread / post: show and open it.
+    ThreadCreated(crate::threads::Thread),
+    ThreadJoined {
+        thread_id: String,
+        joined: bool,
+    },
+    /// A thread write (join / leave / create) failed.
+    ThreadFailed {
+        error: String,
+    },
+    /// CHANNEL_DELETE: forget threads under that channel.
+    ThreadParentDeleted(String),
     // --- friends ---
     /// READY relationships.
     Relationships(Vec<crate::friends::Relationship>),
@@ -1048,6 +1101,14 @@ pub enum ToBackend {
         emoji: crate::emoji_picker::EmojiRef,
         add: bool,
         burst: bool,
+    },
+    // --- threads ---
+    /// Thread / forum request from a click (join, leave, create, post) or
+    /// from opening a list (forum posts, archived threads). Never retried.
+    Threads(crate::threads::ThreadAction),
+    /// Active threads of a server (thread browser opened). Asked once.
+    LoadActiveThreads {
+        guild_id: String,
     },
     // --- friends ---
     /// A click on the Friends page / Home header. Only from the user.

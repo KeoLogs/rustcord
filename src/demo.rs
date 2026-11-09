@@ -262,6 +262,10 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
               "topic": "Chat about anything. Be nice, no spoilers without tags." },
             ch("202", "memes", 1, Some("300")),
             ch("204", "showcase", 2, Some("300")),
+            // Forum (Threads module).
+            { "id": "205", "name": "help", "type": 15, "position": 3, "parent_id": "300",
+              "topic": "Ask anything about RustCord.",
+              "available_tags": [{ "id": "900", "name": "Question" }, { "id": "901", "name": "Bug" }] },
             { "id": "301", "name": "Dev", "type": 4, "position": 2 },
             { "id": "203", "name": "rust", "type": 0, "position": 0, "parent_id": "301",
               "last_message_id": last_id("203").to_string(),
@@ -325,6 +329,17 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
         blocked: vec![TROLL.into()],
         user_settings: None,
     });
+
+    // --- threads --- (READY guild threads: one under #general)
+    if let Some(ev) = crate::threads::ThreadEvent::from_guild(&json!({
+        "id": TEST_GUILD,
+        "threads": [{ "id": "250", "type": 11, "name": "release plans", "parent_id": "201",
+                      "owner_id": SAM, "message_count": 7, "member_count": 3,
+                      "last_message_id": last_id("201").to_string(),
+                      "thread_metadata": { "archived": false, "auto_archive_duration": 4320 } }]
+    })) {
+        send(ToUi::Thread(ev));
+    }
 
     // --- friends --- (READY relationships + message requests)
     let ready_rels = json!({ "relationships": [
@@ -609,6 +624,27 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             ToBackend::LoadProfile { user_id, guild_id } => {
                 send(ToUi::Profile(Box::new(fake_profile(&user_id, guild_id))))
             }
+            // --- threads --- (the demo has no threads; nothing to load)
+            ToBackend::LoadActiveThreads { guild_id } => {
+                send(ToUi::ThreadsUnavailable { guild_id });
+            }
+            ToBackend::Threads(crate::threads::ThreadAction::LoadMore { forum_id, query }) => {
+                let page = crate::threads::ThreadPage::from_json(
+                    &json!({ "threads": [{
+                        "id": "260", "type": 11, "name": "How do I change the theme?",
+                        "parent_id": forum_id, "guild_id": TEST_GUILD, "owner_id": ALEX,
+                        "message_count": 2, "applied_tags": ["900"],
+                        "thread_metadata": { "archived": false }
+                    }], "has_more": false, "total_results": 1 }),
+                    Some(TEST_GUILD),
+                );
+                send(ToUi::ForumPage {
+                    forum_id,
+                    query,
+                    page,
+                });
+            }
+            ToBackend::Threads(action) => eprintln!("demo: threads {action:?}"),
             // --- friends ---
             ToBackend::Friends(action) => {
                 use crate::friends::{FriendsAction, Outcome};

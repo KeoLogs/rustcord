@@ -209,6 +209,9 @@ pub struct Modules {
     /// Friends / Message Requests pages and the Home header.
     #[serde(default = "on")]
     pub friends: bool,
+    /// Threads, forum channels and the thread browser.
+    #[serde(default = "on")]
+    pub threads: bool,
 }
 
 impl Default for Modules {
@@ -227,6 +230,7 @@ impl Default for Modules {
             reactions: true,
             search: true,
             friends: true,
+            threads: true,
         }
     }
 }
@@ -245,12 +249,14 @@ pub mod live {
     pub static REACTIONS: AtomicBool = AtomicBool::new(true);
     pub static SEARCH: AtomicBool = AtomicBool::new(true);
     pub static FRIENDS: AtomicBool = AtomicBool::new(true);
+    pub static THREADS: AtomicBool = AtomicBool::new(true);
     // (end of flags)
 
     pub fn sync(m: &super::Modules) {
         REACTIONS.store(m.reactions, Relaxed);
         SEARCH.store(m.search, Relaxed);
         FRIENDS.store(m.friends, Relaxed);
+        THREADS.store(m.threads, Relaxed);
     }
 
     pub fn on(flag: &AtomicBool) -> bool {
@@ -330,6 +336,11 @@ pub const MODULES: &[ModuleInfo] = &[
         name: "Friends & message requests",
         description: "Friends and Message Requests pages and the Home search header above your DMs (user accounts). Off = plain DM list, nothing loaded.",
         get: |m| &mut m.friends,
+    },
+    ModuleInfo {
+        name: "Threads & forums",
+        description: "Threads under their channels, forum channels with posts, the Threads browser and Create Thread. Off = threads and forums hidden, nothing loaded.",
+        get: |m| &mut m.threads,
     },
 ];
 
