@@ -38,14 +38,34 @@ const fn kb(
 /// Shortcuts, grouped. Discord's defaults where RustCord has the feature.
 pub const KEYBINDS: &[Keybind] = &[
     kb("Navigation", "Quick switcher", &["Ctrl", "K"], true),
-    kb("Navigation", "Previous / next channel", &["Alt", "Up / Down"], false),
-    kb("Navigation", "Previous / next unread channel", &["Alt", "Shift", "Up / Down"], false),
-    kb("Navigation", "Previous / next server", &["Ctrl", "Alt", "Up / Down"], false),
+    kb(
+        "Navigation",
+        "Previous / next channel",
+        &["Alt", "Up / Down"],
+        false,
+    ),
+    kb(
+        "Navigation",
+        "Previous / next unread channel",
+        &["Alt", "Shift", "Up / Down"],
+        false,
+    ),
+    kb(
+        "Navigation",
+        "Previous / next server",
+        &["Ctrl", "Alt", "Up / Down"],
+        false,
+    ),
     kb("Navigation", "Toggle pins", &["Ctrl", "P"], false),
     kb("Navigation", "Toggle mentions inbox", &["Ctrl", "I"], false),
     kb("Navigation", "Toggle member list", &["Ctrl", "U"], false),
     kb("Navigation", "Search", &["Ctrl", "F"], false),
-    kb("Navigation", "Close popup / dialog / settings", &["Esc"], true),
+    kb(
+        "Navigation",
+        "Close popup / dialog / settings",
+        &["Esc"],
+        true,
+    ),
     kb("Messages", "Send message", &["Enter"], true),
     kb("Messages", "New line", &["Shift", "Enter"], false),
     kb("Messages", "Accept autocomplete", &["Tab"], true),
@@ -101,7 +121,11 @@ impl KeybindsPage {
         );
         ui.checkbox(&mut self.only_working, "Only show shortcuts that work now");
         ui.add_space(8.0);
-        let all: Vec<Keybind> = KEYBINDS.iter().cloned().chain(self.extra.iter().cloned()).collect();
+        let all: Vec<Keybind> = KEYBINDS
+            .iter()
+            .cloned()
+            .chain(self.extra.iter().cloned())
+            .collect();
         for group in groups(&all) {
             widgets::label(ui, pal, group);
             for k in all
@@ -139,7 +163,11 @@ mod tests {
 
     #[test]
     fn table_is_sane() {
-        assert!(KEYBINDS.iter().all(|k| !k.keys.is_empty() && !k.action.is_empty()));
+        assert!(
+            KEYBINDS
+                .iter()
+                .all(|k| !k.keys.is_empty() && !k.action.is_empty())
+        );
         assert!(KEYBINDS.iter().any(|k| k.works && k.keys == ["Ctrl", "K"]));
         let g = groups(KEYBINDS);
         assert_eq!(g[0], "Navigation");
@@ -147,7 +175,11 @@ mod tests {
         // No duplicate action within a group.
         for (i, a) in KEYBINDS.iter().enumerate() {
             for b in &KEYBINDS[i + 1..] {
-                assert!(!(a.group == b.group && a.action == b.action), "{}", a.action);
+                assert!(
+                    !(a.group == b.group && a.action == b.action),
+                    "{}",
+                    a.action
+                );
             }
         }
     }

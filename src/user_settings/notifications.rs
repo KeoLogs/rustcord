@@ -203,7 +203,10 @@ impl NotifDraft {
     pub fn from_json(v: &Value, now: &str) -> Self {
         let s = GuildSettings::from_json(v);
         let mut d = Self::from_settings(&s.guild_id, Some(&s), now);
-        d.mobile_push = v.get("mobile_push").and_then(Value::as_bool).unwrap_or(true);
+        d.mobile_push = v
+            .get("mobile_push")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
         d
     }
 }
@@ -309,7 +312,11 @@ impl NotificationDialog {
     }
 
     /// Channel / category dialog (DM channels: `guild_id` = `DM_GUILD_ID`).
-    pub fn open_channel(guild_id: &str, channel_id: &str, settings: Option<&GuildSettings>) -> Self {
+    pub fn open_channel(
+        guild_id: &str,
+        channel_id: &str,
+        settings: Option<&GuildSettings>,
+    ) -> Self {
         let mut d = Self::open(guild_id, settings);
         d.channel = Some(channel_id.to_string());
         d
@@ -340,8 +347,9 @@ impl NotificationDialog {
         let guild = c.guilds.iter().find(|g| g.id == self.orig.guild_id);
         let mut action = None;
         let mut close = false;
-        let modal = egui::Modal::new(egui::Id::unique(("rc_us_notif", &self.orig.guild_id)))
-            .show(ui.ctx(), |ui| {
+        let modal = egui::Modal::new(egui::Id::unique(("rc_us_notif", &self.orig.guild_id))).show(
+            ui.ctx(),
+            |ui| {
                 ui.set_width(480.0);
                 let title = match (&self.channel, guild) {
                     (Some(id), Some(g)) => g
@@ -392,7 +400,8 @@ impl NotificationDialog {
                         }
                     });
                 });
-            });
+            },
+        );
         if (close || modal.should_close()) && action.is_none() {
             return Some(Action::CloseDialog);
         }
@@ -431,7 +440,9 @@ impl NotificationDialog {
     fn server_ui(&mut self, ui: &mut egui::Ui, c: &Ctx, guild: Option<&Guild>) {
         let pal = c.pal;
         let is_dm = self.orig.guild_id == DM_GUILD_ID;
-        let what = guild.map(|g| g.name.clone()).unwrap_or_else(|| "server".into());
+        let what = guild
+            .map(|g| g.name.clone())
+            .unwrap_or_else(|| "server".into());
         Self::mute_block(
             ui,
             c,
@@ -441,7 +452,9 @@ impl NotificationDialog {
              unless you are mentioned.",
         );
         widgets::label(ui, pal, "SERVER NOTIFICATION SETTINGS");
-        let default = guild.map(|g| g.default_notifications.min(1)).unwrap_or(NOTIFY_ALL);
+        let default = guild
+            .map(|g| g.default_notifications.min(1))
+            .unwrap_or(NOTIFY_ALL);
         let shown = if self.draft.level == NOTIFY_INHERIT {
             default
         } else {
@@ -531,8 +544,7 @@ impl NotificationDialog {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(name).bold().color(pal.strong));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if widgets::icon_button(ui, Icon::Close, pal, "Remove override").clicked()
-                        {
+                        if widgets::icon_button(ui, Icon::Close, pal, "Remove override").clicked() {
                             remove = Some(id.clone());
                         }
                         let mut muted = o.mute.muted;
@@ -579,7 +591,9 @@ impl NotificationDialog {
         );
         widgets::label(ui, pal, "NOTIFICATION SETTINGS");
         let server = if self.draft.level == NOTIFY_INHERIT {
-            guild.map(|g| g.default_notifications.min(1)).unwrap_or(NOTIFY_ALL)
+            guild
+                .map(|g| g.default_notifications.min(1))
+                .unwrap_or(NOTIFY_ALL)
         } else {
             self.draft.level
         };

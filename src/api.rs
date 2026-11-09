@@ -402,7 +402,10 @@ impl Api {
             Some(b) => req.json(b),
             None => req,
         };
-        let resp = req.send().await.with_context(|| format!("{what} request failed"))?;
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("{what} request failed"))?;
         let text = Self::check(resp, what).await?.text().await?;
         if text.trim().is_empty() {
             return Ok(Value::Null);

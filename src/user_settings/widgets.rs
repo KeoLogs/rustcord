@@ -168,7 +168,12 @@ pub fn key_cap(ui: &mut egui::Ui, pal: &Palette, key: &str) {
     let p = ui.painter();
     p.rect_filled(rect.translate(vec2(0.0, 2.0)), 4, pal.servers);
     p.rect_filled(rect, 4, pal.input);
-    p.rect_stroke(rect, 4, Stroke::new(1.0, pal.divider), egui::StrokeKind::Inside);
+    p.rect_stroke(
+        rect,
+        4,
+        Stroke::new(1.0, pal.divider),
+        egui::StrokeKind::Inside,
+    );
     p.galley(rect.center() - galley.size() / 2.0, galley, pal.strong);
 }
 
@@ -216,7 +221,11 @@ pub fn paint_icon(p: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color3
             let c = rect.center();
             p.circle_stroke(c, s * 0.42, stroke);
             p.line_segment([at(0.08, 0.5), at(0.92, 0.5)], stroke);
-            p.add(egui::Shape::ellipse_stroke(c, vec2(s * 0.18, s * 0.42), stroke));
+            p.add(egui::Shape::ellipse_stroke(
+                c,
+                vec2(s * 0.18, s * 0.42),
+                stroke,
+            ));
         }
         Icon::Check => {
             p.line_segment([at(0.18, 0.52), at(0.42, 0.75)], stroke);

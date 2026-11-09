@@ -149,7 +149,10 @@ impl ConnectionsPage {
                                 ui.label(pal.section_label(&conn.service()));
                                 ui.horizontal(|ui| {
                                     ui.label(
-                                        RichText::new(&conn.name).bold().size(15.0).color(pal.strong),
+                                        RichText::new(&conn.name)
+                                            .bold()
+                                            .size(15.0)
+                                            .color(pal.strong),
                                     );
                                     if conn.verified {
                                         widgets::icon(ui, Icon::Check, 14.0, pal.online)
@@ -220,7 +223,11 @@ mod tests {
         assert_eq!(l[2].service(), "Newthing");
         assert_eq!(l[2].url(), None);
         // Names that would need escaping get no link.
-        let odd = Connection { kind: "github".into(), name: "a/../b".into(), ..l[0].clone() };
+        let odd = Connection {
+            kind: "github".into(),
+            name: "a/../b".into(),
+            ..l[0].clone()
+        };
         assert_eq!(odd.url(), None);
         assert!(Connection::parse_list(&json!({})).is_empty());
     }

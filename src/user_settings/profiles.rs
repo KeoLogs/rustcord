@@ -214,7 +214,9 @@ fn color_of(v: &Value, k: &str) -> Option<u32> {
 impl MyProfile {
     /// From `GET users/@me` and (optionally) `GET users/{me}/profile`.
     pub fn from_json(user: &Value, profile: Option<&Value>) -> Self {
-        let meta = profile.map(|p| &p["user_profile"]).filter(|m| m.is_object());
+        let meta = profile
+            .map(|p| &p["user_profile"])
+            .filter(|m| m.is_object());
         let pick = |k: &str| {
             meta.map(|m| s(m, k))
                 .filter(|x| !x.is_empty())
@@ -530,7 +532,11 @@ impl ProfilesPage {
             .or_insert_with(|| {
                 *counter += 1;
                 let ext = img.mime.trim_start_matches("image/");
-                format!("bytes://rc-us-{}-{}.{ext}", slot.label().replace(' ', "-"), counter)
+                format!(
+                    "bytes://rc-us-{}-{}.{ext}",
+                    slot.label().replace(' ', "-"),
+                    counter
+                )
             })
             .clone()
     }
@@ -593,7 +599,10 @@ impl ProfilesPage {
         let pal = c.pal;
         let mut action = None;
         let profile = self.profile.get()?.clone();
-        let mut draft = self.draft.take().unwrap_or_else(|| ProfileDraft::from_profile(&profile));
+        let mut draft = self
+            .draft
+            .take()
+            .unwrap_or_else(|| ProfileDraft::from_profile(&profile));
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_width((ui.available_width() - CARD_WIDTH - 24.0).clamp(240.0, 360.0));
@@ -653,7 +662,9 @@ impl ProfilesPage {
                     let mut arr = [(cur >> 16) as u8, (cur >> 8) as u8, cur as u8];
                     if egui::color_picker::color_edit_button_srgb(ui, &mut arr).changed() {
                         draft.accent_color = Some(
-                            (u32::from(arr[0]) << 16) | (u32::from(arr[1]) << 8) | u32::from(arr[2]),
+                            (u32::from(arr[0]) << 16)
+                                | (u32::from(arr[1]) << 8)
+                                | u32::from(arr[2]),
                         );
                     }
                     if let Some(c) = draft.accent_color {
@@ -667,11 +678,7 @@ impl ProfilesPage {
                 });
                 ui.add_space(10.0);
                 widgets::label(ui, pal, "ABOUT ME");
-                widgets::hint(
-                    ui,
-                    pal,
-                    "You can use markdown and links if you'd like.",
-                );
+                widgets::hint(ui, pal, "You can use markdown and links if you'd like.");
                 ui.add(
                     egui::TextEdit::multiline(&mut draft.bio)
                         .char_limit(MAX_BIO)
@@ -824,9 +831,7 @@ impl ProfilesPage {
                 user_id: profile.id.clone(),
             }));
         }
-        let Some(gid) = self.server.guild_id.clone() else {
-            return None;
-        };
+        let gid = self.server.guild_id.clone()?;
         ui.add_space(12.0);
         let member = match &self.server.member {
             Loadable::Loaded(m) => m.clone(),
@@ -980,7 +985,10 @@ impl ProfilesPage {
 
 /// Register a picked image's bytes with egui under `uri` (no-op if already).
 fn bytes_image(ctx: &egui::Context, uri: &str, img: &PickedImage) {
-    ctx.include_bytes(uri.to_string(), egui::load::Bytes::Shared(img.bytes.clone()));
+    ctx.include_bytes(
+        uri.to_string(),
+        egui::load::Bytes::Shared(img.bytes.clone()),
+    );
 }
 
 /// Discord's "Careful — you have unsaved changes!" bar. `on(true)` = save,
@@ -1061,7 +1069,8 @@ fn draw_card(ui: &mut egui::Ui, c: &Ctx, d: CardData) {
             }
             let av = 80.0;
             let centre = egui::pos2(banner.left() + 16.0 + av / 2.0, banner.bottom());
-            ui.painter().circle_filled(centre, av / 2.0 + 5.0, pal.servers);
+            ui.painter()
+                .circle_filled(centre, av / 2.0 + 5.0, pal.servers);
             let av_rect = egui::Rect::from_center_size(centre, vec2(av, av));
             ui.painter().circle_filled(centre, av / 2.0, pal.rail_icon);
             if let Some(uri) = d.avatar_uri {
@@ -1099,11 +1108,7 @@ fn draw_card(ui: &mut egui::Ui, c: &Ctx, d: CardData) {
                         widgets::divider(ui, pal);
                         ui.add_space(8.0);
                         ui.label(pal.section_label("ABOUT ME"));
-                        ui.label(
-                            RichText::new(d.bio.trim())
-                                .size(13.0)
-                                .color(pal.text),
-                        );
+                        ui.label(RichText::new(d.bio.trim()).size(13.0).color(pal.text));
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
@@ -1151,7 +1156,10 @@ mod tests {
         let img = check_image("a.png", png_1x1()).unwrap();
         assert_eq!((img.width, img.height), (2, 3));
         assert!(!img.animated);
-        assert!(img.data_uri().starts_with("data:image/png;base64,iVBORw0KGgo"));
+        assert!(
+            img.data_uri()
+                .starts_with("data:image/png;base64,iVBORw0KGgo")
+        );
 
         assert!(check_image("x", vec![]).is_err());
         assert!(check_image("x.png", b"not an image".to_vec()).is_err());
@@ -1183,10 +1191,17 @@ mod tests {
         assert_eq!(p.pronouns, "he/him");
         assert_eq!(p.accent_color, Some(0xff0000));
         assert!(p.premium);
-        assert!(p.banner_url().unwrap().ends_with("/banners/42/a_ban.gif?size=600"));
+        assert!(
+            p.banner_url()
+                .unwrap()
+                .ends_with("/banners/42/a_ban.gif?size=600")
+        );
         assert!(p.avatar_url().contains("size=128"));
         // Without the profile: user fields; null global_name / premium_type.
-        let p = MyProfile::from_json(&json!({ "id": "1", "username": "u", "global_name": null }), None);
+        let p = MyProfile::from_json(
+            &json!({ "id": "1", "username": "u", "global_name": null }),
+            None,
+        );
         assert_eq!(p.global_name, "");
         assert!(!p.premium && p.accent_color.is_none() && p.banner_url().is_none());
     }
@@ -1208,7 +1223,12 @@ mod tests {
         d.avatar = ImageEdit::New(check_image("a.png", png_1x1()).unwrap());
         let body = user_patch(&orig, &d).unwrap();
         assert_eq!(body["global_name"], "Leo K");
-        assert!(body["avatar"].as_str().unwrap().starts_with("data:image/png;base64,"));
+        assert!(
+            body["avatar"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
         assert!(body.get("banner").is_none());
 
         d.bio = "new".into();
@@ -1249,7 +1269,8 @@ mod tests {
 
     #[test]
     fn member_patches() {
-        let orig = MemberProfile::from_json(&json!({ "guild_member": { "nick": "Keo", "avatar": null } }));
+        let orig =
+            MemberProfile::from_json(&json!({ "guild_member": { "nick": "Keo", "avatar": null } }));
         assert_eq!(orig.nick, "Keo");
         assert_eq!(member_patch(&orig, " Keo ", &ImageEdit::Keep), None);
         assert_eq!(
@@ -1260,10 +1281,18 @@ mod tests {
             member_patch(&orig, "Leo", &ImageEdit::Remove),
             Some(json!({ "nick": "Leo", "avatar": null }))
         );
-        assert_eq!(validate_member(&"n".repeat(33), &ImageEdit::Keep, true).len(), 1);
+        assert_eq!(
+            validate_member(&"n".repeat(33), &ImageEdit::Keep, true).len(),
+            1
+        );
         let img = check_image("a.png", png_1x1()).unwrap();
         assert_eq!(validate_member("ok", &ImageEdit::New(img), false).len(), 1);
         // Plain member object.
-        assert_eq!(MemberProfile::from_json(&json!({ "nick": "n", "avatar": "h" })).avatar.as_deref(), Some("h"));
+        assert_eq!(
+            MemberProfile::from_json(&json!({ "nick": "n", "avatar": "h" }))
+                .avatar
+                .as_deref(),
+            Some("h")
+        );
     }
 }

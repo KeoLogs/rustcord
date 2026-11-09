@@ -104,7 +104,9 @@ pub fn validate_base_url(input: &str) -> Result<String, String> {
     if url.chars().any(char::is_whitespace) || url.contains(['?', '#', '@']) {
         return Err("That URL has characters that aren't allowed (spaces, ?, # or @).".into());
     }
-    let (scheme, rest) = url.split_once("://").ok_or("The URL must start with https://")?;
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or("The URL must start with https://")?;
     let host = rest.split('/').next().unwrap_or("");
     let host_name = host.rsplit_once(':').map_or(host, |(h, _)| h);
     if host_name.is_empty() {
@@ -171,25 +173,27 @@ pub fn parse_version(s: &str) -> Option<Version> {
 
 /// Semver precedence (build metadata ignored).
 pub fn compare_versions(a: &Version, b: &Version) -> Ordering {
-    a.core.cmp(&b.core).then_with(|| match (a.pre.is_empty(), b.pre.is_empty()) {
-        (true, true) => Ordering::Equal,
-        (true, false) => Ordering::Greater,
-        (false, true) => Ordering::Less,
-        (false, false) => {
-            for (x, y) in a.pre.iter().zip(&b.pre) {
-                let o = match (x.parse::<u64>(), y.parse::<u64>()) {
-                    (Ok(m), Ok(n)) => m.cmp(&n),
-                    (Ok(_), Err(_)) => Ordering::Less,
-                    (Err(_), Ok(_)) => Ordering::Greater,
-                    (Err(_), Err(_)) => x.cmp(y),
-                };
-                if o != Ordering::Equal {
-                    return o;
+    a.core
+        .cmp(&b.core)
+        .then_with(|| match (a.pre.is_empty(), b.pre.is_empty()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => {
+                for (x, y) in a.pre.iter().zip(&b.pre) {
+                    let o = match (x.parse::<u64>(), y.parse::<u64>()) {
+                        (Ok(m), Ok(n)) => m.cmp(&n),
+                        (Ok(_), Err(_)) => Ordering::Less,
+                        (Err(_), Ok(_)) => Ordering::Greater,
+                        (Err(_), Err(_)) => x.cmp(y),
+                    };
+                    if o != Ordering::Equal {
+                        return o;
+                    }
                 }
+                a.pre.len().cmp(&b.pre.len())
             }
-            a.pre.len().cmp(&b.pre.len())
-        }
-    })
+        })
 }
 
 /// Is `latest` newer than `current`? False if either doesn't parse.
@@ -217,7 +221,9 @@ pub fn parse_release(v: &Value, current: &str) -> Result<UpdateInfo, String> {
         .filter(|t| !t.is_empty())
         .ok_or("The latest release has no version tag.")?;
     if parse_version(tag).is_none() {
-        return Err(format!("The latest release's tag \"{tag}\" isn't a version."));
+        return Err(format!(
+            "The latest release's tag \"{tag}\" isn't a version."
+        ));
     }
     let url = v
         .get("html_url")
@@ -321,7 +327,12 @@ impl OptionsPage {
     }
 
     /// Settings → Advanced.
-    pub fn advanced(&mut self, ui: &mut egui::Ui, c: &Ctx, opts: &mut AppOptions) -> Option<Action> {
+    pub fn advanced(
+        &mut self,
+        ui: &mut egui::Ui,
+        c: &Ctx,
+        opts: &mut AppOptions,
+    ) -> Option<Action> {
         let pal = c.pal;
         let mut action = None;
         widgets::label(ui, pal, "UPDATES");
@@ -486,8 +497,13 @@ mod tests {
         let v = parse_version("v1.2.3").unwrap();
         assert_eq!(v.core, [1, 2, 3]);
         assert_eq!(parse_version("1.2").unwrap().core, [1, 2, 0]);
-        assert_eq!(parse_version("V0.1.0-beta.2+abc").unwrap().pre, ["beta", "2"]);
-        for bad in ["", "v", "1..2", "1.2.3.4", "x1.0", "1.0-", "1.0-a..b", "1.a"] {
+        assert_eq!(
+            parse_version("V0.1.0-beta.2+abc").unwrap().pre,
+            ["beta", "2"]
+        );
+        for bad in [
+            "", "v", "1..2", "1.2.3.4", "x1.0", "1.0-", "1.0-a..b", "1.a",
+        ] {
             assert!(parse_version(bad).is_none(), "{bad}");
         }
         assert!(is_newer("v0.2.0", "0.1.0"));
@@ -516,8 +532,11 @@ mod tests {
         .unwrap();
         assert!(r.newer);
         assert!(r.url.ends_with("/v9.0.0"));
-        let r = parse_release(&json!({ "tag_name": "v0.0.1", "html_url": "https://evil.example" }), "0.1.0")
-            .unwrap();
+        let r = parse_release(
+            &json!({ "tag_name": "v0.0.1", "html_url": "https://evil.example" }),
+            "0.1.0",
+        )
+        .unwrap();
         assert!(!r.newer);
         assert_eq!(r.url, RELEASES_PAGE);
         assert!(parse_release(&json!({ "message": "Not Found" }), "0.1.0").is_err());
@@ -550,7 +569,8 @@ mod tests {
         assert_eq!(o, AppOptions::default());
         assert!(o.verify_tls && o.save_window_size && !o.check_updates);
         assert_eq!(o.api_base(), OFFICIAL_API);
-        let o: AppOptions = serde_json::from_str(r#"{"api_base":"https://x.y/api","unknown":1}"#).unwrap();
+        let o: AppOptions =
+            serde_json::from_str(r#"{"api_base":"https://x.y/api","unknown":1}"#).unwrap();
         assert_eq!(o.api_base(), "https://x.y/api");
         assert_eq!(o.cdn_base(), OFFICIAL_CDN);
     }

@@ -77,11 +77,16 @@ impl AuthSession {
     pub fn icon(&self) -> Icon {
         let os = self.os.to_lowercase();
         let platform = self.platform.to_lowercase();
-        if ["android", "ios", "ipad", "iphone"].iter().any(|m| os.contains(m)) {
-            Icon::Phone
-        } else if ["chrome", "firefox", "safari", "edge", "opera", "browser", "web"]
+        if ["android", "ios", "ipad", "iphone"]
             .iter()
-            .any(|b| platform.contains(b))
+            .any(|m| os.contains(m))
+        {
+            Icon::Phone
+        } else if [
+            "chrome", "firefox", "safari", "edge", "opera", "browser", "web",
+        ]
+        .iter()
+        .any(|b| platform.contains(b))
         {
             Icon::Browser
         } else {
@@ -169,8 +174,9 @@ impl SessionsPage {
             Loadable::Loaded(list) => {
                 let now = chrono::Utc::now().timestamp();
                 let current = c.current_session_hash;
-                let (mine, others): (Vec<_>, Vec<_>) =
-                    list.iter().partition(|s| Some(s.id_hash.as_str()) == current);
+                let (mine, others): (Vec<_>, Vec<_>) = list
+                    .iter()
+                    .partition(|s| Some(s.id_hash.as_str()) == current);
                 if !mine.is_empty() {
                     widgets::label(ui, pal, "CURRENT DEVICE");
                     for s in &mine {
@@ -200,13 +206,8 @@ impl SessionsPage {
                         widgets::danger_button(pal, "Log out all known devices"),
                     );
                     if b.clicked() {
-                        self.confirm = Some(
-                            others
-                                .iter()
-                                .take(64)
-                                .map(|s| s.id_hash.clone())
-                                .collect(),
-                        );
+                        self.confirm =
+                            Some(others.iter().take(64).map(|s| s.id_hash.clone()).collect());
                     }
                 }
                 if self.busy {
@@ -261,7 +262,12 @@ fn session_row(ui: &mut egui::Ui, c: &Ctx, s: &AuthSession, now: i64, current: b
                 .show(ui, |ui| widgets::icon(ui, s.icon(), 22.0, pal.strong));
             ui.add_space(6.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new(s.title().to_uppercase()).bold().size(13.0).color(pal.strong));
+                ui.label(
+                    RichText::new(s.title().to_uppercase())
+                        .bold()
+                        .size(13.0)
+                        .color(pal.strong),
+                );
                 let mut line = Vec::new();
                 if !s.location.is_empty() {
                     line.push(s.location.clone());
@@ -274,7 +280,8 @@ fn session_row(ui: &mut egui::Ui, c: &Ctx, s: &AuthSession, now: i64, current: b
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if current {
                     ui.label(RichText::new("This device").size(13.0).color(pal.online));
-                } else if widgets::icon_button(ui, Icon::Close, pal, "Log out this device").clicked()
+                } else if widgets::icon_button(ui, Icon::Close, pal, "Log out this device")
+                    .clicked()
                 {
                     clicked = true;
                 }
@@ -301,7 +308,10 @@ mod tests {
             { "id_hash": "c", "client_info": { "os": null, "platform": "Chrome" } }
         ]});
         let l = AuthSession::parse_list(&v);
-        assert_eq!(l.iter().map(|s| s.id_hash.as_str()).collect::<Vec<_>>(), ["b", "a", "c"]);
+        assert_eq!(
+            l.iter().map(|s| s.id_hash.as_str()).collect::<Vec<_>>(),
+            ["b", "a", "c"]
+        );
         assert_eq!(l[1].title(), "Windows · Discord Client");
         assert_eq!(l[0].title(), "iOS");
         assert_eq!(l[0].icon(), Icon::Phone);

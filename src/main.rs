@@ -27,9 +27,8 @@ mod status;
 mod theme;
 mod timefmt;
 mod types;
-#[allow(dead_code)] // Wired into Settings by the integrator.
+#[allow(dead_code, unused_imports)] // Wired into Settings by the integrator.
 mod user_settings;
-mod us_demo;
 
 fn main() -> eframe::Result {
     // Two dependencies enable different rustls crypto backends (aws-lc-rs via
@@ -55,17 +54,6 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    if std::env::var("RC_US_DEMO").is_ok() {
-        return eframe::run_native(
-            "RustCord",
-            options,
-            Box::new(|cc| {
-                egui_extras::install_image_loaders(&cc.egui_ctx);
-                theme::install_fonts(&cc.egui_ctx);
-                Ok(Box::new(us_demo::Demo::new(&cc.egui_ctx)))
-            }),
-        );
-    }
     eframe::run_native(
         "RustCord",
         options,
