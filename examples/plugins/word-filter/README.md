@@ -1,0 +1,1 @@
+**Word Filter** — hides words you choose in messages you see (as clickable spoilers, or replaced with dots); set the list under Settings → Plugins → Word Filter → Settings. Display-only, nothing changes on Discord. Permissions: `message_display`, `ui`, `storage`.

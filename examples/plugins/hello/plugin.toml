@@ -1,0 +1,8 @@
+id = "hello"
+name = "Hello"
+version = "1.0.0"
+author = "RustCord"
+description = "Adds /shrug and /time to the message box."
+min_rustcord = "0.1.0"
+permissions = ["commands"]
+entry = "main.luau"

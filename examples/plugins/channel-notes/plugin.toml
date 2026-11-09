@@ -1,0 +1,8 @@
+id = "channel-notes"
+name = "Channel Notes"
+version = "1.0.0"
+author = "RustCord"
+description = "A panel with private notes for each channel, saved on this PC."
+min_rustcord = "0.1.0"
+permissions = ["ui", "storage"]
+entry = "main.luau"

@@ -17,6 +17,7 @@ mod members;
 mod notify;
 mod perms;
 mod pins;
+mod plugins;
 mod presence;
 mod profile;
 mod quick_switcher;

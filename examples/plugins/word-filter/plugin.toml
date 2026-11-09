@@ -1,0 +1,8 @@
+id = "word-filter"
+name = "Word Filter"
+version = "1.0.0"
+author = "RustCord"
+description = "Hides words you don't want to see, on this PC only: blurred as spoilers or replaced with dots."
+min_rustcord = "0.1.0"
+permissions = ["message_display", "ui", "storage"]
+entry = "main.luau"

@@ -61,6 +61,10 @@ pub struct Config {
     /// Bot accounts: ask for the Server Members + Presence intents and load
     /// the whole member list. Both must be enabled in the Developer Portal.
     pub bot_member_intents: bool,
+
+    /// Plugins the user enabled, with the permissions they approved
+    /// (Plugins module; see `plugins::PluginGrant`).
+    pub enabled_plugins: Vec<crate::plugins::PluginGrant>,
 }
 
 impl Default for Config {
@@ -86,6 +90,7 @@ impl Default for Config {
             flash_taskbar: true,
             compact_member_list: false,
             bot_member_intents: false,
+            enabled_plugins: Vec::new(),
         }
     }
 }
@@ -161,6 +166,8 @@ pub struct Modules {
     pub embeds: bool,
     /// `@` / `#` / `:` suggestions in the message box.
     pub autocomplete: bool,
+    /// User-installed Luau plugins. Off = no plugin VM is created.
+    pub plugins: bool,
 }
 
 impl Default for Modules {
@@ -175,6 +182,7 @@ impl Default for Modules {
             status_bar: false,
             embeds: true,
             autocomplete: true,
+            plugins: false,
         }
     }
 }
@@ -231,6 +239,11 @@ pub const MODULES: &[ModuleInfo] = &[
         name: "Autocomplete",
         description: "Suggestions while typing @mentions, #channels and :emoji: in the message box.",
         get: |m| &mut m.autocomplete,
+    },
+    ModuleInfo {
+        name: "Plugins",
+        description: "Run Luau plugins you install (Settings → Plugins). Each runs sandboxed with only the permissions you approve. Off = no plugin is loaded.",
+        get: |m| &mut m.plugins,
     },
 ];
 
