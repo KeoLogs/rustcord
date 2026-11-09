@@ -201,6 +201,56 @@ impl Api {
         Ok(())
     }
 
+    /// A user's profile (user accounts only). `guild_id` adds their server
+    /// member data (nick, roles, joined_at).
+    pub async fn user_profile(&self, user_id: &str, guild_id: Option<&str>) -> Result<Value> {
+        let mut url = format!(
+            "{API_BASE}/users/{user_id}/profile?with_mutual_guilds=false\
+             &with_mutual_friends=false&with_mutual_friends_count=false"
+        );
+        if let Some(g) = guild_id {
+            url.push_str(&format!("&guild_id={g}"));
+        }
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", &self.auth)
+            .send()
+            .await
+            .context("profile request failed")?;
+        Ok(Self::check(resp, "Loading profile").await?.json().await?)
+    }
+
+    /// My note on a user. 404 means there's no note.
+    pub async fn note(&self, user_id: &str) -> Result<String> {
+        let resp = self
+            .http
+            .get(format!("{API_BASE}/users/@me/notes/{user_id}"))
+            .header("Authorization", &self.auth)
+            .send()
+            .await
+            .context("note request failed")?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(String::new());
+        }
+        let body: Value = Self::check(resp, "Loading note").await?.json().await?;
+        Ok(body["note"].as_str().unwrap_or_default().to_string())
+    }
+
+    /// Set my note on a user (empty clears it, like Discord's client).
+    pub async fn set_note(&self, user_id: &str, note: &str) -> Result<()> {
+        let resp = self
+            .http
+            .put(format!("{API_BASE}/users/@me/notes/{user_id}"))
+            .header("Authorization", &self.auth)
+            .json(&json!({ "note": note }))
+            .send()
+            .await
+            .context("note request failed")?;
+        Self::check(resp, "Saving note").await?;
+        Ok(())
+    }
+
     /// Show the typing indicator to others for ~10 seconds.
     pub async fn trigger_typing(&self, channel_id: &str) -> Result<()> {
         let resp = self

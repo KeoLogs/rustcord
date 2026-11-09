@@ -14,9 +14,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
+use crate::members::{self, ListUpdate, Member, Role};
 use crate::notify::GuildSettings;
+use crate::presence::{self, Presence};
 use crate::read_state::ReadStateEntry;
 use crate::types::{Channel, Guild, Message, MessagePatch, ToUi, User};
 
@@ -36,6 +39,8 @@ const OP_HEARTBEAT_ACK: u64 = 11;
 // Intents (only used for bot accounts): GUILDS | GUILD_MESSAGES |
 // GUILD_MESSAGE_TYPING | DIRECT_MESSAGES | DIRECT_MESSAGE_TYPING | MESSAGE_CONTENT
 const BOT_INTENTS: u64 = (1 << 0) | (1 << 9) | (1 << 11) | (1 << 12) | (1 << 14) | (1 << 15);
+/// Privileged, opt-in (Settings → Appearance): GUILD_MEMBERS | GUILD_PRESENCES.
+const BOT_MEMBER_INTENTS: u64 = (1 << 1) | (1 << 8);
 
 /// Close codes that mean "don't bother reconnecting".
 const FATAL_CLOSE_CODES: &[u16] = &[4004, 4010, 4011, 4012, 4013, 4014];
@@ -46,6 +51,8 @@ const NO_RESUME_CLOSE_CODES: &[u16] = &[4007, 4009];
 pub struct GatewayConfig {
     pub token: String,
     pub is_bot: bool,
+    /// Bots: also ask for the Server Members and Presence intents.
+    pub member_intents: bool,
 }
 
 /// What we need to resume a session. Lives across reconnects.
@@ -90,6 +97,7 @@ pub async fn run_session(
     cfg: &GatewayConfig,
     session: &mut Session,
     tx: &Sender<ToUi>,
+    commands: &mut UnboundedReceiver<Value>,
     repaint: &(dyn Fn() + Sync),
 ) -> Result<SessionEnd> {
     let send_ui = |ev: ToUi| {
@@ -138,9 +146,15 @@ pub async fn run_session(
     let mut heartbeat = tokio::time::interval(Duration::from_millis(interval_ms));
     heartbeat.tick().await; // first tick fires immediately; skip it
     let mut awaiting_ack = false;
+    // Ops from the UI (op 14 / op 8) wait until READY or RESUMED.
+    let mut ready = false;
 
     loop {
         tokio::select! {
+            Some(cmd) = commands.recv(), if ready => {
+                write.send(WsMessage::Text(cmd.to_string().into())).await?;
+            }
+
             _ = heartbeat.tick() => {
                 if awaiting_ack {
                     // Zombie connection: no ACK since last heartbeat. Resume.
@@ -160,6 +174,7 @@ pub async fn run_session(
                             session.reset();
                             let why = match code {
                                 4004 => "Invalid token. Check it and log in again.".to_string(),
+                                4014 if cfg.member_intents => "Discord refused the bot's intents. Turn on the Message Content, Server Members and Presence intents in the Developer Portal (or switch off \"Bots: load the full member list\" in Settings → Appearance).".to_string(),
                                 4014 => "Discord refused the bot's intents. Turn on the Message Content intent in the Developer Portal.".to_string(),
                                 _ => format!("Discord closed the connection ({code}): {}", close.reason),
                             };
@@ -188,11 +203,18 @@ pub async fn run_session(
                                 session.resume_url =
                                     d["resume_gateway_url"].as_str().map(str::to_string);
                                 session.my_id = d["user"]["id"].as_str().unwrap_or_default().to_string();
+                                ready = true;
                             }
-                            "RESUMED" => send_ui(ToUi::Resumed),
+                            "RESUMED" => {
+                                ready = true;
+                                send_ui(ToUi::Resumed);
+                            }
                             _ => {}
                         }
                         if let Some(ev) = handle_dispatch(event, d, &session.my_id) {
+                            send_ui(ev);
+                        }
+                        for ev in member_events(event, d) {
                             send_ui(ev);
                         }
                     }
@@ -224,7 +246,12 @@ fn identify(cfg: &GatewayConfig) -> Value {
         "properties": { "os": std::env::consts::OS, "browser": "RustCord", "device": "RustCord" },
     });
     if cfg.is_bot {
-        d["intents"] = json!(BOT_INTENTS);
+        let extra = if cfg.member_intents {
+            BOT_MEMBER_INTENTS
+        } else {
+            0
+        };
+        d["intents"] = json!(BOT_INTENTS | extra);
     }
     json!({ "op": OP_IDENTIFY, "d": d })
 }
@@ -337,6 +364,106 @@ fn handle_dispatch(event: &str, d: &Value, my_id: &str) -> Option<ToUi> {
     }
 }
 
+/// Members, roles, presence and notes (see `members.rs`, `presence.rs`).
+fn member_events(event: &str, d: &Value) -> Vec<ToUi> {
+    let guild_id = || d["guild_id"].as_str().unwrap_or_default().to_string();
+    let parse_members = |v: &Value| -> Vec<Member> {
+        v.as_array()
+            .map(|a| a.iter().map(Member::from_json).collect())
+            .unwrap_or_default()
+    };
+    let parse_presences = |v: &Value| -> Vec<(String, Presence)> {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| {
+                let id = p["user"]["id"].as_str().or(p["user_id"].as_str())?;
+                Some((id.to_string(), Presence::from_json(p)))
+            })
+            .collect()
+    };
+    let mut out = Vec::new();
+    match event {
+        "READY_SUPPLEMENTAL" => {
+            out.push(ToUi::Presences(presence::parse_supplemental(d)));
+            // merged_members[i] belongs to guilds[i].
+            let guilds = d["guilds"].as_array().into_iter().flatten();
+            for (i, g) in guilds.enumerate() {
+                let members = parse_members(&d["merged_members"][i]);
+                if let (Some(id), false) = (g["id"].as_str(), members.is_empty()) {
+                    out.push(ToUi::Members {
+                        guild_id: id.to_string(),
+                        members,
+                        full_list: false,
+                    });
+                }
+            }
+        }
+        "PRESENCE_UPDATE" => {
+            if let Some(id) = d["user"]["id"].as_str() {
+                out.push(ToUi::Presences(vec![(
+                    id.to_string(),
+                    Presence::from_json(d),
+                )]));
+            }
+        }
+        "GUILD_MEMBER_LIST_UPDATE" => {
+            if let Some(u) = ListUpdate::from_json(d) {
+                out.push(ToUi::MemberList(u));
+            }
+        }
+        "GUILD_MEMBERS_CHUNK" | "GUILD_CREATE" => {
+            let guild_id = if event == "GUILD_CREATE" {
+                d["id"].as_str().unwrap_or_default().to_string()
+            } else {
+                guild_id()
+            };
+            let mut members = parse_members(&d["members"]);
+            // Presences in a chunk are separate from the members.
+            let presences = parse_presences(&d["presences"]);
+            for m in &mut members {
+                if let Some((_, p)) = presences.iter().find(|(id, _)| *id == m.user.id) {
+                    m.presence = Some(p.clone());
+                }
+            }
+            if !presences.is_empty() {
+                out.push(ToUi::Presences(presences));
+            }
+            let full_list = d["nonce"].as_str() == Some(members::NONCE_LIST);
+            if !members.is_empty() || full_list {
+                out.push(ToUi::Members {
+                    guild_id,
+                    members,
+                    full_list,
+                });
+            }
+        }
+        "GUILD_MEMBER_ADD" | "GUILD_MEMBER_UPDATE" => out.push(ToUi::Members {
+            guild_id: guild_id(),
+            members: vec![Member::from_json(d)],
+            full_list: false,
+        }),
+        "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" => out.push(ToUi::RoleUpserted {
+            guild_id: guild_id(),
+            role: Role::from_json(&d["role"]),
+        }),
+        "GUILD_ROLE_DELETE" => out.push(ToUi::RoleDeleted {
+            guild_id: guild_id(),
+            role_id: d["role_id"].as_str().unwrap_or_default().to_string(),
+        }),
+        "USER_NOTE_UPDATE" => {
+            if let Some(id) = d["id"].as_str() {
+                out.push(ToUi::Note {
+                    user_id: id.to_string(),
+                    note: d["note"].as_str().unwrap_or_default().to_string(),
+                });
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 async fn next_json<S>(read: &mut S) -> Result<Option<Value>>
 where
     S: futures_util::Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>>
@@ -379,6 +506,44 @@ mod tests {
         ]);
         assert_eq!(my_roles(&members, "1"), vec!["a", "b"]);
         assert!(my_roles(&Value::Null, "1").is_empty());
+    }
+
+    #[test]
+    fn member_chunk_with_presences() {
+        let d = json!({ "guild_id": "g", "nonce": "rc-list",
+            "members": [{ "user": { "id": "1", "username": "a" }, "roles": ["r"] }],
+            "presences": [{ "user": { "id": "1" }, "status": "idle" }],
+        });
+        let evs = member_events("GUILD_MEMBERS_CHUNK", &d);
+        assert!(matches!(&evs[0], ToUi::Presences(p) if p[0].0 == "1"));
+        match &evs[1] {
+            ToUi::Members {
+                guild_id,
+                members,
+                full_list,
+            } => {
+                assert_eq!(guild_id, "g");
+                assert!(*full_list);
+                assert_eq!(members[0].roles, ["r"]);
+                assert!(members[0].presence.is_some());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(member_events("TYPING_START", &d).is_empty());
+    }
+
+    #[test]
+    fn identify_intents() {
+        let mut cfg = GatewayConfig {
+            token: "t".into(),
+            is_bot: true,
+            member_intents: false,
+        };
+        assert_eq!(identify(&cfg)["d"]["intents"], json!(BOT_INTENTS));
+        cfg.member_intents = true;
+        assert_eq!(identify(&cfg)["d"]["intents"], json!(BOT_INTENTS | 2 | 256));
+        cfg.is_bot = false;
+        assert!(identify(&cfg)["d"].get("intents").is_none());
     }
 
     #[test]

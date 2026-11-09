@@ -35,6 +35,14 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   unit tests; `app.rs` wires them up (`track_new_message`, `ack_open_channel`).
   Acks only ever happen because the user opened/is viewing a channel or
   picked a menu item; bots skip ack requests (no read state on Discord).
+- `src/members.rs`: roles (`role_color`, `hoisted_role`), `MemberCache`
+  (nick + roles per server, capped), the op 14 member list (`MemberList`
+  applies GUILD_MEMBER_LIST_UPDATE ops), op 8 builders, `build_rows` (bots'
+  locally grouped list) and the list UI. `src/presence.rs`: `Presences`
+  (status + activity, capped). `src/profile.rs`: `ProfileCache` (small MRU)
+  and the popout card. Gateway ops from the UI go `ToBackend` → backend →
+  an mpsc into `gateway::run_session`, sent only after READY/RESUMED. The
+  Member list module gates op 14 and presence storage.
 - `docs/PORTING.md` is the roadmap of features to port from Discord
   Messenger (MIT, credit kept in README/About).
 

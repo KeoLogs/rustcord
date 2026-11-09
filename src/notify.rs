@@ -333,7 +333,7 @@ pub fn now_iso() -> String {
     iso_from_unix(secs)
 }
 
-fn iso_from_unix(secs: u64) -> String {
+pub fn iso_from_unix(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
     // Howard Hinnant's civil_from_days.

@@ -9,7 +9,10 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::members::{CachedMember, ListUpdate, Member, Role};
 use crate::notify::GuildSettings;
+use crate::presence::Presence;
+use crate::profile::Profile;
 use crate::read_state::ReadStateEntry;
 
 /// Discord channel types we care about.
@@ -100,6 +103,8 @@ pub struct Guild {
     pub default_notifications: u8,
     /// My role ids in this server (for role mentions). Filled in by the gateway.
     pub my_roles: Vec<String>,
+    /// The server's roles, highest first (name colours, member list groups).
+    pub roles: Vec<Role>,
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +157,11 @@ impl Guild {
             icon_url,
             default_notifications,
             my_roles: Vec::new(),
+            roles: Role::parse_list(
+                v.get("roles")
+                    .or_else(|| v.pointer("/properties/roles"))
+                    .unwrap_or(&Value::Null),
+            ),
             channels: v
                 .get("channels")
                 .and_then(Value::as_array)
@@ -170,6 +180,7 @@ impl Guild {
             icon_url: None,
             default_notifications: 0,
             my_roles: Vec::new(),
+            roles: Vec::new(),
             channels,
         };
         guild.sort_channels();
@@ -399,6 +410,9 @@ pub struct Message {
     pub mention_roles: Vec<String>,
     /// @everyone / @here.
     pub mention_everyone: bool,
+    /// The author's server member info (MESSAGE_CREATE in servers). The UI
+    /// moves it into the member cache.
+    pub member: Option<Box<CachedMember>>,
 }
 
 impl Message {
@@ -455,6 +469,14 @@ impl Message {
                 .get("mention_everyone")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            member: v.get("member").filter(|m| m.is_object()).map(|m| {
+                let m = Member::from_json(m);
+                Box::new(CachedMember {
+                    nick: m.nick,
+                    roles: m.roles,
+                    joined_at: m.joined_at,
+                })
+            }),
         }
     }
 
@@ -557,6 +579,34 @@ pub enum ToUi {
         /// Present in servers (from the member object); None in DMs.
         name: Option<String>,
     },
+    /// Online status / activity changes (PRESENCE_UPDATE, READY_SUPPLEMENTAL,
+    /// GUILD_MEMBERS_CHUNK presences).
+    Presences(Vec<(String, Presence)>),
+    /// GUILD_MEMBER_LIST_UPDATE (user accounts, after op 14).
+    MemberList(ListUpdate),
+    /// Server members (GUILD_MEMBERS_CHUNK, READY_SUPPLEMENTAL, GUILD_CREATE).
+    /// `full_list`: answer to a bot's whole-list request (op 8 with query).
+    Members {
+        guild_id: String,
+        members: Vec<Member>,
+        full_list: bool,
+    },
+    RoleUpserted {
+        guild_id: String,
+        role: Role,
+    },
+    RoleDeleted {
+        guild_id: String,
+        role_id: String,
+    },
+    Profile(Box<Profile>),
+    /// The profile couldn't be loaded (bot session, 403/404, network).
+    ProfileUnavailable(String),
+    /// A user's note (GET answer, USER_NOTE_UPDATE). Empty = no note.
+    Note {
+        user_id: String,
+        note: String,
+    },
 }
 
 /// Requests the UI sends to the backend.
@@ -604,5 +654,34 @@ pub enum ToBackend {
     Notify {
         title: String,
         body: String,
+    },
+    /// Op 14: member list for a channel (user accounts; bots ignore it).
+    SubscribeMembers {
+        guild_id: String,
+        channel_id: String,
+        ranges: Vec<(u32, u32)>,
+    },
+    /// Op 8 with user ids: roles/nicks of these people (message authors).
+    RequestMembers {
+        guild_id: String,
+        user_ids: Vec<String>,
+    },
+    /// Op 8 for a whole server (bots with the Server Members intent only).
+    RequestMemberList {
+        guild_id: String,
+    },
+    /// GET users/{id}/profile (user accounts).
+    LoadProfile {
+        user_id: String,
+        guild_id: Option<String>,
+    },
+    /// GET users/@me/notes/{id}.
+    LoadNote {
+        user_id: String,
+    },
+    /// PUT users/@me/notes/{id}. Only sent when the user presses Save.
+    SetNote {
+        user_id: String,
+        note: String,
     },
 }

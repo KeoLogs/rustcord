@@ -8,11 +8,21 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::api::Api;
 use crate::gateway::{self, GatewayConfig, Session, SessionEnd};
+use crate::members;
+use crate::profile::Profile;
 use crate::types::{ToBackend, ToUi};
+
+/// Options read from the config at login.
+#[derive(Clone, Copy, Default)]
+pub struct Options {
+    /// Bots: ask for the Server Members + Presence intents.
+    pub bot_member_intents: bool,
+}
 
 pub fn spawn(
     raw_token: String,
     demo: bool,
+    options: Options,
     tx: Sender<ToUi>,
     rx: UnboundedReceiver<ToBackend>,
     egui_ctx: eframe::egui::Context,
@@ -23,13 +33,14 @@ pub fn spawn(
             let ctx = egui_ctx.clone();
             rt.block_on(crate::demo::run(tx, rx, move || ctx.request_repaint()));
         } else {
-            rt.block_on(run(raw_token, tx, rx, egui_ctx));
+            rt.block_on(run(raw_token, options, tx, rx, egui_ctx));
         }
     });
 }
 
 async fn run(
     raw_token: String,
+    options: Options,
     tx: Sender<ToUi>,
     mut rx: UnboundedReceiver<ToBackend>,
     egui_ctx: eframe::egui::Context,
@@ -53,18 +64,25 @@ async fn run(
         }
     };
 
+    // Ops for the gateway (op 14 / op 8) from UI requests.
+    let (gw_tx, mut gw_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+
     // Gateway task: reconnects with backoff until a fatal error.
     {
         let tx = tx.clone();
         let ctx = egui_ctx.clone();
         tokio::spawn(async move {
-            let cfg = GatewayConfig { token, is_bot };
+            let cfg = GatewayConfig {
+                token,
+                is_bot,
+                member_intents: is_bot && options.bot_member_intents,
+            };
             let repaint = || ctx.request_repaint();
             // Kept across connections so we can RESUME instead of re-identifying.
             let mut session = Session::default();
             let mut backoff = 1u64;
             loop {
-                match gateway::run_session(&cfg, &mut session, &tx, &repaint).await {
+                match gateway::run_session(&cfg, &mut session, &tx, &mut gw_rx, &repaint).await {
                     Ok(SessionEnd::Fatal(reason)) => {
                         let _ = tx.send(ToUi::Fatal(reason));
                         repaint();
@@ -84,6 +102,30 @@ async fn run(
 
     // Handle requests from the UI.
     while let Some(req) = rx.recv().await {
+        // Gateway ops are just forwarded (sent once the session is ready).
+        let op = match &req {
+            // Op 14 is for user accounts only.
+            ToBackend::SubscribeMembers { .. } if is_bot => continue,
+            ToBackend::SubscribeMembers {
+                guild_id,
+                channel_id,
+                ranges,
+            } => Some(members::subscribe_op(guild_id, channel_id, ranges)),
+            ToBackend::RequestMembers { guild_id, user_ids } => {
+                Some(members::request_members_op(guild_id, user_ids, is_bot))
+            }
+            ToBackend::RequestMemberList { guild_id } => {
+                if !(is_bot && options.bot_member_intents) {
+                    continue;
+                }
+                Some(members::request_member_list_op(guild_id))
+            }
+            _ => None,
+        };
+        if let Some(op) = op {
+            let _ = gw_tx.send(op);
+            continue;
+        }
         let api = api.clone();
         let tx = tx.clone();
         let ctx = egui_ctx.clone();
@@ -163,6 +205,31 @@ async fn run(
                     }
                     result
                 }
+                ToBackend::SubscribeMembers { .. }
+                | ToBackend::RequestMembers { .. }
+                | ToBackend::RequestMemberList { .. } => Ok(None),
+                // Profiles and notes are user-account endpoints.
+                ToBackend::LoadProfile { user_id, .. } if is_bot => {
+                    Ok(Some(ToUi::ProfileUnavailable(user_id)))
+                }
+                ToBackend::LoadNote { .. } | ToBackend::SetNote { .. } if is_bot => Ok(None),
+                ToBackend::LoadProfile { user_id, guild_id } => {
+                    // Failures just mean "show what we have".
+                    match api.user_profile(&user_id, guild_id.as_deref()).await {
+                        Ok(v) => Ok(Some(ToUi::Profile(Box::new(Profile::from_json(
+                            &v, guild_id,
+                        ))))),
+                        Err(_) => Ok(Some(ToUi::ProfileUnavailable(user_id))),
+                    }
+                }
+                ToBackend::LoadNote { user_id } => {
+                    let note = api.note(&user_id).await.unwrap_or_default();
+                    Ok(Some(ToUi::Note { user_id, note }))
+                }
+                ToBackend::SetNote { user_id, note } => api
+                    .set_note(&user_id, &note)
+                    .await
+                    .map(|_| Some(ToUi::Note { user_id, note })),
                 ToBackend::Notify { title, body } => {
                     let _ = tokio::task::spawn_blocking(move || {
                         crate::notify::show_desktop(&title, &body)

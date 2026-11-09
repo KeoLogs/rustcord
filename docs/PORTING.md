@@ -31,14 +31,23 @@ email/password/QR are unimplemented there too).
 Not done from Batch A: changing mute / notification levels from RustCord (needs
 `PATCH users/@me/guilds/{id}/settings`; read-only for now), notification sound.
 
-## Batch B — member list & presence
-- Op 14 subscribe `{guild_id, typing, activities, threads, channels:{id:[[0,99]]}}` (DI:1596-1637)
-- `GUILD_MEMBER_LIST_UPDATE` SYNC/INSERT/DELETE/UPDATE/INVALIDATE (DI:2886, 3137-3212)
+**Batch B — member list & presence** (`src/members.rs`, `src/presence.rs`,
+`src/profile.rs`):
+- Op 14 subscribe `{guild_id, typing, activities, threads, channels:{id:[[0,99],…]}}`
+  (DI:1596-1637) when a server channel is shown, more ranges as you scroll
+- `GUILD_MEMBER_LIST_UPDATE` SYNC/INSERT/DELETE/UPDATE/INVALIDATE (DI:2886,
+  3137-3212); only the visible server's list is kept
+- Roles (`core/models/Guild.cpp`), `GUILD_ROLE_*`; role colours for names in chat
 - `READY_SUPPLEMENTAL` merged_members/presences (DI:2357), `PRESENCE_UPDATE` (DI:3006)
-- Op 8 + `GUILD_MEMBERS_CHUNK` (DI:199-250, 3062)
-- Profile popout: `GET users/{id}/profile`, notes `GET/PUT users/@me/notes/{id}`
-  (`core/state/ProfileCache.cpp`), role list (`windows/RoleList.cpp`)
-- Setting: CompactMemberList
+- Op 8 + `GUILD_MEMBERS_CHUNK` (DI:199-250, 3062): `user_ids` for message
+  authors' roles (users and bots); `query:""` whole list for bots with the
+  opt-in Server Members + Presence intents
+- Profile popout: `GET users/{id}/profile`, notes `GET/PUT users/@me/notes/{id}`,
+  `USER_NOTE_UPDATE` (`core/state/ProfileCache.cpp`), role chips (`windows/RoleList.cpp`)
+- Setting: CompactMemberList (Settings → Appearance)
+
+Not done from Batch B: mutual servers/friends in the popout, per-server
+avatars/banners, op 37 (newer bulk subscribe), member search.
 
 ## Batch C — message richness
 - Markdown (`core/text/FormattedText.cpp`) + DisableFormatting toggle

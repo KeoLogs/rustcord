@@ -29,6 +29,15 @@ Usable day to day. It has:
   don't badge or notify
 - **notifications**: desktop notifications for mentions and DMs, taskbar flash,
   and a 🔔 inbox of recent mentions (Settings → Notifications)
+- **member list** like Discord's: grouped by hoisted role ("ONLINE — 12"),
+  names in role colours, status dots (online / idle / do not disturb /
+  offline), custom status or "Playing …" under the name, loads more as you
+  scroll; compact mode in Settings → Appearance. Bots show who's recently
+  active, or the full list if you enable the Server Members + Presence intents
+- **role colours** for names in chat, server nicknames, status dots in the DM list
+- **profile popouts**: click an avatar or name for a Discord-style card with
+  banner colour, status, about me, account/server join dates, roles and your
+  **note** (editable; saved only when you press Save)
 - gateway **resume**: short disconnects pick up where they left off instead of
   reloading everything
 - **Settings** (⚙ in the profile bar): account, appearance, privacy & login,
@@ -38,8 +47,8 @@ Usable day to day. It has:
   Saved between runs.
 - **Modules**: switch optional parts off to save memory (Settings → Modules)
 
-Next up: see [docs/PORTING.md](docs/PORTING.md) — member list, markdown,
-embeds, pins, settings sync. Voice comes last.
+Next up: see [docs/PORTING.md](docs/PORTING.md) — markdown, embeds, pins,
+settings sync. Voice comes last.
 
 ## Running
 
@@ -93,9 +102,12 @@ On Linux you may need GUI dev packages first:
 | `src/emoji.rs` | Splits text into text + emoji images |
 | `src/read_state.rs` | Unread / mention counts per channel |
 | `src/notify.rs` | Mutes, mention detection, notification rules, inbox, desktop popups |
+| `src/members.rs` | Roles + name colours, member cache, member list (op 14 / GUILD_MEMBER_LIST_UPDATE), list UI |
+| `src/presence.rs` | Online status and activities |
+| `src/profile.rs` | Profiles, notes and the profile popout card |
 | `src/backend.rs` | Tokio runtime thread; runs the gateway and handles UI requests |
 | `src/gateway.rs` | WebSocket connection to Discord's gateway (identify / resume) |
-| `src/api.rs` | REST calls: history, send / edit / delete, typing, acks |
+| `src/api.rs` | REST calls: history, send / edit / delete, typing, acks, profiles, notes |
 | `src/types.rs` | Guild / Channel / Message types and UI↔backend messages |
 
 The UI and the network never block each other: the backend sends `ToUi`

@@ -162,6 +162,27 @@ impl SettingsPage {
                         .step_by(0.05)
                         .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
                 );
+                ui.add_space(12.0);
+                label(ui, pal, "MEMBER LIST");
+                ui.checkbox(&mut config.compact_member_list, "Compact member list");
+                hint(
+                    ui,
+                    pal,
+                    "Smaller rows without the custom status / activity line.",
+                );
+                ui.add_space(6.0);
+                ui.checkbox(
+                    &mut config.bot_member_intents,
+                    "Bots: load the full member list",
+                );
+                hint(
+                    ui,
+                    pal,
+                    "Bot accounts only. Asks Discord for the Server Members and Presence \
+                     intents, which you must first switch on for your bot in the Developer \
+                     Portal (Bot → Privileged Gateway Intents). Takes effect next time you \
+                     log in. Without it, bots show who's recently active.",
+                );
             }
             Section::Notifications => notifications(ui, config, pal),
             Section::Privacy => {

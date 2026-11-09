@@ -35,6 +35,12 @@ pub struct Config {
     /// Flash the taskbar entry when a notification arrives and the window
     /// isn't focused.
     pub flash_taskbar: bool,
+
+    /// Smaller member list rows without the activity line.
+    pub compact_member_list: bool,
+    /// Bot accounts: ask for the Server Members + Presence intents and load
+    /// the whole member list. Both must be enabled in the Developer Portal.
+    pub bot_member_intents: bool,
 }
 
 impl Default for Config {
@@ -50,6 +56,8 @@ impl Default for Config {
             warn_before_links: true,
             desktop_notifications: true,
             flash_taskbar: true,
+            compact_member_list: false,
+            bot_member_intents: false,
         }
     }
 }
@@ -65,7 +73,7 @@ pub struct Modules {
     pub emoji_images: bool,
     /// "X is typing…", both showing and sending.
     pub typing_indicators: bool,
-    /// Member list panel contents.
+    /// Member list panel contents, online status and profile popouts' status.
     pub member_list: bool,
     /// Desktop notifications, taskbar flash and the 🔔 mentions inbox.
     pub notifications: bool,
@@ -113,8 +121,8 @@ pub const MODULES: &[ModuleInfo] = &[
         get: |m| &mut m.typing_indicators,
     },
     ModuleInfo {
-        name: "Member list",
-        description: "The panel listing people in the current DM or recently active in a channel.",
+        name: "Member list & presence",
+        description: "The member list (grouped by role, with online status and activities) and status dots. Off = no member list requests and no presence kept.",
         get: |m| &mut m.member_list,
     },
     ModuleInfo {

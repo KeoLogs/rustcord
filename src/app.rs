@@ -1,6 +1,6 @@
 //! The RustCord UI: login screen, main layout, settings page.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
@@ -12,11 +12,14 @@ use crate::config::{CONFIG_KEY, Config};
 use crate::emoji::{self, Segment};
 use crate::layout::{self, LAYOUT_KEY, LayoutBehavior, Pane};
 use crate::login::{LoginAction, LoginForm};
+use crate::members::{self, Member, MemberCache, MemberList, Row};
 use crate::notify::{self, Inbox, InboxItem, Mutes, NotifyCheck};
+use crate::presence::{Presences, Status};
+use crate::profile::{self, Popout, PopoutAction, ProfileCache};
 use crate::read_state::ReadState;
 use crate::settings::{SettingsAction, SettingsPage};
 use crate::theme::{Palette, ThemeChoice};
-use crate::types::{Attachment, DM_GUILD_ID, Guild, Message, ToBackend, ToUi, User};
+use crate::types::{Attachment, CHANNEL_DM, DM_GUILD_ID, Guild, Message, ToBackend, ToUi, User};
 
 const TYPING_TIMEOUT: Duration = Duration::from_secs(10);
 const TYPING_RESEND: Duration = Duration::from_secs(8);
@@ -83,7 +86,10 @@ impl RustCordApp {
     fn start_session(&mut self, ctx: &egui::Context, token: String, demo: bool) {
         let (ui_tx, ui_rx) = mpsc::channel();
         let (be_tx, be_rx) = tokio::sync::mpsc::unbounded_channel();
-        crate::backend::spawn(token, demo, ui_tx, be_rx, ctx.clone());
+        let options = crate::backend::Options {
+            bot_member_intents: self.config.bot_member_intents,
+        };
+        crate::backend::spawn(token, demo, options, ui_tx, be_rx, ctx.clone());
         self.screen = Screen::Main(Box::new(State::new(ui_rx, be_tx)));
     }
 
@@ -154,6 +160,10 @@ impl eframe::App for RustCordApp {
         if !self.config.modules.notifications && !state.inbox.items.is_empty() {
             // Module switched off: free the inbox.
             state.inbox = Inbox::default();
+        }
+        if !self.config.modules.member_list {
+            // Module switched off: free the member list and presences.
+            state.free_member_list(ctx);
         }
 
         // Files dropped onto the window go into the upload list.
@@ -251,7 +261,7 @@ impl eframe::App for RustCordApp {
         });
         layout::end_frame(&self.tree, &ctx);
 
-        state.overlays(ui, &pal);
+        state.overlays(ui, &self.config, &pal);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -281,6 +291,20 @@ enum MessageAction {
     Delete(String),
     Copy(String),
     MarkUnread(String),
+    /// Clicked an avatar or name: open their profile next to this rect.
+    Profile(User, egui::Rect),
+}
+
+/// An op 14 subscription: (guild, channel, ranges).
+type Subscription = (String, String, Vec<(u32, u32)>);
+
+/// A bot's whole-server member list (op 8 with the Server Members intent),
+/// grouped locally since bots can't use op 14.
+struct BotList {
+    guild_id: String,
+    members: Vec<Member>,
+    list: MemberList,
+    dirty: bool,
 }
 
 struct Typer {
@@ -332,6 +356,25 @@ pub struct State {
     last_ack_at: Option<Instant>,
     /// (channel, last read message when opened): where the "NEW" line goes.
     new_marker: Option<(String, u64)>,
+
+    /// Online status and activities (Member list module).
+    presences: Presences,
+    /// Nicknames and roles of people seen in servers (name colours).
+    member_cache: MemberCache,
+    /// "guild:user" pairs already asked for with op 8.
+    asked_members: HashSet<String>,
+    /// Member list of the server being viewed (user accounts, op 14).
+    member_list: Option<MemberList>,
+    /// What we last subscribed to with op 14: (guild, channel, ranges).
+    subscribed: Option<Subscription>,
+    /// Bots with the Server Members intent: the server's members.
+    bot_list: Option<BotList>,
+    /// Server whose whole member list a bot asked for.
+    bot_list_requested: Option<String>,
+    /// Loaded profiles and notes.
+    profiles: ProfileCache,
+    /// Open profile card.
+    popout: Option<Popout>,
 }
 
 impl State {
@@ -363,6 +406,15 @@ impl State {
             ack_pending: None,
             last_ack_at: None,
             new_marker: None,
+            presences: Presences::default(),
+            member_cache: MemberCache::default(),
+            asked_members: HashSet::new(),
+            member_list: None,
+            subscribed: None,
+            bot_list: None,
+            bot_list_requested: None,
+            profiles: ProfileCache::default(),
+            popout: None,
         }
     }
 
@@ -407,6 +459,10 @@ impl State {
                 }
                 self.reads.load(&read_state);
                 self.mutes.replace_all(guild_settings);
+                // New session: Discord forgot our subscriptions; start over.
+                self.free_member_list(ctx);
+                self.member_cache.clear();
+                self.asked_members.clear();
                 if self.selected_guild.is_none() {
                     self.selected_guild = self.guilds.first().map(|g| g.id.clone());
                 }
@@ -461,10 +517,15 @@ impl State {
                 channel_id,
                 messages,
             } => {
+                self.request_unknown_authors(&channel_id, &messages);
                 self.messages.insert(channel_id, messages);
             }
             ToUi::FilesPicked(paths) => self.add_files(paths),
-            ToUi::NewMessage(msg) => {
+            ToUi::NewMessage(mut msg) => {
+                if let (Some(gid), Some(member)) = (&msg.guild_id, msg.member.take()) {
+                    self.member_cache
+                        .insert_cached(gid, &msg.author.id, *member);
+                }
                 if let Some(typers) = self.typing.get_mut(&msg.channel_id) {
                     typers.retain(|t| t.user_id != msg.author.id);
                 }
@@ -526,6 +587,263 @@ impl State {
                     since: Instant::now(),
                 });
             }
+            ToUi::Presences(list) => {
+                if !config.modules.member_list {
+                    return;
+                }
+                for (id, p) in list {
+                    self.presences.set(&id, p);
+                }
+                if let Some(b) = &mut self.bot_list {
+                    b.dirty = true;
+                }
+            }
+            ToUi::MemberList(upd) => {
+                if !config.modules.member_list {
+                    return;
+                }
+                for m in upd.members() {
+                    self.member_cache.insert(&upd.guild_id, m);
+                    if let Some(p) = &m.presence {
+                        self.presences.set(&m.user.id, p.clone());
+                    }
+                }
+                // Only the list of the server being viewed is kept.
+                if self.selected_guild.as_ref() != Some(&upd.guild_id) {
+                    return;
+                }
+                let same = self
+                    .member_list
+                    .as_ref()
+                    .is_some_and(|l| l.guild_id == upd.guild_id && l.list_id == upd.list_id);
+                let has_sync = upd
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, members::ListOp::Sync { .. }));
+                if !same {
+                    if !has_sync {
+                        return;
+                    }
+                    if let Some(old) = self.member_list.take() {
+                        self.forget_list_avatars(ctx, &old);
+                    }
+                    self.member_list = Some(MemberList::new(&upd.guild_id, &upd.list_id));
+                }
+                if let Some(list) = &mut self.member_list {
+                    list.apply(upd);
+                }
+            }
+            ToUi::Members {
+                guild_id,
+                members,
+                full_list,
+            } => {
+                for m in &members {
+                    self.member_cache.insert(&guild_id, m);
+                    if let (Some(p), true) = (&m.presence, config.modules.member_list) {
+                        self.presences.set(&m.user.id, p.clone());
+                    }
+                }
+                if full_list
+                    && config.modules.member_list
+                    && self.selected_guild.as_ref() == Some(&guild_id)
+                {
+                    let b = match &mut self.bot_list {
+                        Some(b) if b.guild_id == guild_id => b,
+                        _ => self.bot_list.insert(BotList {
+                            guild_id,
+                            members: Vec::new(),
+                            list: MemberList::default(),
+                            dirty: true,
+                        }),
+                    };
+                    for m in members {
+                        if b.members.len() < members::BOT_LIST_LIMIT as usize
+                            && !b.members.iter().any(|o| o.user.id == m.user.id)
+                        {
+                            b.members.push(m);
+                        }
+                    }
+                    b.dirty = true;
+                }
+            }
+            ToUi::RoleUpserted { guild_id, role } => {
+                if let Some(g) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
+                    g.roles.retain(|r| r.id != role.id);
+                    g.roles.push(role);
+                    members::sort_roles(&mut g.roles);
+                }
+            }
+            ToUi::RoleDeleted { guild_id, role_id } => {
+                if let Some(g) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
+                    g.roles.retain(|r| r.id != role_id);
+                }
+            }
+            ToUi::Profile(p) => {
+                if let (Some(gid), Some(m)) = (&p.guild_id, &p.member) {
+                    self.member_cache.insert_cached(gid, &p.user_id, m.clone());
+                }
+                self.profiles.insert(*p);
+            }
+            ToUi::ProfileUnavailable(user_id) => self.profiles.mark_unavailable(&user_id),
+            ToUi::Note { user_id, note } => {
+                let old = self.profiles.note(&user_id).map(str::to_string);
+                if let Some(pop) = self.popout.as_mut().filter(|p| p.user.id == user_id) {
+                    // Don't overwrite what the user is typing.
+                    let untouched = match (&pop.note_draft, &old) {
+                        (None, _) => true,
+                        (Some(d), Some(o)) => d == o,
+                        (Some(d), None) => d.is_empty(),
+                    };
+                    if untouched {
+                        pop.note_draft = Some(note.clone());
+                    }
+                }
+                self.profiles.set_note(&user_id, note);
+            }
+        }
+    }
+
+    // ----- members, presence, profiles ------------------------------------
+
+    /// Free the member list, bot list and presences (module off, new
+    /// session).
+    fn free_member_list(&mut self, ctx: &egui::Context) {
+        if let Some(old) = self.member_list.take() {
+            self.forget_list_avatars(ctx, &old);
+        }
+        if let Some(old) = self.bot_list.take() {
+            self.forget_list_avatars(ctx, &old.list);
+        }
+        if self.presences.len() > 0 {
+            self.presences.clear();
+        }
+        self.subscribed = None;
+        self.bot_list_requested = None;
+    }
+
+    /// Free avatar images of a dropped member list, except ones still shown
+    /// next to cached messages.
+    fn forget_list_avatars(&self, ctx: &egui::Context, list: &MemberList) {
+        let in_use: HashSet<&str> = self
+            .messages
+            .values()
+            .flatten()
+            .map(|m| m.author.avatar_url.as_str())
+            .collect();
+        for row in list.rows.iter().flatten() {
+            if let Row::Member(m) = row
+                && !in_use.contains(m.user.avatar_url.as_str())
+            {
+                ctx.forget_image(&m.user.avatar_url);
+            }
+        }
+    }
+
+    /// Ask (op 8) for the roles of message authors we know nothing about,
+    /// so their names get role colours.
+    fn request_unknown_authors(&mut self, channel_id: &str, messages: &[Message]) {
+        let Some((g, _)) = self.find_channel(channel_id) else {
+            return;
+        };
+        if g.is_dms() {
+            return;
+        }
+        let gid = g.id.clone();
+        if self.asked_members.len() > 5000 {
+            self.asked_members.clear();
+        }
+        let mut ids = Vec::new();
+        for m in messages {
+            let key = format!("{gid}:{}", m.author.id);
+            if self.member_cache.get(&gid, &m.author.id).is_none()
+                && !ids.contains(&m.author.id)
+                && self.asked_members.insert(key)
+            {
+                ids.push(m.author.id.clone());
+            }
+        }
+        if !ids.is_empty() {
+            let _ = self.tx.send(ToBackend::RequestMembers {
+                guild_id: gid,
+                user_ids: ids,
+            });
+        }
+    }
+
+    /// Server nickname, role colour and status for a message author.
+    fn author_style<'a>(
+        &'a self,
+        guild: Option<&'a Guild>,
+        u: &'a User,
+        config: &Config,
+    ) -> AuthorStyle<'a> {
+        let cached = guild.and_then(|g| self.member_cache.get(&g.id, &u.id));
+        AuthorStyle {
+            name: cached.and_then(|c| c.nick.as_deref()).unwrap_or(&u.name),
+            color: cached.and_then(|c| members::role_color(&guild?.roles, &c.roles)),
+            status: config
+                .modules
+                .member_list
+                .then(|| self.presences.status(&u.id))
+                .flatten(),
+        }
+    }
+
+    fn is_bot_session(&self) -> bool {
+        self.me.as_ref().is_some_and(|m| m.bot)
+    }
+
+    /// Open someone's profile card next to `anchor`, loading the profile
+    /// and note if we don't have them (user accounts).
+    fn open_profile(
+        &mut self,
+        user: User,
+        guild_id: Option<String>,
+        anchor: egui::Rect,
+        ctx: &egui::Context,
+    ) {
+        if self.popout.as_ref().is_some_and(|p| p.user.id == user.id) {
+            self.close_popout(ctx);
+            return;
+        }
+        self.close_popout(ctx);
+        if !self.is_bot_session() {
+            if self.profiles.get(&user.id, guild_id.as_deref()).is_none()
+                && !self.profiles.is_unavailable(&user.id)
+            {
+                let _ = self.tx.send(ToBackend::LoadProfile {
+                    user_id: user.id.clone(),
+                    guild_id: guild_id.clone(),
+                });
+            }
+            if self.profiles.note(&user.id).is_none() {
+                let _ = self.tx.send(ToBackend::LoadNote {
+                    user_id: user.id.clone(),
+                });
+            }
+        }
+        self.popout = Some(Popout {
+            note_draft: self.profiles.note(&user.id).map(str::to_string),
+            user,
+            guild_id,
+            anchor,
+            opened_frame: ctx.cumulative_frame_nr(),
+        });
+    }
+
+    fn close_popout(&mut self, ctx: &egui::Context) {
+        let Some(pop) = self.popout.take() else {
+            return;
+        };
+        // The card's big avatar and banner aren't used anywhere else.
+        ctx.forget_image(&pop.user.avatar_url.replace("size=64", "size=128"));
+        if let Some(url) = self
+            .profiles
+            .get(&pop.user.id, pop.guild_id.as_deref())
+            .and_then(|p| p.banner_url.clone())
+        {
+            ctx.forget_image(&url);
         }
     }
 
@@ -1078,6 +1396,21 @@ impl State {
                                     pal.sidebar,
                                     pal,
                                 );
+                            } else if c.kind == CHANNEL_DM
+                                && config.modules.member_list
+                                && let Some(st) = c
+                                    .recipients
+                                    .first()
+                                    .and_then(|u| self.presences.status(&u.id))
+                            {
+                                // Their status, where Discord shows it on the avatar.
+                                let at = egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y);
+                                let bg = if selected { pal.selected } else { pal.sidebar };
+                                ui.painter().circle_filled(at, 4.5, st.color(pal));
+                                if st == Status::Offline {
+                                    ui.painter().circle_filled(at, 2.0, bg);
+                                }
+                                resp.clone().on_hover_text(st.label());
                             }
                             if resp.clicked() {
                                 clicked = Some(c.id.clone());
@@ -1150,6 +1483,12 @@ impl State {
 
         let my_id = self.me.as_ref().map(|u| u.id.as_str()).unwrap_or_default();
         let mut action = None;
+        // Server nicknames and role colours for author names.
+        let guild = self
+            .find_channel(&channel_id)
+            .map(|(g, _)| g)
+            .filter(|g| !g.is_dms());
+
         let mut new_after = self
             .new_marker
             .as_ref()
@@ -1173,7 +1512,9 @@ impl State {
                         new_after = None;
                         grouped = false;
                     }
-                    if let Some(a) = message_row(ui, m, grouped, m.author.id == my_id, config, pal)
+                    let author = self.author_style(guild, &m.author, config);
+                    if let Some(a) =
+                        message_row(ui, m, &author, grouped, m.author.id == my_id, config, pal)
                     {
                         action = Some(a);
                     }
@@ -1195,6 +1536,14 @@ impl State {
             Some(MessageAction::Delete(id)) => self.confirm_delete = Some((channel_id, id)),
             Some(MessageAction::Copy(text)) => ui.ctx().copy_text(text),
             Some(MessageAction::MarkUnread(id)) => self.mark_unread(&channel_id, &id),
+            Some(MessageAction::Profile(user, rect)) => {
+                let guild = self
+                    .find_channel(&channel_id)
+                    .filter(|(g, _)| !g.is_dms())
+                    .map(|(g, _)| g.id.clone());
+                let ctx = ui.ctx().clone();
+                self.open_profile(user, guild, rect, &ctx);
+            }
             None => {}
         }
     }
@@ -1424,7 +1773,9 @@ impl State {
         }
     }
 
-    /// People in the current DM, or recently active in the current channel.
+    /// The member list: Discord's grouped list for servers (op 14 for user
+    /// accounts, the full list for bots with the Server Members intent),
+    /// people in the conversation for DMs, and "recently active" otherwise.
     fn members_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         if !config.modules.member_list {
             ui.label(
@@ -1437,55 +1788,147 @@ impl State {
         let Some(channel_id) = self.selected_channel.clone() else {
             return;
         };
+        let ctx = ui.ctx().clone();
+        let guild = self
+            .find_channel(&channel_id)
+            .filter(|(g, _)| !g.is_dms())
+            .map(|(g, _)| g.id.clone());
+        let is_bot = self.is_bot_session();
 
-        let (title, people): (&str, Vec<User>) = match self.dms.channel(&channel_id) {
-            Some(dm) => {
-                let mut people = dm.recipients.clone();
-                people.extend(self.me.clone());
-                ("MEMBERS", people)
-            }
-            None => {
-                let mut seen: Vec<User> = Vec::new();
-                if let Some(msgs) = self.messages.get(&channel_id) {
-                    for m in msgs.iter().rev() {
+        // Drop a list that belongs to another server: only the visible one is kept.
+        if self
+            .member_list
+            .as_ref()
+            .is_some_and(|l| Some(&l.guild_id) != guild.as_ref())
+            && let Some(old) = self.member_list.take()
+        {
+            self.forget_list_avatars(&ctx, &old);
+        }
+        if self
+            .bot_list
+            .as_ref()
+            .is_some_and(|b| Some(&b.guild_id) != guild.as_ref())
+            && let Some(old) = self.bot_list.take()
+        {
+            self.forget_list_avatars(&ctx, &old.list);
+        }
+        if let Some(gid) = &guild
+            && is_bot
+            && config.bot_member_intents
+            && self.bot_list_requested.as_ref() != Some(gid)
+        {
+            self.bot_list_requested = Some(gid.clone());
+            let _ = self.tx.send(ToBackend::RequestMemberList {
+                guild_id: gid.clone(),
+            });
+        }
+        if let Some(b) = self.bot_list.as_mut().filter(|b| b.dirty) {
+            let roles = self
+                .guilds
+                .iter()
+                .find(|g| g.id == b.guild_id)
+                .map(|g| g.roles.as_slice())
+                .unwrap_or(&[]);
+            b.list.rows = members::build_rows(&b.members, roles, &self.presences);
+            b.dirty = false;
+        }
+
+        let roles: &[members::Role] = guild
+            .as_ref()
+            .and_then(|gid| self.guilds.iter().find(|g| &g.id == gid))
+            .map(|g| g.roles.as_slice())
+            .unwrap_or(&[]);
+        let list = self
+            .member_list
+            .as_ref()
+            .or(self.bot_list.as_ref().map(|b| &b.list))
+            .filter(|l| !l.rows.is_empty());
+
+        // Fallback rows: DM recipients, or people who spoke recently.
+        let fallback: Vec<Option<Row>> = if list.is_some() {
+            Vec::new()
+        } else {
+            let (group, people): (&str, Vec<User>) = match self.dms.channel(&channel_id) {
+                Some(dm) => {
+                    let mut people = dm.recipients.clone();
+                    people.extend(self.me.clone());
+                    ("dm", people)
+                }
+                None => {
+                    let mut seen: Vec<User> = Vec::new();
+                    for m in self.messages.get(&channel_id).into_iter().flatten().rev() {
                         if !seen.iter().any(|u| u.id == m.author.id) {
                             seen.push(m.author.clone());
                         }
                     }
+                    ("recent", seen)
                 }
-                ("RECENTLY ACTIVE", seen)
-            }
+            };
+            let mut rows = vec![Some(Row::Group {
+                id: group.into(),
+                count: people.len() as u32,
+            })];
+            rows.extend(people.into_iter().map(|user| {
+                let cached = guild
+                    .as_deref()
+                    .and_then(|g| self.member_cache.get(g, &user.id));
+                Some(Row::Member(Box::new(Member {
+                    nick: cached.and_then(|c| c.nick.clone()),
+                    roles: cached.map(|c| c.roles.clone()).unwrap_or_default(),
+                    user,
+                    ..Member::default()
+                })))
+            }));
+            rows
         };
 
-        ui.label(
-            RichText::new(format!("{title} — {}", people.len()))
+        let row_fn = |i: usize| match list {
+            Some(l) => l.row(i),
+            None => fallback.get(i).and_then(Option::as_ref),
+        };
+        let total = list.map_or(fallback.len(), |l| l.total_rows().min(100_000));
+        if let Some(l) = list.filter(|l| l.member_count > 0) {
+            ui.label(
+                RichText::new(format!(
+                    "{} members · {} online",
+                    l.member_count, l.online_count
+                ))
                 .small()
-                .strong()
                 .color(pal.muted),
+            );
+        }
+        let (clicked, visible) = members::list_ui(
+            ui,
+            members::ListView {
+                rows: &row_fn,
+                total,
+                roles,
+                presences: &self.presences,
+            },
+            config,
+            pal,
         );
-        ui.add_space(4.0);
-        egui::ScrollArea::vertical()
-            .id_salt("members")
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                for u in &people {
-                    ui.horizontal(|ui| {
-                        avatar(ui, &u.id, &u.name, &u.avatar_url, 28.0, config, pal);
-                        ui.add(
-                            egui::Label::new(RichText::new(&u.name).color(pal.muted)).truncate(),
-                        );
-                        if u.bot {
-                            ui.label(
-                                RichText::new(" BOT ")
-                                    .small()
-                                    .color(Color32::WHITE)
-                                    .background_color(pal.accent),
-                            );
-                        }
-                    });
-                    ui.add_space(2.0);
-                }
-            });
+
+        // Op 14 (user accounts): subscribe to this channel, with ranges for
+        // what's on screen so scrolling loads more of the list.
+        if let Some(gid) = &guild
+            && !is_bot
+            && self.connected
+        {
+            let ranges = members::ranges_for(visible.start, visible.end.saturating_sub(1));
+            let want = (gid.clone(), channel_id.clone(), ranges);
+            if self.subscribed.as_ref() != Some(&want) {
+                let _ = self.tx.send(ToBackend::SubscribeMembers {
+                    guild_id: want.0.clone(),
+                    channel_id: want.1.clone(),
+                    ranges: want.2.clone(),
+                });
+                self.subscribed = Some(want);
+            }
+        }
+        if let Some(c) = clicked {
+            self.open_profile(c.member.user, guild, c.rect, &ctx);
+        }
     }
 
     /// Tell Discord we're typing, at most every 8 seconds per channel.
@@ -1532,8 +1975,10 @@ impl State {
         self.last_typing_sent = None;
     }
 
-    /// Delete confirmation and the "drop files here" overlay.
-    fn overlays(&mut self, ui: &mut egui::Ui, pal: &Palette) {
+    /// Profile card, delete confirmation and the "drop files here" overlay.
+    fn overlays(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
+        self.popout_overlay(ui.ctx(), config, pal);
+
         // Drag-and-drop hint
         let hovering_files = ui.input(|i| !i.raw.hovered_files.is_empty());
         if hovering_files {
@@ -1589,6 +2034,50 @@ impl State {
     }
 }
 
+impl State {
+    fn popout_overlay(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let is_bot_session = self.is_bot_session();
+        let Some(pop) = &mut self.popout else {
+            return;
+        };
+        let uid = pop.user.id.clone();
+        let gid = pop.guild_id.clone();
+        let roles = gid
+            .as_ref()
+            .and_then(|g| self.guilds.iter().find(|x| &x.id == g))
+            .map_or(&[][..], |g| g.roles.as_slice());
+        let profile = self.profiles.get(&uid, gid.as_deref());
+        let data = profile::CardData {
+            profile,
+            loading: profile.is_none() && !is_bot_session && !self.profiles.is_unavailable(&uid),
+            presence: config
+                .modules
+                .member_list
+                .then(|| self.presences.get(&uid))
+                .flatten(),
+            member: gid.as_deref().and_then(|g| self.member_cache.get(g, &uid)),
+            roles,
+            note: self.profiles.note(&uid),
+            is_bot_session,
+        };
+        match profile::popout_ui(ctx, pop, data, config, pal) {
+            Some(PopoutAction::Close) => self.close_popout(ctx),
+            Some(PopoutAction::SaveNote(note)) => {
+                // Explicit user action (Save button / Ctrl+Enter).
+                let _ = self.tx.send(ToBackend::SetNote {
+                    user_id: uid.clone(),
+                    note: note.clone(),
+                });
+                if let Some(p) = &mut self.popout {
+                    p.note_draft = Some(note.clone());
+                }
+                self.profiles.set_note(&uid, note);
+            }
+            None => {}
+        }
+    }
+}
+
 /// Free the GPU/CPU copies of attachment images for messages we no longer keep.
 fn forget_message_images(ctx: &egui::Context, messages: &[Message]) {
     let (w, h) = IMAGE_MAX;
@@ -1605,7 +2094,7 @@ fn forget_message_images(ctx: &egui::Context, messages: &[Message]) {
 
 /// Round avatar. With the Images module off, a coloured circle with the
 /// first letter instead (no download, no texture).
-fn avatar(
+pub(crate) fn avatar(
     ui: &mut egui::Ui,
     user_id: &str,
     name: &str,
@@ -1851,10 +2340,18 @@ fn server_button(
     resp.on_hover_text(hover)
 }
 
+/// How to show a message author: server nickname, top role colour, status.
+struct AuthorStyle<'a> {
+    name: &'a str,
+    color: Option<Color32>,
+    status: Option<Status>,
+}
+
 /// Draw one message. Returns an action if the user picked one from its menu.
 fn message_row(
     ui: &mut egui::Ui,
     m: &Message,
+    author: &AuthorStyle<'_>,
     grouped: bool,
     mine: bool,
     config: &Config,
@@ -1870,15 +2367,28 @@ fn message_row(
         if grouped {
             ui.add_space(avatar_size + ui.spacing().item_spacing.x);
         } else {
-            avatar(
+            let rect = avatar(
                 ui,
                 &m.author.id,
-                &m.author.name,
+                author.name,
                 &m.author.avatar_url,
                 avatar_size,
                 config,
                 pal,
             );
+            if let Some(s) = author.status.filter(|s| *s != Status::Offline) {
+                members::status_dot(ui, rect, s, pal.chat, pal);
+            }
+            let resp = ui
+                .interact(
+                    rect,
+                    ui.scope_id().with(("msg_avatar", &m.id)),
+                    egui::Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.clicked() {
+                action = Some(MessageAction::Profile(m.author.clone(), rect));
+            }
         }
 
         ui.vertical(|ui| {
@@ -1891,14 +2401,18 @@ fn message_row(
             }
             if !grouped {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&m.author.name).strong());
+                    let mut name = RichText::new(author.name).strong();
+                    if let Some(c) = author.color {
+                        name = name.color(c);
+                    }
+                    let resp = ui
+                        .add(egui::Label::new(name).sense(egui::Sense::click()))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if resp.clicked() {
+                        action = Some(MessageAction::Profile(m.author.clone(), resp.rect));
+                    }
                     if m.author.bot {
-                        ui.label(
-                            RichText::new(" BOT ")
-                                .small()
-                                .color(Color32::WHITE)
-                                .background_color(pal.accent),
-                        );
+                        members::bot_tag(ui, pal);
                     }
                     ui.label(RichText::new(m.short_time()).small().color(pal.muted));
                 });
