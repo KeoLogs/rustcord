@@ -799,6 +799,14 @@ pub enum ToUi {
         channel_id: String,
         messages: Vec<Message>,
     },
+    /// Loading a channel's messages failed. `error` is user-facing text
+    /// (never a raw HTTP line); `no_access` is a typed 403 / Missing Access,
+    /// for the "You don't have access" empty state.
+    HistoryFailed {
+        channel_id: String,
+        error: String,
+        no_access: bool,
+    },
     /// Files chosen in the "+" file picker.
     FilesPicked(Vec<PathBuf>),
     NewMessage(Box<Message>),

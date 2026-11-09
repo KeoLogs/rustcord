@@ -14,6 +14,7 @@ mod friends;
 mod gateway;
 mod gif_picker;
 mod home;
+mod http_error;
 mod icons;
 mod invites;
 mod layout;

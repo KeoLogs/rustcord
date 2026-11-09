@@ -410,7 +410,11 @@ pub fn friendly_add_error(err: &str) -> String {
     let low = err.to_lowercase();
     if low.contains("captcha") {
         "Discord wants a captcha for this request. Send it from the official app this time.".into()
-    } else if low.contains("unknown user") || low.contains("80004") || low.contains("404") {
+    } else if low.contains("unknown user")
+        || low.contains("no users with")
+        || low.contains("80004")
+        || low.contains("not found")
+    {
         "Hm, didn't work. Double check that the username is correct.".into()
     } else {
         format!("Hm, didn't work. {err}")

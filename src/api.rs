@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::emoji_picker::EmojiRef;
 use crate::forum::ForumQuery;
+use crate::http_error::HttpError;
 use crate::ratelimit::{self, Limiter, RateLimited};
 use crate::search::{SearchQuery, SearchResponse, SearchScope};
 use crate::threads::{CHANNEL_PRIVATE_THREAD, CHANNEL_PUBLIC_THREAD, Thread, ThreadPage};
@@ -101,14 +102,10 @@ impl Api {
         if resp.status().is_success() {
             return Ok(resp);
         }
-        let status = resp.status();
+        let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        // Pull out Discord's human-readable message if there is one.
-        let msg = serde_json::from_str::<Value>(&body)
-            .ok()
-            .and_then(|v| v.get("message").and_then(Value::as_str).map(str::to_string))
-            .unwrap_or(body);
-        bail!("{what} failed: HTTP {status} - {msg}")
+        // Typed: callers match on the status, and the text is user-facing.
+        Err(HttpError::from_body(what, status, &body).into())
     }
 
     /// Up to 50 messages around `message_id` (oldest first), for jumping to

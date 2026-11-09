@@ -31,10 +31,10 @@ async fn save_file(api: &Api, url: &str, filename: &str) -> anyhow::Result<Optio
 }
 
 // --- threads ---
-/// A 403 / 404: the endpoint isn't available to this account here.
+/// A 403 / 404 (typed HTTP status): the endpoint isn't available to this
+/// account here.
 fn not_available(e: &anyhow::Error) -> bool {
-    let text = format!("{e:#}");
-    text.contains("HTTP 403") || text.contains("HTTP 404")
+    crate::http_error::is_unavailable(e)
 }
 
 /// Run one thread / forum request. Writes come only from clicks and are
@@ -261,12 +261,19 @@ async fn run(
         tokio::spawn(async move {
             let result = match req {
                 ToBackend::LoadHistory { channel_id } => {
-                    api.channel_history(&channel_id, 50).await.map(|messages| {
-                        Some(ToUi::History {
+                    match api.channel_history(&channel_id, 50).await {
+                        Ok(messages) => Ok(Some(ToUi::History {
                             channel_id,
                             messages,
-                        })
-                    })
+                        })),
+                        // A rate limit takes the usual RateLimited path.
+                        Err(e) if crate::ratelimit::rate_limited(&e).is_some() => Err(e),
+                        Err(e) => Ok(Some(ToUi::HistoryFailed {
+                            no_access: crate::http_error::is_no_access(&e),
+                            error: crate::ratelimit::user_message(&e),
+                            channel_id,
+                        })),
+                    }
                 }
                 ToBackend::Send {
                     channel_id,
@@ -634,7 +641,9 @@ async fn run(
                 Err(e) => {
                     let ev = match crate::ratelimit::rate_limited(&e) {
                         Some(rl) => ToUi::RateLimited(rl),
-                        None => ToUi::Status(format!("Error: {e}")),
+                        None => {
+                            ToUi::Status(format!("Error: {}", crate::ratelimit::user_message(&e)))
+                        }
                     };
                     let _ = tx.send(ev);
                 }

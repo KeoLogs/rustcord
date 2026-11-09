@@ -360,7 +360,8 @@ fn error_code(body: &Value) -> Option<u64> {
 }
 
 fn error_message(status: u16, body: &Value) -> String {
-    str_at(body, "message").unwrap_or_else(|| format!("HTTP {status}"))
+    str_at(body, "message")
+        .unwrap_or_else(|| crate::http_error::HttpError::from_body("", status, "").to_string())
 }
 
 /// Result of loading an invite preview.
@@ -1475,7 +1476,7 @@ mod tests {
         );
         assert_eq!(
             classify_fetch(502, &Value::Null),
-            InviteFetch::Failed("HTTP 502".into())
+            InviteFetch::Failed("Discord is having trouble, try again later".into())
         );
     }
 

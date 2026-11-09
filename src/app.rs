@@ -801,9 +801,21 @@ struct Typer {
     since: Instant,
 }
 
+/// Why a channel's messages aren't shown (drawn as the chat column's empty
+/// state instead of a spinner).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelError {
+    /// No VIEW_CHANNEL (from roles + overwrites), or Discord said 403.
+    NoAccess,
+    /// Loading failed; user-facing text, never a raw HTTP line.
+    Failed(String),
+}
+
 pub struct State {
     rx: Receiver<ToUi>,
     tx: UnboundedSender<ToBackend>,
+    /// Channels whose messages couldn't be loaded (or that I can't view).
+    channel_errors: HashMap<String, ChannelError>,
 
     status: String,
     connected: bool,
@@ -1008,6 +1020,7 @@ impl State {
             link_warning: None,
             pins: None,
             scroll_to: None,
+            channel_errors: HashMap::new(),
             highlight: None,
             confirm_pin: None,
             confirm_leave: None,
@@ -1140,7 +1153,27 @@ impl State {
             } => {
                 self.request_unknown_authors(&channel_id, &messages);
                 self.remember_users(&mut messages, config);
+                self.channel_errors.remove(&channel_id);
                 self.messages.insert(channel_id, messages);
+            }
+            ToUi::HistoryFailed {
+                channel_id,
+                error,
+                no_access,
+            } => {
+                // The status bar gets a short line at most; the chat column
+                // shows the empty state.
+                self.status = if no_access {
+                    "No access".into()
+                } else {
+                    error.clone()
+                };
+                let e = if no_access {
+                    ChannelError::NoAccess
+                } else {
+                    ChannelError::Failed(error)
+                };
+                self.channel_errors.insert(channel_id, e);
             }
             ToUi::HistoryAround {
                 channel_id,
@@ -3202,9 +3235,16 @@ impl State {
             .find_channel(&channel_id)
             .is_some_and(|(_, c)| c.is_forum());
         if !forum && !self.messages.contains_key(&channel_id) {
-            let _ = self.tx.send(ToBackend::LoadHistory {
-                channel_id: channel_id.clone(),
-            });
+            // Never fetch a channel I can't view (no VIEW_CHANNEL).
+            if self.can_view_channel(&channel_id) {
+                self.channel_errors.remove(&channel_id);
+                let _ = self.tx.send(ToBackend::LoadHistory {
+                    channel_id: channel_id.clone(),
+                });
+            } else {
+                self.channel_errors
+                    .insert(channel_id.clone(), ChannelError::NoAccess);
+            }
         }
         if self.selected_channel.as_ref() != Some(&channel_id) {
             self.compose = Compose::New;
@@ -4272,7 +4312,33 @@ impl State {
             return;
         };
         let Some(count) = self.messages.get(&channel_id).map(Vec::len) else {
-            ui.centered_and_justified(|ui| ui.spinner());
+            match self.channel_error(&channel_id) {
+                // Minimal empty state; the design (doc §4.1) is the UI's.
+                Some(err) => {
+                    let (title, sub) = match err {
+                        ChannelError::NoAccess => {
+                            let name = self
+                                .find_channel(&channel_id)
+                                .map(|(_, c)| c.name.clone())
+                                .unwrap_or_default();
+                            (
+                                format!("You don't have access to #{name}"),
+                                "Ask a server admin for the role that can see it.".to_string(),
+                            )
+                        }
+                        ChannelError::Failed(e) => ("Couldn't load messages".into(), e.clone()),
+                    };
+                    ui.vertical_centered(|ui| {
+                        ui.add_space((ui.available_height() / 2.0 - 48.0).max(0.0));
+                        ui.label(RichText::new(icons::LOCK).size(48.0).color(pal.muted));
+                        ui.label(RichText::new(title).size(16.0).color(pal.strong));
+                        ui.label(RichText::new(sub).color(pal.muted));
+                    });
+                }
+                None => {
+                    ui.centered_and_justified(|ui| ui.spinner());
+                }
+            }
             return;
         };
         if count == 0 {
@@ -4704,6 +4770,34 @@ impl State {
     /// Messages, from my roles and the channel's overwrites.
     fn can_pin(&self, channel_id: &str) -> bool {
         self.has_perm(channel_id, perms::MANAGE_MESSAGES)
+    }
+
+    /// May I see this channel (VIEW_CHANNEL from roles + overwrites)? DMs
+    /// and channels whose server data isn't known yet count as visible.
+    /// The channel list hides channels where this is false.
+    pub fn can_view_channel(&self, channel_id: &str) -> bool {
+        let Some((g, c)) = self.find_channel(channel_id) else {
+            return true;
+        };
+        if g.is_dms() {
+            return true;
+        }
+        let Some(me) = &self.me else { return true };
+        perms::can_view_channel(
+            &g.id,
+            &g.owner_id,
+            &g.roles,
+            &c.overwrites,
+            &perms::Me {
+                user_id: &me.id,
+                roles: &g.my_roles,
+            },
+        )
+    }
+
+    /// Why the channel's messages aren't shown, if they can't be.
+    pub fn channel_error(&self, channel_id: &str) -> Option<&ChannelError> {
+        self.channel_errors.get(channel_id)
     }
 
     /// My permission `bit` in a channel (always true in DMs).

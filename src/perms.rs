@@ -1,5 +1,5 @@
-//! Discord permission bits: just enough to know whether I may pin / unpin
-//! messages in a channel (Manage Messages).
+//! Discord permission bits: whether I may see a channel (View Channel),
+//! pin / unpin (Manage Messages), react or start threads.
 //!
 //! Computed the way Discord documents it: the owner has everything; base =
 //! @everyone role | my roles; Administrator grants everything; then the
@@ -14,6 +14,7 @@ pub const ADMINISTRATOR: u64 = 1 << 3;
 pub const ADD_REACTIONS: u64 = 1 << 6;
 pub const CREATE_PUBLIC_THREADS: u64 = 1 << 35;
 pub const MANAGE_MESSAGES: u64 = 1 << 13;
+pub const VIEW_CHANNEL: u64 = 1 << 10;
 
 /// Overwrite target: a role or a member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +117,22 @@ pub fn channel_permissions(
     p
 }
 
+/// May I see this channel of a server (VIEW_CHANNEL after roles and
+/// overwrites)? When the server's roles aren't known yet (no @everyone
+/// role) the answer is "yes", so a channel is never hidden on missing data.
+pub fn can_view_channel(
+    guild_id: &str,
+    owner_id: &str,
+    roles: &[Role],
+    overwrites: &[Overwrite],
+    me: &Me,
+) -> bool {
+    if !roles.iter().any(|r| r.id == guild_id) {
+        return true;
+    }
+    channel_permissions(guild_id, owner_id, roles, overwrites, me) & VIEW_CHANNEL != 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +219,90 @@ mod tests {
             channel_permissions("1", "", &roles, &ow, &me) & MANAGE_MESSAGES,
             0
         );
+    }
+
+    fn ow(v: serde_json::Value) -> Vec<Overwrite> {
+        Overwrite::parse_list(&v)
+    }
+
+    #[test]
+    fn view_channel_from_roles_and_overwrites() {
+        let roles = vec![role("g", VIEW_CHANNEL), role("staff", 0), role("muted", 0)];
+        let staff = vec!["staff".to_string()];
+        let me = Me {
+            user_id: "u",
+            roles: &staff,
+        };
+        let nobody = Me {
+            user_id: "x",
+            roles: &[],
+        };
+        // Visible by default (@everyone has VIEW_CHANNEL).
+        assert!(can_view_channel("g", "o", &roles, &[], &me));
+        // Staff-only channel: @everyone denied, staff role allowed.
+        let staff_only = ow(json!([
+            { "id": "g", "type": 0, "allow": "0", "deny": VIEW_CHANNEL.to_string() },
+            { "id": "staff", "type": 0, "allow": VIEW_CHANNEL.to_string(), "deny": "0" }
+        ]));
+        assert!(can_view_channel("g", "o", &roles, &staff_only, &me));
+        assert!(!can_view_channel("g", "o", &roles, &staff_only, &nobody));
+        // A member overwrite beats role allows.
+        let banned_me = ow(json!([
+            { "id": "staff", "type": 0, "allow": VIEW_CHANNEL.to_string(), "deny": "0" },
+            { "id": "u", "type": 1, "allow": "0", "deny": VIEW_CHANNEL.to_string() }
+        ]));
+        assert!(!can_view_channel("g", "o", &roles, &banned_me, &me));
+        // ...and a member allow beats an @everyone deny.
+        let just_me = ow(json!([
+            { "id": "g", "type": 0, "allow": "0", "deny": VIEW_CHANNEL.to_string() },
+            { "id": "x", "type": 1, "allow": VIEW_CHANNEL.to_string(), "deny": "0" }
+        ]));
+        assert!(can_view_channel("g", "o", &roles, &just_me, &nobody));
+        // Role allow wins over another role's deny (allows apply after denies).
+        let mixed = ow(json!([
+            { "id": "muted", "type": 0, "allow": "0", "deny": VIEW_CHANNEL.to_string() },
+            { "id": "staff", "type": 0, "allow": VIEW_CHANNEL.to_string(), "deny": "0" }
+        ]));
+        let both = vec!["staff".to_string(), "muted".to_string()];
+        let me2 = Me {
+            user_id: "u",
+            roles: &both,
+        };
+        assert!(can_view_channel("g", "o", &roles, &mixed, &me2));
+    }
+
+    #[test]
+    fn view_channel_owner_admin_and_missing_data() {
+        let roles = vec![role("g", 0), role("admin", ADMINISTRATOR)];
+        let hidden = ow(json!([
+            { "id": "g", "type": 0, "allow": "0", "deny": VIEW_CHANNEL.to_string() }
+        ]));
+        let plain = Me {
+            user_id: "u",
+            roles: &[],
+        };
+        // @everyone lacks VIEW_CHANNEL entirely: hidden.
+        assert!(!can_view_channel("g", "o", &roles, &[], &plain));
+        // The owner and administrators see everything.
+        let owner = Me {
+            user_id: "o",
+            roles: &[],
+        };
+        assert!(can_view_channel("g", "o", &roles, &hidden, &owner));
+        let admins = vec!["admin".to_string()];
+        let admin = Me {
+            user_id: "a",
+            roles: &admins,
+        };
+        assert!(can_view_channel("g", "o", &roles, &hidden, &admin));
+        // Roles not loaded yet (no @everyone): never hide on missing data.
+        assert!(can_view_channel("g", "o", &[], &hidden, &plain));
+        assert!(can_view_channel(
+            "g",
+            "o",
+            &[role("other", 0)],
+            &hidden,
+            &plain
+        ));
     }
 }

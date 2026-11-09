@@ -55,12 +55,10 @@ pub fn rate_limited(err: &anyhow::Error) -> Option<RateLimited> {
         .copied()
 }
 
-/// Text for the user: the quiet "Slow down…" for rate limits, else the error.
+/// Text for the user: the quiet "Slow down…" for rate limits, worded HTTP
+/// failures, else the error (see [`crate::http_error::user_message`]).
 pub fn user_message(err: &anyhow::Error) -> String {
-    match rate_limited(err) {
-        Some(rl) => rl.to_string(),
-        None => format!("{err:#}"),
-    }
+    crate::http_error::user_message(err)
 }
 
 /// Rate-limit headers of one response.
