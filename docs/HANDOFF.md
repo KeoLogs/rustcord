@@ -5,14 +5,15 @@ Read CLAUDE.md first, then this.
 
 ## Merged-into-each-other PR stack (merge in order on GitHub)
 #1 feat/chat-parity → #2 feat/settings-profile-uploads → #3 feat/notifications →
-#4 feat/members-presence → #5 feat/polish → #6 feat/messenger-complete
+#4 feat/members-presence → #5 feat/polish → #6 feat/messenger-complete → #7 feat/polish-2
 (each PR's base is the previous branch; merging in order retargets the next one to main)
 
 ## In progress when this was written
-- feat/polish-2 (UI pass 2: Phosphor vector icons, settings draft + Save bar,
-  status menu rows, Show-as fresh IDENTIFY + fuller properties, sysmsg/stickers,
-  GIF picker, Unicode/symbol fonts, Discord + Discord Messenger comparison).
-  Base: feat/messenger-complete. Check whether its PR exists before redoing it.
+- feat/polish-2 DONE → PR #7 (base feat/messenger-complete, CI green): Phosphor
+  vector icons, settings draft + Save bar, status menu rows, Show-as fresh IDENTIFY
+  + clean close (code 1000) + fuller properties, sysmsg/stickers, GIF picker,
+  Unicode/symbol fonts, rail icons shrink when narrow. Release A integration
+  should be built on top of feat/polish-2.
 - wip/voice (voice groundwork: docs/VOICE.md, src/voice/ protocol/state/widgets).
 - wip/release DONE @173c144 (base feat/messenger-complete): .github/workflows/release.yml
   (Run workflow with a version → builds Win zip + Inno setup.exe, Linux tar.gz, macOS
