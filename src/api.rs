@@ -251,6 +251,62 @@ impl Api {
         Ok(())
     }
 
+    /// Pinned messages in a channel, newest pin first (raw message objects;
+    /// parse with `pins::PinnedMessage::from_json`).
+    ///
+    /// Uses the classic `GET channels/{id}/pins` (a plain array, as Discord
+    /// Messenger does) but also accepts the newer paged shape
+    /// `{ items: [{ pinned_at, message }] }`, copying `pinned_at` into each
+    /// message.
+    #[allow(dead_code)] // wired up with the pins popup
+    pub async fn get_pins(&self, channel_id: &str) -> Result<Vec<Value>> {
+        let resp = self
+            .http
+            .get(format!("{API_BASE}/channels/{channel_id}/pins"))
+            .header("Authorization", &self.auth)
+            .send()
+            .await
+            .context("pins request failed")?;
+        let body: Value = Self::check(resp, "Loading pinned messages")
+            .await?
+            .json()
+            .await?;
+        Ok(pins_from_body(body))
+    }
+
+    /// Pin a message. Only called when the user picks "Pin".
+    #[allow(dead_code)] // wired up with the pins popup
+    pub async fn pin_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .put(format!(
+                "{API_BASE}/channels/{channel_id}/messages/pins/{message_id}"
+            ))
+            .header("Authorization", &self.auth)
+            .header("Content-Length", "0")
+            .send()
+            .await
+            .context("pin request failed")?;
+        Self::check(resp, "Pinning message").await?;
+        Ok(())
+    }
+
+    /// Unpin a message. Only called when the user picks "Unpin".
+    #[allow(dead_code)] // wired up with the pins popup
+    pub async fn unpin_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .delete(format!(
+                "{API_BASE}/channels/{channel_id}/messages/pins/{message_id}"
+            ))
+            .header("Authorization", &self.auth)
+            .send()
+            .await
+            .context("unpin request failed")?;
+        Self::check(resp, "Unpinning message").await?;
+        Ok(())
+    }
+
     /// Show the typing indicator to others for ~10 seconds.
     pub async fn trigger_typing(&self, channel_id: &str) -> Result<()> {
         let resp = self
@@ -263,6 +319,29 @@ impl Api {
             .context("typing request failed")?;
         Self::check(resp, "Typing indicator").await?;
         Ok(())
+    }
+}
+
+/// Message objects from either pins response shape (see `Api::get_pins`).
+#[allow(dead_code)]
+fn pins_from_body(body: Value) -> Vec<Value> {
+    match body {
+        Value::Array(messages) => messages.into_iter().filter(Value::is_object).collect(),
+        Value::Object(mut obj) => match obj.remove("items") {
+            Some(Value::Array(items)) => items
+                .into_iter()
+                .filter_map(|mut item| {
+                    let pinned_at = item.get("pinned_at").cloned();
+                    let mut msg = item.get_mut("message")?.take();
+                    if let (Some(at), Some(m)) = (pinned_at, msg.as_object_mut()) {
+                        m.insert("pinned_at".into(), at);
+                    }
+                    msg.is_object().then_some(msg)
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
     }
 }
 
@@ -288,5 +367,36 @@ fn mime_for(name: &str) -> &'static str {
         "pdf" => "application/pdf",
         "zip" => "application/zip",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pins_both_shapes() {
+        let classic = json!([{ "id": "1" }, "junk", { "id": "2" }]);
+        let ids: Vec<_> = pins_from_body(classic)
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(ids, ["1", "2"]);
+
+        let paged = json!({
+            "items": [
+                { "pinned_at": "2026-11-01T10:00:00+00:00", "message": { "id": "3" } },
+                { "pinned_at": "x" },
+                { "message": "junk" }
+            ],
+            "has_more": false
+        });
+        let pins = pins_from_body(paged);
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0]["id"], "3");
+        assert_eq!(pins[0]["pinned_at"], "2026-11-01T10:00:00+00:00");
+
+        assert!(pins_from_body(json!({ "message": "401: Unauthorized" })).is_empty());
+        assert!(pins_from_body(Value::Null).is_empty());
     }
 }

@@ -5,12 +5,19 @@ mod app;
 mod backend;
 mod config;
 mod demo;
+// Not wired into the UI yet (Batch C: embeds, link warning, pins).
+#[allow(dead_code)]
+mod embed;
 mod emoji;
 mod gateway;
 mod layout;
+#[allow(dead_code)]
+mod links;
 mod login;
 mod members;
 mod notify;
+#[allow(dead_code)]
+mod pins;
 mod presence;
 mod profile;
 mod read_state;
