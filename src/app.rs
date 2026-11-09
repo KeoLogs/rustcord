@@ -28,6 +28,7 @@ use crate::profile::{self, Popout, PopoutAction, ProfileCache};
 use crate::quick_switcher::{self, QuickSwitcher};
 use crate::reactions::{self, PendingReactions, ReactionAction, ReactionCtx};
 use crate::read_state::ReadState;
+use crate::search::{SearchAction, SearchCtx, SearchPanel, SearchScope, Suggestion};
 use crate::settings::{SettingsAction, SettingsPage, SyncChange};
 use crate::settings_proto::{self as sp, RailItem, UserSettings};
 use crate::status::{self, CustomStatusDialog, DialogResult};
@@ -256,6 +257,9 @@ impl eframe::App for RustCordApp {
         // Module flags for the gateway task, then module state on / off.
         crate::config::live::sync(&self.config.modules);
         state.set_reactions_module(self.config.modules.reactions);
+        if !self.config.modules.search {
+            state.search = None;
+        }
         if let Some(rs) = &mut state.reactions {
             rs.pending
                 .prune(ctx.input(|i| i.time), reactions::PENDING_MAX_AGE);
@@ -396,6 +400,19 @@ impl eframe::App for RustCordApp {
         if ctx.input_mut(|i| i.consume_shortcut(&quick)) {
             state.toggle_switcher();
         }
+        // Ctrl+F: search this channel; Ctrl+Shift+F: the whole server / DM.
+        if self.config.modules.search {
+            use egui::{Key, KeyboardShortcut as K, Modifiers as M};
+            let (whole, here) = ctx.input_mut(|i| {
+                (
+                    i.consume_shortcut(&K::new(M::COMMAND | M::SHIFT, Key::F)),
+                    i.consume_shortcut(&K::new(M::COMMAND, Key::F)),
+                )
+            });
+            if whole || here {
+                state.open_search(whole);
+            }
+        }
         state.shortcuts(&ctx, &self.config);
         state.members_visible = layout::pane_visible(&self.tree, Pane::Members);
         state.channels_visible = layout::pane_visible(&self.tree, Pane::Channels);
@@ -503,6 +520,16 @@ struct ReactionState {
     asked: HashSet<(String, EmojiRef, bool)>,
 }
 
+// --- search ---
+/// The Ctrl+F search popup (`None` in `State` while closed or the module
+/// is off).
+struct SearchState {
+    panel: SearchPanel,
+    scope: SearchScope,
+    /// Header search button (the popup hangs below it).
+    anchor: egui::Rect,
+}
+
 /// What a message row needs to draw reactions.
 struct ReactParts<'a> {
     images: bool,
@@ -583,6 +610,8 @@ pub struct State {
     emoji_groups: Option<(String, Vec<CustomEmojiGroup>)>,
     /// Reactions module state; `None` while the module is off.
     reactions: Option<ReactionState>,
+    /// Search popup; `None` while closed or the module is off.
+    search: Option<SearchState>,
     last_typing_sent: Option<(String, Instant)>,
     confirm_delete: Option<(String, String)>,
 
@@ -700,6 +729,7 @@ impl State {
             emoji_picker_open: false,
             emoji_groups: None,
             reactions: None,
+            search: None,
             last_typing_sent: None,
             confirm_delete: None,
             reads: ReadState::default(),
@@ -1167,6 +1197,31 @@ impl State {
                 }
                 self.emoji_groups = None;
             }
+            // --- search ---
+            ToUi::SearchResults {
+                seq,
+                total,
+                messages,
+                partial,
+            } => {
+                if let Some(s) = &mut self.search {
+                    s.panel.on_results(seq, total, messages, partial);
+                }
+            }
+            ToUi::SearchIndexing {
+                seq,
+                retry_after,
+                documents_indexed,
+            } => {
+                if let Some(s) = &mut self.search {
+                    s.panel.on_indexing(seq, retry_after, documents_indexed);
+                }
+            }
+            ToUi::SearchFailed { seq, error } => {
+                if let Some(s) = &mut self.search {
+                    s.panel.on_error(seq, error);
+                }
+            }
             // --- reactions ---
             ToUi::Reaction(ev) => {
                 let me = self.me.as_ref().map(|u| u.id.as_str()).unwrap_or_default();
@@ -1217,6 +1272,179 @@ impl State {
                     rs.reactors.insert((message_id, emoji, burst), names);
                 }
             }
+        }
+    }
+
+    // --- search ---
+    /// Ctrl+F (`whole: false`, this channel) / Ctrl+Shift+F or the header
+    /// button (`whole: true`, the whole server or DM).
+    fn open_search(&mut self, whole: bool) {
+        let Some((g, c)) = self
+            .selected_channel
+            .as_deref()
+            .and_then(|id| self.find_channel(id))
+        else {
+            return;
+        };
+        let scope = if g.is_dms() {
+            SearchScope::Dm(c.id.clone())
+        } else {
+            SearchScope::Guild(g.id.clone())
+        };
+        let channel = (!whole && !g.is_dms()).then(|| (c.id.clone(), c.name.clone()));
+        let s = self.search.get_or_insert_with(|| SearchState {
+            panel: SearchPanel::new(),
+            scope: scope.clone(),
+            anchor: egui::Rect::NOTHING,
+        });
+        if s.scope != scope {
+            s.panel.reset();
+            s.scope = scope;
+        }
+        s.panel.open(
+            channel
+                .as_ref()
+                .map(|(id, name)| (id.as_str(), name.as_str())),
+        );
+    }
+
+    /// The search popup (under the header's search button).
+    fn search_popup(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let Some(mut s) = self.search.take() else {
+            return;
+        };
+        let (gid, in_dm) = match &s.scope {
+            SearchScope::Guild(g) => (g.clone(), false),
+            SearchScope::Dm(c) => (c.clone(), true),
+        };
+        let guild = self.guilds.iter().find(|g| g.id == gid);
+        let placeholder = match (&s.scope, guild) {
+            (SearchScope::Guild(_), Some(g)) => format!("Search {}", g.name),
+            (SearchScope::Dm(c), _) => match self.find_channel(c) {
+                Some((_, ch)) if !ch.name.is_empty() => format!("Search {}", ch.name),
+                Some((_, ch)) => format!(
+                    "Search @{}",
+                    ch.recipients.first().map_or("", |u| u.name.as_str())
+                ),
+                None => "Search".into(),
+            },
+            _ => "Search".into(),
+        };
+        let names = &self.user_names;
+        let me = self.me.as_ref();
+        let user = |name: &str| {
+            let n = name.to_lowercase();
+            me.filter(|u| u.name.to_lowercase() == n || u.username.to_lowercase() == n)
+                .map(|u| u.id.clone())
+                .or_else(|| {
+                    names
+                        .iter()
+                        .find(|(_, v)| v.to_lowercase() == n)
+                        .map(|(k, _)| k.clone())
+                })
+        };
+        let text_channels = || {
+            guild
+                .into_iter()
+                .flat_map(|g| g.channels.iter())
+                .filter(|c| c.is_text())
+        };
+        let channel = |name: &str| {
+            text_channels()
+                .find(|c| c.name.eq_ignore_ascii_case(name))
+                .map(|c| c.id.clone())
+        };
+        let suggest_users = |q: &str, n: usize| {
+            let q = q.to_lowercase();
+            let mut out: Vec<Suggestion> = names
+                .values()
+                .filter(|v| v.to_lowercase().contains(&q))
+                .take(n)
+                .map(|v| Suggestion {
+                    value: v.clone(),
+                    label: v.clone(),
+                    detail: String::new(),
+                })
+                .collect();
+            out.sort_by_key(|s| !s.value.to_lowercase().starts_with(&q));
+            out
+        };
+        let suggest_channels = |q: &str, n: usize| {
+            let q = q.to_lowercase();
+            text_channels()
+                .filter(|c| c.name.to_lowercase().contains(&q))
+                .take(n)
+                .map(|c| Suggestion {
+                    value: c.name.clone(),
+                    label: format!("#{}", c.name),
+                    detail: String::new(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let user_name = |id: &str| names.get(id).cloned();
+        let channel_name = |id: &str| {
+            std::iter::once(&self.dms)
+                .chain(&self.guilds)
+                .find_map(|g| g.channel(id))
+                .map(|c| c.name.clone())
+        };
+        let cx = SearchCtx {
+            pal,
+            placeholder: &placeholder,
+            in_dm,
+            include_nsfw: false,
+            show_images: config.modules.images,
+            resolver: crate::search::Resolver {
+                user: &user,
+                channel: &channel,
+            },
+            suggest_users: &suggest_users,
+            suggest_channels: &suggest_channels,
+            user_name: &user_name,
+            channel_name: &channel_name,
+            list_height: Some(420.0),
+        };
+        let width = 420.0;
+        let pos = egui::pos2((s.anchor.right() - width).max(8.0), s.anchor.bottom() + 6.0);
+        let mut action = None;
+        let area = egui::Area::new(egui::Id::unique("rc_search_popup"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .constrain(true)
+            .show(ctx, |ui| {
+                widgets::menu_frame(pal).show(ui, |ui| {
+                    ui.set_width(width);
+                    action = s.panel.show(ui, &cx);
+                });
+            });
+        let outside = ctx.input(|i| {
+            i.pointer.any_click()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|p| !area.response.rect.contains(p) && !s.anchor.contains(p))
+        });
+        let mut keep = !outside;
+        match action {
+            Some(SearchAction::Search { seq, query, offset }) => {
+                let _ = self.tx.send(ToBackend::Search {
+                    seq,
+                    scope: s.scope.clone(),
+                    query,
+                    offset,
+                });
+            }
+            Some(SearchAction::Jump {
+                channel_id,
+                message_id,
+            }) => {
+                self.go_to_channel(&channel_id, ctx, config);
+                self.jump_to(channel_id, message_id);
+            }
+            Some(SearchAction::Close) => keep = false,
+            None => {}
+        }
+        if keep {
+            self.search = Some(s);
         }
     }
 
@@ -2620,6 +2848,26 @@ impl State {
             .clicked()
         {
             self.toggle_members = true;
+        }
+        if config.modules.search {
+            let btn = icon_button(
+                ui,
+                icons::MAGNIFYING_GLASS,
+                "Search (Ctrl+F)",
+                self.search.is_some(),
+                channel.is_some(),
+                pal,
+            );
+            if btn.clicked() && channel.is_some() {
+                if self.search.is_some() {
+                    self.search = None;
+                } else {
+                    self.open_search(true);
+                }
+            }
+            if let Some(s) = &mut self.search {
+                s.anchor = btn.rect;
+            }
         }
         let pin_btn = icon_button(
             ui,
@@ -4156,6 +4404,9 @@ impl State {
     /// Link warning, pin / leave confirmations, custom status, Ctrl+K.
     fn dialogs(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
         self.shortcuts_dialog(ctx, pal);
+        if config.modules.search {
+            self.search_popup(ctx, config, pal);
+        }
         if let Some(w) = &mut self.link_warning
             && let Some(decision) = w.show(ctx, pal)
         {
@@ -4379,6 +4630,8 @@ impl State {
             ui.add_space(8.0);
             let rows = [
                 ("Ctrl + K", "Quick switcher"),
+                ("Ctrl + F", "Search this channel"),
+                ("Ctrl + Shift + F", "Search the server / DM"),
                 ("Alt + ↑ / ↓", "Previous / next channel"),
                 ("Alt + Shift + ↑ / ↓", "Previous / next unread channel"),
                 ("Ctrl + Alt + ↑ / ↓", "Previous / next server"),

@@ -583,6 +583,22 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             ToBackend::LoadProfile { user_id, guild_id } => {
                 send(ToUi::Profile(Box::new(fake_profile(&user_id, guild_id))))
             }
+            // --- search --- (substring match over the sample channels)
+            ToBackend::Search { seq, query, .. } => {
+                let needle = query.content.to_lowercase();
+                let messages: Vec<Message> = ["200", "201", "202", "203", "204", "210"]
+                    .iter()
+                    .flat_map(|c| history(c, &created, &pinned))
+                    .filter(|m| !needle.is_empty() && m.content.to_lowercase().contains(&needle))
+                    .take(crate::search::PAGE_SIZE as usize)
+                    .collect();
+                send(ToUi::SearchResults {
+                    seq,
+                    total: messages.len() as u64,
+                    messages,
+                    partial: false,
+                });
+            }
             // --- reactions --- (echo like the gateway would)
             ToBackend::React {
                 channel_id,

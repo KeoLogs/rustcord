@@ -857,6 +857,26 @@ pub enum ToUi {
         burst: bool,
         error: String,
     },
+    // --- search ---
+    /// A page of search results for request `seq`.
+    SearchResults {
+        seq: u64,
+        total: u64,
+        messages: Vec<Message>,
+        partial: bool,
+    },
+    /// HTTP 202: Discord is still indexing. Shown once; never retried
+    /// automatically.
+    SearchIndexing {
+        seq: u64,
+        retry_after: f32,
+        documents_indexed: u64,
+    },
+    SearchFailed {
+        seq: u64,
+        error: String,
+    },
+    // --- reactions ---
     /// Who reacted (tooltip names).
     Reactors {
         message_id: String,
@@ -1003,6 +1023,16 @@ pub enum ToBackend {
         add: bool,
         burst: bool,
     },
+    // --- search ---
+    /// Run a search (user accounts). Answered with SearchResults /
+    /// SearchIndexing / SearchFailed carrying the same `seq`.
+    Search {
+        seq: u64,
+        scope: crate::search::SearchScope,
+        query: crate::search::SearchQuery,
+        offset: u32,
+    },
+    // --- reactions ---
     /// Who reacted with `emoji` (tooltip).
     LoadReactors {
         channel_id: String,

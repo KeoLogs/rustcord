@@ -26,6 +26,7 @@ mod quick_switcher;
 mod ratelimit;
 mod reactions;
 mod read_state;
+mod search;
 mod settings;
 mod settings_proto;
 mod status;

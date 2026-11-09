@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::emoji_picker::EmojiRef;
 use crate::ratelimit::{self, Limiter, RateLimited};
+use crate::search::{SearchQuery, SearchResponse, SearchScope};
 use crate::types::{Message, User};
 
 const API_BASE: &str = "https://discord.com/api/v10";
@@ -510,6 +511,28 @@ impl Api {
             .context("typing request failed")?;
         Self::check(resp, "Typing indicator").await?;
         Ok(())
+    }
+
+    // --- search ---
+
+    /// One page (25) of message search results in a server or DM
+    /// (user accounts only). HTTP 202 (index not built yet) comes back as
+    /// `SearchResponse::Indexing`; see `search.rs` for the protocol. Only
+    /// sent for a user's search, never polled.
+    pub async fn search(
+        &self,
+        scope: &SearchScope,
+        query: &SearchQuery,
+        offset: u32,
+    ) -> Result<SearchResponse> {
+        let url = crate::search::search_url(API_BASE, scope, query, offset);
+        let resp = self
+            .send(self.http.get(&url).header("Authorization", &self.auth))
+            .await
+            .context("search request failed")?;
+        let status = resp.status().as_u16();
+        let body: Value = Self::check(resp, "Searching").await?.json().await?;
+        Ok(SearchResponse::from_json(status, &body))
     }
 
     // --- reactions ---

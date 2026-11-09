@@ -350,6 +350,43 @@ async fn run(
                     .set_note(&user_id, &note)
                     .await
                     .map(|_| Some(ToUi::Note { user_id, note })),
+                // --- search ---
+                ToBackend::Search { seq, .. } if is_bot => Ok(Some(ToUi::SearchFailed {
+                    seq,
+                    error: "Search needs a user account (bots can't use it)".into(),
+                })),
+                ToBackend::Search {
+                    seq,
+                    scope,
+                    query,
+                    offset,
+                } => Ok(Some(match api.search(&scope, &query, offset).await {
+                    Ok(crate::search::SearchResponse::Page {
+                        total,
+                        messages,
+                        partial,
+                    }) => ToUi::SearchResults {
+                        seq,
+                        total,
+                        messages: messages
+                            .iter()
+                            .map(crate::types::Message::from_json)
+                            .collect(),
+                        partial,
+                    },
+                    Ok(crate::search::SearchResponse::Indexing {
+                        retry_after,
+                        documents_indexed,
+                    }) => ToUi::SearchIndexing {
+                        seq,
+                        retry_after,
+                        documents_indexed,
+                    },
+                    Err(e) => ToUi::SearchFailed {
+                        seq,
+                        error: crate::ratelimit::user_message(&e),
+                    },
+                })),
                 // --- reactions ---
                 ToBackend::React {
                     channel_id,

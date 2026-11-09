@@ -203,6 +203,9 @@ pub struct Modules {
     /// Reactions under messages + the add-reaction picker.
     #[serde(default = "on")]
     pub reactions: bool,
+    /// Ctrl+F message search.
+    #[serde(default = "on")]
+    pub search: bool,
 }
 
 impl Default for Modules {
@@ -219,6 +222,7 @@ impl Default for Modules {
             autocomplete: true,
             gif_picker: true,
             reactions: true,
+            search: true,
         }
     }
 }
@@ -235,10 +239,12 @@ pub mod live {
     use std::sync::atomic::Ordering::Relaxed;
 
     pub static REACTIONS: AtomicBool = AtomicBool::new(true);
+    pub static SEARCH: AtomicBool = AtomicBool::new(true);
     // (end of flags)
 
     pub fn sync(m: &super::Modules) {
         REACTIONS.store(m.reactions, Relaxed);
+        SEARCH.store(m.search, Relaxed);
     }
 
     pub fn on(flag: &AtomicBool) -> bool {
@@ -308,6 +314,11 @@ pub const MODULES: &[ModuleInfo] = &[
         name: "Reactions",
         description: "Reaction pills under messages, the add-reaction button and the emoji picker. Off = no reactions shown or loaded.",
         get: |m| &mut m.reactions,
+    },
+    ModuleInfo {
+        name: "Search",
+        description: "Ctrl+F message search (this channel, or the whole server / DM). Off = no search box, nothing loaded.",
+        get: |m| &mut m.search,
     },
 ];
 
