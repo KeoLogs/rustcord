@@ -251,6 +251,36 @@ impl Api {
         Ok(())
     }
 
+    /// My synced settings (`{"settings": "<b64 PreloadedUserSettings>"}`).
+    /// User accounts only; see `settings_proto::UserSettings::from_rest`.
+    #[allow(dead_code)] // Batch D: not wired yet
+    pub async fn settings_proto(&self) -> Result<Value> {
+        let resp = self
+            .http
+            .get(format!("{API_BASE}/users/@me/settings-proto/1"))
+            .header("Authorization", &self.auth)
+            .send()
+            .await
+            .context("settings request failed")?;
+        Ok(Self::check(resp, "Loading settings").await?.json().await?)
+    }
+
+    /// Change synced settings. `settings_b64` holds only the changed
+    /// top-level sub-messages (built by `settings_proto::UserSettings::patch_*`
+    /// from a user action). Returns `{"settings": "<full b64>"}`.
+    #[allow(dead_code)] // Batch D: not wired yet
+    pub async fn patch_settings_proto(&self, settings_b64: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .patch(format!("{API_BASE}/users/@me/settings-proto/1"))
+            .header("Authorization", &self.auth)
+            .json(&json!({ "settings": settings_b64 }))
+            .send()
+            .await
+            .context("settings request failed")?;
+        Ok(Self::check(resp, "Saving settings").await?.json().await?)
+    }
+
     /// Show the typing indicator to others for ~10 seconds.
     pub async fn trigger_typing(&self, channel_id: &str) -> Result<()> {
         let resp = self
