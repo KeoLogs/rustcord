@@ -19,6 +19,7 @@ mod icons;
 mod invites;
 mod layout;
 mod layout_presets;
+mod layout_v3;
 mod links;
 mod login;
 mod markdown;
@@ -33,6 +34,7 @@ mod quick_switcher;
 mod ratelimit;
 mod reactions;
 mod read_state;
+mod responsive;
 mod screening;
 mod search;
 mod settings;
@@ -71,7 +73,8 @@ fn main() -> eframe::Result {
             // they never read or write the real config, layout or window.
             .with_app_id(storage::app_id(demo))
             .with_inner_size([1200.0, 760.0])
-            .with_min_inner_size([640.0, 420.0]),
+            // Doc §3.2: drawers take over below 700 px.
+            .with_min_inner_size(responsive::WINDOW_MIN),
         // OpenGL renderer: noticeably less RAM than wgpu for a 2D chat UI.
         renderer: eframe::Renderer::Glow,
         // Demo screenshot runs resize the window; don't let them overwrite

@@ -227,6 +227,64 @@ pub fn end_frame(tree: &Tree<Pane>, ctx: &egui::Context) {
     }
 }
 
+/// Everything a pane needs to draw itself, whatever hosts it.
+pub struct PaneCtx<'a> {
+    pub state: &'a mut State,
+    pub config: &'a Config,
+    pub pal: &'a Palette,
+    /// The active theme (gradients, glass, chat background).
+    pub theme: &'a crate::themes::ActiveTheme,
+}
+
+/// Draw one pane's content into `ui`: theme background, fill, margin, and
+/// the pane itself, **clipped to `ui.max_rect()`** so nothing draws past
+/// its edge (popups and menus are separate layers).
+///
+/// Container-agnostic: the caller can be an egui_tiles tile, a side panel,
+/// a framed card or a viewport (layout_v3 `Mode`); it only has to hand over
+/// a `Ui` sized to the pane.
+pub fn draw_pane(ui: &mut egui::Ui, pane: Pane, ctx: &mut PaneCtx<'_>) {
+    let rect = ui.max_rect();
+    ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+    // Theme gradients / glass / background image first; the frame fill is
+    // transparent for panes the theme paints.
+    ctx.theme.paint_pane_background(ui.painter(), rect, pane);
+    egui::Frame::new()
+        .fill(ctx.theme.pane_fill(pane))
+        .inner_margin(pane_margin(pane))
+        .show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            ctx.state.pane_ui(ui, pane, ctx.config, ctx.pal);
+        });
+}
+
+/// Draw a whole layout_v3 column into `ui` (container-agnostic, like
+/// [`draw_pane`]). The chat column is one thing: the composer sits at its
+/// bottom and grows upward (44 px up to 40% of the column), the messages
+/// take the rest. The user panel is docked by the host, not here.
+#[allow(dead_code)] // Called by the panel host (rustcord-ui, next on this branch).
+pub fn draw_column(ui: &mut egui::Ui, column: crate::layout_v3::Column, ctx: &mut PaneCtx<'_>) {
+    use crate::layout_v3::Column;
+    match column {
+        Column::Chat => {
+            let rect = ui.max_rect();
+            ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+            let max = crate::responsive::composer_height(rect.height(), rect.height());
+            egui::Panel::bottom(ui.scope_id().with("chat_composer"))
+                .resizable(false)
+                .frame(egui::Frame::NONE)
+                .size_range(crate::responsive::COMPOSER_MIN_HEIGHT..=max)
+                .show(ui, |ui| draw_pane(ui, Pane::Composer, ctx));
+            egui::CentralPanel::no_frame().show(ui, |ui| draw_pane(ui, Pane::Messages, ctx));
+        }
+        other => {
+            for &pane in other.panes() {
+                draw_pane(ui, pane, ctx);
+            }
+        }
+    }
+}
+
 /// Connects the tile tree to the app state.
 pub struct LayoutBehavior<'a> {
     pub state: &'a mut State,
@@ -240,16 +298,16 @@ pub struct LayoutBehavior<'a> {
 impl Behavior<Pane> for LayoutBehavior<'_> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, tile_id: TileId, pane: &mut Pane) -> UiResponse {
         let rect = ui.max_rect();
-        // Theme gradients / glass / background image first; the frame fill
-        // is transparent for panes the theme paints.
-        self.theme.paint_pane_background(ui.painter(), rect, *pane);
-        egui::Frame::new()
-            .fill(self.theme.pane_fill(*pane))
-            .inner_margin(pane_margin(*pane))
-            .show(ui, |ui| {
-                ui.set_min_size(ui.available_size());
-                self.state.pane_ui(ui, *pane, self.config, &self.pal);
-            });
+        draw_pane(
+            ui,
+            *pane,
+            &mut PaneCtx {
+                state: self.state,
+                config: self.config,
+                pal: &self.pal,
+                theme: self.theme,
+            },
+        );
 
         if !self.editing {
             return UiResponse::None;

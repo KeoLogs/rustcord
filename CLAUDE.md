@@ -26,6 +26,15 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   A new panel = new `Pane` variant + a case in `State::pane_ui` + a spot in
   `default_tree()`. Changing `Pane` can invalidate saved layouts (they fall
   back to the default if they fail to deserialize).
+- `src/layout_v3.rs` (saved column layout: `mode`, column order, user
+  panel dock, rail style, stacked rail+sidebar, pixel widths; v2 tree
+  migration, presets, export/import, `load`/`save`) and `src/responsive.rs`
+  (§3.2 size tables, §3.3 breakpoints with ±16 px hysteresis, `compute`
+  width → docked/drawer/hidden columns) are pure and tested. Panes draw
+  through `layout::draw_pane` / `draw_column` (clipped, container-agnostic).
+- REST failures are a typed `http_error::HttpError` (status, Discord code);
+  match on `http_status` / `is_unavailable` / `is_no_access`, never on
+  error text. Its Display is user-facing; never show raw HTTP lines.
 - `src/demo.rs` fakes the backend when `RUSTCORD_DEMO=1`. Demo runs use
   their own storage key (`storage::DEMO_APP_ID`, `src/storage.rs`), so they
   never read or write the real config, layout, window state or themes.
