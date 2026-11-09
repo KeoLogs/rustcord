@@ -56,7 +56,10 @@ const OP_HEARTBEAT_ACK: u64 = 11;
 
 // Intents (only used for bot accounts): GUILDS | GUILD_MESSAGES |
 // GUILD_MESSAGE_TYPING | DIRECT_MESSAGES | DIRECT_MESSAGE_TYPING | MESSAGE_CONTENT
-const BOT_INTENTS: u64 = (1 << 0) | (1 << 9) | (1 << 11) | (1 << 12) | (1 << 14) | (1 << 15);
+// Guilds, guild messages (+ reactions 1<<10), DMs (+ reactions 1<<13),
+// typing, content.
+const BOT_INTENTS: u64 =
+    (1 << 0) | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12) | (1 << 13) | (1 << 14) | (1 << 15);
 /// Privileged, opt-in (Settings → Appearance): GUILD_MEMBERS | GUILD_PRESENCES.
 const BOT_MEMBER_INTENTS: u64 = (1 << 1) | (1 << 8);
 
@@ -270,6 +273,9 @@ pub async fn run_session(
                         for ev in account_events(event, d) {
                             send_ui(ev);
                         }
+                        for ev in module_events(event, d) {
+                            send_ui(ev);
+                        }
                     }
                     Some(OP_HEARTBEAT) => {
                         write.send(WsMessage::Text(json!({ "op": OP_HEARTBEAT, "d": session.seq }).to_string().into())).await?;
@@ -398,6 +404,10 @@ fn handle_dispatch(event: &str, d: &Value, my_id: &str) -> Option<ToUi> {
             message_id: d["id"].as_str().unwrap_or_default().to_string(),
         }),
         "MESSAGE_ACK" => ReadStateEntry::from_ack(d).map(ToUi::MessageAck),
+        "GUILD_EMOJIS_UPDATE" => Some(ToUi::GuildEmojis {
+            guild_id: d["guild_id"].as_str().unwrap_or_default().to_string(),
+            emojis: crate::types::GuildEmoji::parse_list(&d["emojis"]),
+        }),
         "PASSIVE_UPDATE_V1" => {
             let channels = d["channels"]
                 .as_array()?
@@ -469,6 +479,23 @@ fn account_events(event: &str, d: &Value) -> Vec<ToUi> {
         }
         _ => {}
     }
+    out
+}
+
+/// Events of optional modules. Each block checks its module's live flag
+/// first, so a module that is off does no gateway work.
+fn module_events(event: &str, d: &Value) -> Vec<ToUi> {
+    use crate::config::live;
+    let mut out = Vec::new();
+
+    // --- reactions ---
+    if event.starts_with("MESSAGE_REACTION_")
+        && live::on(&live::REACTIONS)
+        && let Some(ev) = crate::reactions::ReactionEvent::from_dispatch(event, d)
+    {
+        out.push(ToUi::Reaction(ev));
+    }
+
     out
 }
 

@@ -70,11 +70,10 @@ fn parse_custom(s: &str) -> Option<(usize, Segment)> {
     if name.is_empty() || id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    let ext = if animated { "gif" } else { "png" };
     Some((
         end + 1,
         Segment::Emoji {
-            url: format!("https://cdn.discordapp.com/emojis/{id}.{ext}?size=48"),
+            url: custom_emoji_url(id, animated),
             alt: format!(":{name}:"),
         },
     ))
@@ -89,7 +88,7 @@ fn push_unicode(out: &mut Vec<Segment>, text: &str) {
                 push_text(out, std::mem::take(&mut buf));
             }
             out.push(Segment::Emoji {
-                url: format!("{TWEMOJI_BASE}/{}.png", twemoji_code(g)),
+                url: twemoji_url(g),
                 alt: g.to_string(),
             });
         } else {
@@ -127,6 +126,18 @@ fn twemoji_code(g: &str) -> String {
         .map(|c| format!("{:x}", c as u32))
         .collect::<Vec<_>>()
         .join("-")
+}
+
+/// Twemoji image URL for one Unicode emoji (same URL the message view uses,
+/// so the texture is shared).
+pub fn twemoji_url(emoji: &str) -> String {
+    format!("{TWEMOJI_BASE}/{}.png", twemoji_code(emoji))
+}
+
+/// Discord CDN URL for a custom emoji (same URL the message view uses).
+pub fn custom_emoji_url(id: &str, animated: bool) -> String {
+    let ext = if animated { "gif" } else { "png" };
+    format!("https://cdn.discordapp.com/emojis/{id}.{ext}?size=48")
 }
 
 #[cfg(test)]

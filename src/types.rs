@@ -122,7 +122,7 @@ pub struct GuildEmoji {
 }
 
 impl GuildEmoji {
-    fn parse_list(v: &Value) -> Vec<Self> {
+    pub fn parse_list(v: &Value) -> Vec<Self> {
         v.as_array()
             .map(|arr| {
                 arr.iter()
@@ -522,6 +522,8 @@ pub struct Message {
     pub poll: Option<String>,
     /// Has bot components (buttons / menus) we don't draw yet.
     pub has_components: bool,
+    /// Reactions under the message (Reactions module).
+    pub reactions: Vec<crate::reactions::Reaction>,
 }
 
 impl Message {
@@ -620,6 +622,12 @@ impl Message {
                 .get("components")
                 .and_then(Value::as_array)
                 .is_some_and(|c| !c.is_empty()),
+            // Module off: keep no reaction state at all.
+            reactions: if crate::config::live::on(&crate::config::live::REACTIONS) {
+                crate::reactions::parse(&v["reactions"])
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -832,6 +840,30 @@ pub enum ToUi {
     /// A user action hit Discord's rate limit (it is not retried): show
     /// "Slow down, try again in Ns" and hold write controls until then.
     RateLimited(crate::ratelimit::RateLimited),
+    /// GUILD_EMOJIS_UPDATE: a server's custom emoji changed.
+    GuildEmojis {
+        guild_id: String,
+        emojis: Vec<GuildEmoji>,
+    },
+    // --- reactions ---
+    /// MESSAGE_REACTION_ADD / REMOVE / REMOVE_ALL / REMOVE_EMOJI.
+    Reaction(crate::reactions::ReactionEvent),
+    /// My react / unreact request failed: undo the optimistic change.
+    ReactionFailed {
+        channel_id: String,
+        message_id: String,
+        emoji: crate::emoji_picker::EmojiRef,
+        add: bool,
+        burst: bool,
+        error: String,
+    },
+    /// Who reacted (tooltip names).
+    Reactors {
+        message_id: String,
+        emoji: crate::emoji_picker::EmojiRef,
+        burst: bool,
+        names: Vec<String>,
+    },
     /// RELATIONSHIP_ADD / RELATIONSHIP_REMOVE for blocked users.
     Blocked {
         user_id: String,
@@ -962,5 +994,20 @@ pub enum ToBackend {
     SaveFile {
         url: String,
         filename: String,
+    }, // --- reactions ---
+    /// Add / remove my reaction. Only from a click (never automatic).
+    React {
+        channel_id: String,
+        message_id: String,
+        emoji: crate::emoji_picker::EmojiRef,
+        add: bool,
+        burst: bool,
+    },
+    /// Who reacted with `emoji` (tooltip).
+    LoadReactors {
+        channel_id: String,
+        message_id: String,
+        emoji: crate::emoji_picker::EmojiRef,
+        burst: bool,
     },
 }

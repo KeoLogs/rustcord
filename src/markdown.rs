@@ -1791,8 +1791,7 @@ impl Renderer<'_, '_> {
                     .on_hover_text(text);
             }
             AtomKind::CustomEmoji { name, id, animated } => {
-                let ext = if animated { "gif" } else { "png" };
-                let url = format!("https://cdn.discordapp.com/emojis/{id}.{ext}?size=48");
+                let url = crate::emoji::custom_emoji_url(id, animated);
                 let size = self.emoji_size;
                 ui.add(egui::Image::from_uri(url).fit_to_exact_size(vec2(size, size)))
                     .on_hover_text(format!(":{name}:"));

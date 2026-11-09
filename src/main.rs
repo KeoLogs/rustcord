@@ -8,6 +8,7 @@ mod config;
 mod demo;
 mod embed;
 mod emoji;
+mod emoji_picker;
 mod gateway;
 mod gif_picker;
 mod icons;
@@ -23,6 +24,7 @@ mod presence;
 mod profile;
 mod quick_switcher;
 mod ratelimit;
+mod reactions;
 mod read_state;
 mod settings;
 mod settings_proto;
@@ -31,6 +33,7 @@ mod sysmsg;
 mod theme;
 mod timefmt;
 mod types;
+mod unicode_symbols;
 mod widgets;
 
 fn main() -> eframe::Result {

@@ -7,8 +7,9 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use crate::emoji_picker::EmojiRef;
 use crate::ratelimit::{self, Limiter, RateLimited};
-use crate::types::Message;
+use crate::types::{Message, User};
 
 const API_BASE: &str = "https://discord.com/api/v10";
 
@@ -510,6 +511,101 @@ impl Api {
         Self::check(resp, "Typing indicator").await?;
         Ok(())
     }
+
+    // --- reactions ---
+
+    /// Add my (normal) reaction. Only ever called because the user clicked.
+    /// The gateway echoes it as MESSAGE_REACTION_ADD.
+    pub async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &EmojiRef,
+    ) -> Result<()> {
+        let resp = self
+            .send(
+                self.http
+                    .put(reaction_url(channel_id, message_id, emoji, None, true))
+                    .header("Authorization", &self.auth)
+                    .header("Content-Length", "0"),
+            )
+            .await
+            .context("reaction request failed")?;
+        Self::check(resp, "Adding reaction").await?;
+        Ok(())
+    }
+
+    /// Remove my reaction. `burst` removes my Super Reaction (user accounts;
+    /// the `/{type}/@me` path Discord's own client uses).
+    pub async fn remove_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &EmojiRef,
+        burst: bool,
+    ) -> Result<()> {
+        let kind = burst.then_some(1);
+        let resp = self
+            .send(
+                self.http
+                    .delete(reaction_url(channel_id, message_id, emoji, kind, true))
+                    .header("Authorization", &self.auth),
+            )
+            .await
+            .context("reaction request failed")?;
+        Self::check(resp, "Removing reaction").await?;
+        Ok(())
+    }
+
+    /// Who reacted with `emoji` (first `limit`, 1-100), for the tooltip.
+    pub async fn reactors(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &EmojiRef,
+        burst: bool,
+        limit: u8,
+    ) -> Result<Vec<User>> {
+        let url = format!(
+            "{}?limit={}&type={}",
+            reaction_url(channel_id, message_id, emoji, None, false),
+            limit.clamp(1, 100),
+            u8::from(burst)
+        );
+        let resp = self
+            .send(self.http.get(&url).header("Authorization", &self.auth))
+            .await
+            .context("reactions request failed")?;
+        let body: Value = Self::check(resp, "Loading reactions").await?.json().await?;
+        Ok(body
+            .as_array()
+            .map(|arr| arr.iter().map(User::from_json).collect())
+            .unwrap_or_default())
+    }
+}
+
+// --- reactions ---
+
+/// `channels/{c}/messages/{m}/reactions/{emoji}[/{type}][/@me]`, with the
+/// emoji URL-encoded (Unicode) or as `name:id` (custom).
+fn reaction_url(
+    channel_id: &str,
+    message_id: &str,
+    emoji: &EmojiRef,
+    kind: Option<u8>,
+    me: bool,
+) -> String {
+    let mut url = format!(
+        "{API_BASE}/channels/{channel_id}/messages/{message_id}/reactions/{}",
+        emoji.url_segment()
+    );
+    if let Some(k) = kind {
+        url.push_str(&format!("/{k}"));
+    }
+    if me {
+        url.push_str("/@me");
+    }
+    url
 }
 
 /// Message objects from either pins response shape (see `Api::get_pins`).
@@ -587,5 +683,27 @@ mod tests {
 
         assert!(pins_from_body(json!({ "message": "401: Unauthorized" })).is_empty());
         assert!(pins_from_body(Value::Null).is_empty());
+    }
+    #[test]
+    fn reaction_urls() {
+        let base = format!("{API_BASE}/channels/1/messages/2/reactions");
+        assert_eq!(
+            reaction_url("1", "2", &EmojiRef::unicode("👍"), None, true),
+            format!("{base}/%F0%9F%91%8D/@me")
+        );
+        assert_eq!(
+            reaction_url(
+                "1",
+                "2",
+                &EmojiRef::custom("9", "pepe", true),
+                Some(1),
+                true
+            ),
+            format!("{base}/pepe:9/1/@me")
+        );
+        assert_eq!(
+            reaction_url("1", "2", &EmojiRef::unicode("🔥"), None, false),
+            format!("{base}/%F0%9F%94%A5")
+        );
     }
 }

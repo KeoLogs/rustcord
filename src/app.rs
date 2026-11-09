@@ -1,5 +1,6 @@
 //! The RustCord UI: login screen, main layout, settings page.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::autocomplete::{self, Autocomplete, Candidate, Trigger};
 use crate::config::{CONFIG_KEY, Config};
 use crate::embed;
+use crate::emoji_picker::{self, CustomEmojiGroup, EmojiRef, Picked, PickerCtx, RecentEmoji};
 use crate::gif_picker::{GifAction, GifPicker};
 use crate::layout::{self, LAYOUT_KEY, LayoutBehavior, Pane};
 use crate::links::{self, LinkCheck, LinkDecision, LinkWarning};
@@ -24,6 +26,7 @@ use crate::pins::{PinnedMessage, PinsAction, PinsPopup, PinsView};
 use crate::presence::{Presences, Status};
 use crate::profile::{self, Popout, PopoutAction, ProfileCache};
 use crate::quick_switcher::{self, QuickSwitcher};
+use crate::reactions::{self, PendingReactions, ReactionAction, ReactionCtx};
 use crate::read_state::ReadState;
 use crate::settings::{SettingsAction, SettingsPage, SyncChange};
 use crate::settings_proto::{self as sp, RailItem, UserSettings};
@@ -107,6 +110,7 @@ impl RustCordApp {
     }
 
     fn start_session(&mut self, ctx: &egui::Context, token: String, demo: bool) {
+        crate::config::live::sync(&self.config.modules);
         let (ui_tx, ui_rx) = mpsc::channel();
         let (be_tx, be_rx) = tokio::sync::mpsc::unbounded_channel();
         let options = crate::backend::Options {
@@ -219,6 +223,8 @@ fn apply_config_updates(config: &mut Config, state: &mut State) {
                 }
             }
             ConfigUpdate::Compact(c) => config.compact_messages = c,
+            ConfigUpdate::RecentEmoji(e) => config.recent_emoji.record(&e),
+            ConfigUpdate::SkinTone(t) => config.skin_tone = t.min(5),
         }
     }
 }
@@ -247,6 +253,13 @@ impl eframe::App for RustCordApp {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
+        // Module flags for the gateway task, then module state on / off.
+        crate::config::live::sync(&self.config.modules);
+        state.set_reactions_module(self.config.modules.reactions);
+        if let Some(rs) = &mut state.reactions {
+            rs.pending
+                .prune(ctx.input(|i| i.time), reactions::PENDING_MAX_AGE);
+        }
         state.drain_events(ctx, &self.config);
         apply_config_updates(&mut self.config, state);
         state.ack_open_channel(ctx, self.settings.is_none());
@@ -420,11 +433,9 @@ impl eframe::App for RustCordApp {
 // Chat state
 // ===========================================================================
 
-/// Buttons in the message box that open pickers. The emoji picker is a
-/// hook for `src/emoji_picker.rs` (another branch): `ComposerAction::
-/// OpenEmojiPicker` is where it plugs in.
+/// Buttons in the message box that open pickers (the emoji picker is a
+/// popup on its button, see `composer_pane`).
 pub enum ComposerAction {
-    OpenEmojiPicker(egui::Rect),
     ToggleGifPicker(egui::Rect),
 }
 
@@ -465,6 +476,8 @@ enum MessageAction {
     ShowBlocked(String),
     /// Clicked a reply preview: scroll to the original message.
     JumpTo(String),
+    /// Reaction bar / add-reaction picker on message (id).
+    React(String, ReactionAction),
 }
 
 /// Changes to the saved config that come from the chat UI; the app applies
@@ -473,6 +486,32 @@ pub enum ConfigUpdate {
     TrustDomain(String),
     /// Synced compact/cozy setting arrived from Discord.
     Compact(bool),
+    /// Picked an emoji: move it to the front of the recent list.
+    RecentEmoji(EmojiRef),
+    /// Changed the emoji picker's skin tone.
+    SkinTone(u8),
+}
+
+// --- reactions ---
+/// Reactions module state (`None` in `State` while the module is off).
+#[derive(Default)]
+struct ReactionState {
+    pending: PendingReactions,
+    /// Who reacted, per (message, emoji, burst), for pill tooltips.
+    reactors: HashMap<(String, EmojiRef, bool), Vec<String>>,
+    /// Reactor lists already requested (each is asked for once).
+    asked: HashSet<(String, EmojiRef, bool)>,
+}
+
+/// What a message row needs to draw reactions.
+struct ReactParts<'a> {
+    images: bool,
+    /// Add Reactions permission here and not rate limited.
+    can_react: bool,
+    custom: &'a [CustomEmojiGroup],
+    recent: &'a RecentEmoji,
+    skin_tone: &'a Cell<u8>,
+    state: &'a ReactionState,
 }
 
 /// Context for a message's menus.
@@ -537,7 +576,13 @@ pub struct State {
     gif_picker: Option<(GifPicker, egui::Rect)>,
     /// Emoji button's rect while the emoji picker is open (placeholder until
     /// the real picker lands).
-    emoji_picker: Option<egui::Rect>,
+    /// The composer's emoji picker popup was open last frame.
+    emoji_picker_open: bool,
+    /// Custom emoji offered by the pickers: (server id, groups), rebuilt
+    /// when the server changes or its emoji do.
+    emoji_groups: Option<(String, Vec<CustomEmojiGroup>)>,
+    /// Reactions module state; `None` while the module is off.
+    reactions: Option<ReactionState>,
     last_typing_sent: Option<(String, Instant)>,
     confirm_delete: Option<(String, String)>,
 
@@ -652,7 +697,9 @@ impl State {
             pending_spoilers: HashSet::new(),
             show_shortcuts: false,
             gif_picker: None,
-            emoji_picker: None,
+            emoji_picker_open: false,
+            emoji_groups: None,
+            reactions: None,
             last_typing_sent: None,
             confirm_delete: None,
             reads: ReadState::default(),
@@ -1114,7 +1161,171 @@ impl State {
             }
             ToUi::Notice(text) => self.toast = Some((text, Instant::now())),
             ToUi::RateLimited(rl) => self.rate_limited(rl),
+            ToUi::GuildEmojis { guild_id, emojis } => {
+                if let Some(g) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
+                    g.emojis = emojis;
+                }
+                self.emoji_groups = None;
+            }
+            // --- reactions ---
+            ToUi::Reaction(ev) => {
+                let me = self.me.as_ref().map(|u| u.id.as_str()).unwrap_or_default();
+                if let Some(rs) = &mut self.reactions
+                    && let Some(m) = self
+                        .messages
+                        .get_mut(ev.channel_id())
+                        .and_then(|l| l.iter_mut().find(|m| m.id == ev.message_id()))
+                {
+                    rs.pending.on_event(&mut m.reactions, &ev, me);
+                    rs.reactors.retain(|(id, _, _), _| id != ev.message_id());
+                    rs.asked.retain(|(id, _, _)| id != ev.message_id());
+                }
+            }
+            ToUi::ReactionFailed {
+                channel_id,
+                message_id,
+                emoji,
+                add,
+                burst,
+                error,
+            } => {
+                if let Some(rs) = &mut self.reactions
+                    && let Some(m) = self
+                        .messages
+                        .get_mut(&channel_id)
+                        .and_then(|l| l.iter_mut().find(|m| m.id == message_id))
+                {
+                    rs.pending
+                        .on_failure(&mut m.reactions, &message_id, &emoji, add, burst);
+                }
+                // A rate limit already shows the "Slow down" countdown.
+                if self.slow_down_secs().is_none() {
+                    self.toast = Some((error, Instant::now()));
+                }
+            }
+            ToUi::Reactors {
+                message_id,
+                emoji,
+                burst,
+                names,
+            } => {
+                if let Some(rs) = &mut self.reactions {
+                    if rs.reactors.len() > 256 {
+                        rs.reactors.clear();
+                        rs.asked.clear();
+                    }
+                    rs.reactors.insert((message_id, emoji, burst), names);
+                }
+            }
         }
+    }
+
+    // --- reactions ---
+    /// Turn the module's state on / off (off frees everything it held).
+    fn set_reactions_module(&mut self, on: bool) {
+        match (on, self.reactions.is_some()) {
+            (true, false) => self.reactions = Some(ReactionState::default()),
+            (false, true) => {
+                self.reactions = None;
+                for list in self.messages.values_mut() {
+                    for m in list {
+                        m.reactions = Vec::new();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A click in a reaction bar or the add-reaction picker. Reacting only
+    /// ever happens here, from the user's click: one request at a time per
+    /// message, nothing while rate limited, never retried.
+    fn react(&mut self, channel_id: &str, message_id: &str, action: ReactionAction, now: f64) {
+        let slow = self.slow_down_secs().is_some();
+        let Some(rs) = &mut self.reactions else {
+            return;
+        };
+        let (emoji, add, burst, from_picker) = match action {
+            ReactionAction::WantReactors { emoji, burst } => {
+                let key = (message_id.to_string(), emoji.clone(), burst);
+                if rs.asked.insert(key) {
+                    let _ = self.tx.send(ToBackend::LoadReactors {
+                        channel_id: channel_id.to_string(),
+                        message_id: message_id.to_string(),
+                        emoji,
+                        burst,
+                    });
+                }
+                return;
+            }
+            ReactionAction::Add { emoji, from_picker } => (emoji, true, false, from_picker),
+            ReactionAction::Remove { emoji, burst } => (emoji, false, burst, false),
+        };
+        if slow || rs.pending.has_message(message_id) {
+            return;
+        }
+        if from_picker {
+            self.config_updates
+                .push(ConfigUpdate::RecentEmoji(emoji.clone()));
+        }
+        let Some(m) = self
+            .messages
+            .get_mut(channel_id)
+            .and_then(|l| l.iter_mut().find(|m| m.id == message_id))
+        else {
+            return;
+        };
+        if rs.pending.begin(
+            &mut m.reactions,
+            channel_id,
+            message_id,
+            &emoji,
+            add,
+            burst,
+            now,
+        ) {
+            let _ = self.tx.send(ToBackend::React {
+                channel_id: channel_id.to_string(),
+                message_id: message_id.to_string(),
+                emoji,
+                add,
+                burst,
+            });
+        }
+    }
+
+    /// Custom emoji for the pickers in the current server (none in DMs:
+    /// using other servers' emoji needs Nitro).
+    fn refresh_emoji_groups(&mut self) {
+        let guild = self
+            .selected_channel
+            .as_deref()
+            .and_then(|c| self.find_channel(c))
+            .map(|(g, _)| g)
+            .filter(|g| !g.is_dms());
+        let key = guild.map(|g| g.id.clone()).unwrap_or_default();
+        if self.emoji_groups.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        let groups = guild
+            .map(|g| {
+                vec![CustomEmojiGroup {
+                    name: g.name.clone(),
+                    emojis: g
+                        .emojis
+                        .iter()
+                        .map(|e| EmojiRef::custom(&e.id, &e.name, e.animated))
+                        .collect(),
+                }]
+            })
+            .unwrap_or_default();
+        self.emoji_groups = Some((key, groups));
+    }
+
+    fn emoji_groups(&self) -> &[CustomEmojiGroup] {
+        self.emoji_groups
+            .as_ref()
+            .map_or(&[], |(_, g)| g.as_slice())
     }
 
     /// Show the quiet "Slow down" notice and hold write controls until the
@@ -2508,6 +2719,8 @@ impl State {
 
         let formatting = !config.disable_formatting;
         let my_id = self.me.as_ref().map(|u| u.id.clone()).unwrap_or_default();
+        self.refresh_emoji_groups();
+        let skin_tone = Cell::new(config.skin_tone);
         // Server nicknames and role colours for author names (not DMs).
         let guild_idx = self
             .guilds
@@ -2561,6 +2774,15 @@ impl State {
             guild_id: guild.map(|g| g.id.clone()),
             can_pin: self.can_pin(&channel_id),
         };
+        let react_parts = self.reactions.as_ref().map(|state| ReactParts {
+            images: config.modules.emoji_images,
+            can_react: self.has_perm(&channel_id, perms::ADD_REACTIONS)
+                && self.slow_down_secs().is_none(),
+            custom: self.emoji_groups(),
+            recent: &config.recent_emoji,
+            skin_tone: &skin_tone,
+            state,
+        });
         let messages = &self.messages[&channel_id];
         let mut action = None;
         let scroll_id = self
@@ -2682,6 +2904,7 @@ impl State {
                         compact: config.compact_messages,
                         highlight: flash.as_ref() == Some(&m.id),
                         menu: &menu,
+                        reactions: react_parts.as_ref(),
                     };
                     let body = Body {
                         blocks: &parsed[i].0,
@@ -2773,7 +2996,11 @@ impl State {
             Some(MessageAction::ShowBlocked(id)) => {
                 self.revealed_blocked.insert(id);
             }
-            Some(MessageAction::JumpTo(id)) => self.jump_to(channel_id, id),
+            Some(MessageAction::JumpTo(id)) => self.jump_to(channel_id.clone(), id),
+            Some(MessageAction::React(id, a)) => {
+                let now = ctx.input(|i| i.time);
+                self.react(&channel_id, &id, a, now);
+            }
             None => {}
         }
     }
@@ -2855,6 +3082,11 @@ impl State {
     /// May I pin / unpin in this channel? DMs: yes. Servers: Manage
     /// Messages, from my roles and the channel's overwrites.
     fn can_pin(&self, channel_id: &str) -> bool {
+        self.has_perm(channel_id, perms::MANAGE_MESSAGES)
+    }
+
+    /// My permission `bit` in a channel (always true in DMs).
+    fn has_perm(&self, channel_id: &str, bit: u64) -> bool {
         let Some((g, c)) = self.find_channel(channel_id) else {
             return false;
         };
@@ -2872,7 +3104,7 @@ impl State {
                 roles: &g.my_roles,
             },
         );
-        p & perms::MANAGE_MESSAGES != 0
+        p & bit != 0
     }
 
     /// Markdown → one line of plain text for notifications and the inbox.
@@ -2978,7 +3210,9 @@ impl State {
         let mut cursor = None;
         let mut has_focus = false;
         let mut composer_action = None;
+        let mut emoji_btn: Option<egui::Response> = None;
         let mut toggle_spoiler = None;
+        self.refresh_emoji_groups();
 
         // Autocomplete keys go first so the text box doesn't see them.
         let ac_on = config.modules.autocomplete;
@@ -3106,15 +3340,13 @@ impl State {
                                 ui,
                                 icons::SMILEY,
                                 "Emoji",
-                                self.emoji_picker.is_some(),
+                                self.emoji_picker_open,
                                 true,
                                 28.0,
                                 22.0,
                                 pal,
                             );
-                            if emoji.clicked() {
-                                composer_action = Some(ComposerAction::OpenEmojiPicker(emoji.rect));
-                            }
+                            emoji_btn = Some(emoji);
                             // Discord has no send button; a subtle one shows only
                             // when there's something to send.
                             let send_btn = can_send && send_button(ui, pal).clicked();
@@ -3275,15 +3507,45 @@ impl State {
                     self.gif_picker = Some((GifPicker::default(), anchor));
                 }
             }
-            Some(ComposerAction::OpenEmojiPicker(anchor)) => {
-                // Hook for the emoji picker (src/emoji_picker.rs, built on
-                // another branch): for now a small placeholder popup.
-                self.emoji_picker = match self.emoji_picker {
-                    Some(_) => None,
-                    None => Some(anchor),
-                };
-            }
             None => {}
+        }
+        // Emoji picker (with the Symbols tab) on the composer's emoji button.
+        if let Some(btn) = emoji_btn {
+            let tone = Cell::new(config.skin_tone);
+            let picked = emoji_picker::popup(
+                &btn,
+                &PickerCtx {
+                    pal,
+                    images: config.modules.emoji_images,
+                    custom: self.emoji_groups(),
+                    recent: &config.recent_emoji,
+                    allow_text: true,
+                    skin_tone: &tone,
+                },
+            );
+            self.emoji_picker_open =
+                egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&btn));
+            if tone.get() != config.skin_tone {
+                self.config_updates.push(ConfigUpdate::SkinTone(tone.get()));
+            }
+            if let Some(p) = picked {
+                if let Picked::Emoji(e) = &p {
+                    self.config_updates
+                        .push(ConfigUpdate::RecentEmoji(e.clone()));
+                }
+                let text = p.insert_text();
+                let at = cursor
+                    .map(|c| {
+                        self.draft
+                            .char_indices()
+                            .nth(c)
+                            .map_or(self.draft.len(), |(i, _)| i)
+                    })
+                    .unwrap_or(self.draft.len());
+                self.draft.insert_str(at, &text);
+                self.focus_composer = true;
+                changed = true;
+            }
         }
         if toggle_ping && let Compose::Reply { ping, .. } = &mut self.compose {
             *ping = !*ping;
@@ -3887,37 +4149,6 @@ impl State {
                     }
                 }
                 None => {}
-            }
-        }
-        // Placeholder until src/emoji_picker.rs is merged.
-        if let Some(anchor) = self.emoji_picker {
-            let area = egui::Area::new(egui::Id::unique("rc_emoji_placeholder"))
-                .order(egui::Order::Foreground)
-                .fixed_pos(egui::pos2(anchor.right() - 280.0, anchor.top() - 96.0))
-                .constrain(true)
-                .show(ctx, |ui| {
-                    widgets::menu_frame(pal).show(ui, |ui| {
-                        ui.set_width(264.0);
-                        ui.label(
-                            RichText::new(icons::label(icons::SMILEY, "Emoji"))
-                                .bold()
-                                .color(pal.strong),
-                        );
-                        ui.label(
-                            RichText::new("The emoji picker is coming soon. Type :name: in the message box to search emoji.")
-                                .size(13.0)
-                                .color(pal.muted),
-                        );
-                    });
-                });
-            let outside = ctx.input(|i| {
-                i.pointer.any_click()
-                    && i.pointer
-                        .interact_pos()
-                        .is_some_and(|p| !area.response.rect.contains(p) && !anchor.contains(p))
-            });
-            if outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.emoji_picker = None;
             }
         }
     }
@@ -5317,6 +5548,8 @@ struct RowCtx<'a> {
     /// Just jumped here (pins): flash the background.
     highlight: bool,
     menu: &'a MenuCtx,
+    /// Reactions module (None = off).
+    reactions: Option<&'a ReactParts<'a>>,
 }
 
 /// A message's parsed content.
@@ -5356,7 +5589,9 @@ fn message_row(
         ui.add_space(GROUP_GAP - 2.0);
     }
     let more_id = egui::Id::unique(("msg_more", &m.id));
-    let menu_open = egui::Popup::is_id_open(ui.ctx(), more_id.with("popup"));
+    let react_id = egui::Id::unique(("msg_react", &m.id));
+    let menu_open = egui::Popup::is_id_open(ui.ctx(), more_id.with("popup"))
+        || egui::Popup::is_id_open(ui.ctx(), react_id.with("popup"));
     // Last frame's hover bar rect: keep the bar while the pointer is on it.
     let bar_id = egui::Id::unique("msg_hover_bar");
     let last_bar = ui
@@ -5447,6 +5682,11 @@ fn message_row(
                                 });
                             }
                             message_content(ui, m, body, rc, config, pal, &mut action);
+                            if let Some(rp) = rc.reactions
+                                && let Some(a) = reaction_row(ui, m, rp, pal)
+                            {
+                                action = Some(MessageAction::React(m.id.clone(), a));
+                            }
                         });
                     });
                 })
@@ -5506,7 +5746,12 @@ fn message_row(
         .show(|ui| message_menu(ui, m, rc.menu, &mut action, pal));
 
     if hovered {
-        hover_bar(ui, m, rc.menu, rect, more_id, bar_id, &mut action, pal);
+        let ids = BarIds {
+            more: more_id,
+            bar: bar_id,
+            react: react_id,
+        };
+        hover_bar(ui, m, rc, rect, ids, &mut action, pal);
     }
     (action, rect)
 }
@@ -5993,21 +6238,112 @@ fn reply_preview(
         .on_hover_text("Jump to message")
 }
 
+/// Ids of the hover bar and its popups (stable per message, so an open
+/// popup keeps the bar up).
+#[derive(Clone, Copy)]
+struct BarIds {
+    more: egui::Id,
+    bar: egui::Id,
+    react: egui::Id,
+}
+
+// --- reactions ---
+/// Reaction pills under a message (nothing without reactions).
+fn reaction_row(
+    ui: &mut egui::Ui,
+    m: &Message,
+    rp: &ReactParts,
+    pal: &Palette,
+) -> Option<ReactionAction> {
+    if m.reactions.is_empty() {
+        return None;
+    }
+    let tooltip = |e: &EmojiRef, burst: bool| {
+        let names = rp.state.reactors.get(&(m.id.clone(), e.clone(), burst))?;
+        let total = m
+            .reactions
+            .iter()
+            .find(|r| r.emoji.same(e))
+            .map_or(0, |r| if burst { r.burst } else { r.normal });
+        Some(reactions::reactors_text(e, names, total))
+    };
+    let ctx = ReactionCtx {
+        id: egui::Id::unique(("reactions", &m.id)),
+        pal,
+        images: rp.images,
+        // Disabled while my request for this message is in flight.
+        can_react: rp.can_react && !rp.state.pending.has_message(&m.id),
+        show_add: false,
+        custom: rp.custom,
+        recent: rp.recent,
+        skin_tone: rp.skin_tone,
+        tooltip: &tooltip,
+    };
+    ui.add_space(2.0);
+    reactions::reaction_bar(ui, &m.reactions, &ctx)
+}
+
+/// The hover bar's Add Reaction button and its picker popup.
+fn add_reaction_button(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    rp: &ReactParts,
+    pal: &Palette,
+) -> Option<ReactionAction> {
+    let (r, _) = ui.allocate_exact_size(vec2(32.0, 32.0), egui::Sense::hover());
+    let btn = ui.interact(r, id, egui::Sense::click());
+    let open = egui::Popup::is_id_open(ui.ctx(), id.with("popup"));
+    let hot = btn.hovered() || open;
+    if hot {
+        ui.painter().rect_filled(r.shrink(2.0), 4, pal.hover);
+    }
+    icons::paint(
+        ui,
+        r,
+        icons::SMILEY,
+        icons::font(20.0),
+        if hot { pal.strong } else { pal.muted },
+    );
+    let btn = btn.on_hover_text("Add Reaction");
+    let no_tooltip = |_: &EmojiRef, _: bool| None;
+    let ctx = ReactionCtx {
+        id,
+        pal,
+        images: rp.images,
+        can_react: true,
+        show_add: false,
+        custom: rp.custom,
+        recent: rp.recent,
+        skin_tone: rp.skin_tone,
+        tooltip: &no_tooltip,
+    };
+    reactions::picker_popup(&btn, &ctx)
+}
+
 /// The floating Reply / Edit / More bar at the top-right of a hovered
 /// message.
 #[allow(clippy::too_many_arguments)]
 fn hover_bar(
     ui: &mut egui::Ui,
     m: &Message,
-    menu: &MenuCtx,
+    rc: &RowCtx,
     row: egui::Rect,
-    more_id: egui::Id,
-    bar_id: egui::Id,
+    ids: BarIds,
     action: &mut Option<MessageAction>,
     pal: &Palette,
 ) {
+    let BarIds {
+        more: more_id,
+        bar: bar_id,
+        react: react_id,
+    } = ids;
+    let menu = rc.menu;
     let mine = menu.mine;
-    let buttons = if mine { 3.0 } else { 2.0 };
+    // Add Reaction: allowed here and no request of mine in flight.
+    let react = rc
+        .reactions
+        .filter(|rp| rp.can_react && !rp.state.pending.has_message(&m.id));
+    let buttons = if mine { 3.0 } else { 2.0 } + if react.is_some() { 1.0 } else { 0.0 };
     let size = vec2(buttons * 32.0 + 4.0, 36.0);
     let clip = ui.clip_rect();
     let y = (row.top() - 16.0).max(clip.top() + 2.0);
@@ -6035,6 +6371,11 @@ fn hover_bar(
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
+                        if let Some(rp) = react
+                            && let Some(a) = add_reaction_button(ui, react_id, rp, pal)
+                        {
+                            *action = Some(MessageAction::React(m.id.clone(), a));
+                        }
                         if icon_button(ui, icons::REPLY, "Reply", false, true, pal).clicked() {
                             *action =
                                 Some(MessageAction::Reply(m.id.clone(), m.author.name.clone()));

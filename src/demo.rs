@@ -583,6 +583,39 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             ToBackend::LoadProfile { user_id, guild_id } => {
                 send(ToUi::Profile(Box::new(fake_profile(&user_id, guild_id))))
             }
+            // --- reactions --- (echo like the gateway would)
+            ToBackend::React {
+                channel_id,
+                message_id,
+                emoji,
+                add,
+                burst,
+            } => {
+                let d = json!({
+                    "channel_id": channel_id, "message_id": message_id, "user_id": ME,
+                    "emoji": { "id": emoji.id, "name": emoji.name, "animated": emoji.animated },
+                    "burst": burst,
+                });
+                let t = if add {
+                    "MESSAGE_REACTION_ADD"
+                } else {
+                    "MESSAGE_REACTION_REMOVE"
+                };
+                if let Some(ev) = crate::reactions::ReactionEvent::from_dispatch(t, &d) {
+                    send(ToUi::Reaction(ev));
+                }
+            }
+            ToBackend::LoadReactors {
+                message_id,
+                emoji,
+                burst,
+                ..
+            } => send(ToUi::Reactors {
+                message_id,
+                emoji,
+                burst,
+                names: vec!["Sam".into(), "Alex".into(), "You".into()],
+            }),
             ToBackend::LoadNote { user_id } => {
                 let note = notes.get(&user_id).cloned().unwrap_or_default();
                 send(ToUi::Note { user_id, note });
@@ -722,7 +755,16 @@ fn sample_values(channel_id: &str) -> Vec<Value> {
             "and edits",
             json!({ "edited_timestamp": iso_minutes_ago(30) }),
         ),
-        msg(&sam, "the layout looks sick 🔥", json!({})),
+        msg(
+            &sam,
+            "the layout looks sick 🔥",
+            json!({ "reactions": [
+                { "emoji": { "id": null, "name": "🔥" }, "count": 3,
+                  "count_details": { "burst": 0, "normal": 3 }, "me": true },
+                { "emoji": { "id": null, "name": "👍" }, "count": 1,
+                  "count_details": { "burst": 0, "normal": 1 }, "me": false }
+            ] }),
+        ),
         msg(
             &alex,
             "@You did you see the unread badges?",

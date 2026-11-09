@@ -350,6 +350,62 @@ async fn run(
                     .set_note(&user_id, &note)
                     .await
                     .map(|_| Some(ToUi::Note { user_id, note })),
+                // --- reactions ---
+                ToBackend::React {
+                    channel_id,
+                    message_id,
+                    emoji,
+                    add,
+                    burst,
+                } => {
+                    let r = if add {
+                        api.add_reaction(&channel_id, &message_id, &emoji).await
+                    } else {
+                        api.remove_reaction(&channel_id, &message_id, &emoji, burst)
+                            .await
+                    };
+                    match r {
+                        Ok(()) => Ok(None),
+                        Err(e) => {
+                            // Undo the optimistic change; a 429 also gets the
+                            // quiet "Slow down" notice (never retried).
+                            if let Some(rl) = crate::ratelimit::rate_limited(&e) {
+                                let _ = tx.send(ToUi::RateLimited(rl));
+                            }
+                            Ok(Some(ToUi::ReactionFailed {
+                                channel_id,
+                                message_id,
+                                emoji,
+                                add,
+                                burst,
+                                error: crate::ratelimit::user_message(&e),
+                            }))
+                        }
+                    }
+                }
+                ToBackend::LoadReactors {
+                    channel_id,
+                    message_id,
+                    emoji,
+                    burst,
+                } => {
+                    let users = api
+                        .reactors(
+                            &channel_id,
+                            &message_id,
+                            &emoji,
+                            burst,
+                            crate::reactions::REACTORS_LIMIT,
+                        )
+                        .await
+                        .unwrap_or_default();
+                    Ok(Some(ToUi::Reactors {
+                        message_id,
+                        emoji,
+                        burst,
+                        names: users.into_iter().map(|u| u.name).collect(),
+                    }))
+                }
                 ToBackend::Notify { title, body } => {
                     let _ = tokio::task::spawn_blocking(move || {
                         crate::notify::show_desktop(&title, &body)

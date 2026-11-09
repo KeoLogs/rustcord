@@ -61,6 +61,12 @@ pub struct Config {
     /// Bot accounts: ask for the Server Members + Presence intents and load
     /// the whole member list. Both must be enabled in the Developer Portal.
     pub bot_member_intents: bool,
+    /// Emoji picker: most recently used emoji (newest first).
+    #[serde(default)]
+    pub recent_emoji: crate::emoji_picker::RecentEmoji,
+    /// Emoji picker skin tone (0 = default, 1-5 light to dark).
+    #[serde(default)]
+    pub skin_tone: u8,
 }
 
 impl Default for Config {
@@ -86,6 +92,8 @@ impl Default for Config {
             flash_taskbar: true,
             compact_member_list: false,
             bot_member_intents: false,
+            recent_emoji: Default::default(),
+            skin_tone: 0,
         }
     }
 }
@@ -192,6 +200,9 @@ pub struct Modules {
     pub autocomplete: bool,
     /// GIF button + picker in the message box (Discord's GIF search).
     pub gif_picker: bool,
+    /// Reactions under messages + the add-reaction picker.
+    #[serde(default = "on")]
+    pub reactions: bool,
 }
 
 impl Default for Modules {
@@ -207,7 +218,31 @@ impl Default for Modules {
             embeds: true,
             autocomplete: true,
             gif_picker: true,
+            reactions: true,
         }
+    }
+}
+
+/// serde default for module flags added after a release (default on).
+fn on() -> bool {
+    true
+}
+
+/// Module flags readable off the UI thread (the gateway task), so a module
+/// that is off does no gateway work. The app stores them every frame.
+pub mod live {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    pub static REACTIONS: AtomicBool = AtomicBool::new(true);
+    // (end of flags)
+
+    pub fn sync(m: &super::Modules) {
+        REACTIONS.store(m.reactions, Relaxed);
+    }
+
+    pub fn on(flag: &AtomicBool) -> bool {
+        flag.load(Relaxed)
     }
 }
 
@@ -269,11 +304,46 @@ pub const MODULES: &[ModuleInfo] = &[
         description: "The GIF button in the message box: trending GIFs and Tenor search through Discord (user accounts). Off = no button, nothing loaded.",
         get: |m| &mut m.gif_picker,
     },
+    ModuleInfo {
+        name: "Reactions",
+        description: "Reaction pills under messages, the add-reaction button and the emoji picker. Off = no reactions shown or loaded.",
+        get: |m| &mut m.reactions,
+    },
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// polish-2's default config, before any Release A module existed.
+    const POLISH2_CONFIG: &str = r#"{
+        "theme": "DiscordDark", "zoom": 1.0,
+        "modules": { "layout_editor": true, "images": true, "emoji_images": true,
+            "typing_indicators": true, "member_list": true, "notifications": true,
+            "status_bar": false, "embeds": true, "autocomplete": true, "gif_picker": false },
+        "remember_login": true, "saved_token": null, "max_messages_per_channel": 200,
+        "cached_channels": 8, "warn_before_links": true, "trusted_domains": [],
+        "disable_formatting": false, "use_12_hour_time": false, "show_embed_images": true,
+        "mention_on_reply": true, "show_blocked_messages": false, "compact_messages": false,
+        "client_identity": "Web", "desktop_notifications": true, "flash_taskbar": true,
+        "compact_member_list": false, "bot_member_intents": false
+    }"#;
+
+    #[test]
+    fn old_config_still_loads() {
+        let c: Config = serde_json::from_str(POLISH2_CONFIG).expect("polish-2 config loads");
+        // Old values are kept, new modules default on.
+        assert!(!c.modules.gif_picker);
+        let d = Modules::default();
+        for m in MODULES {
+            let mut a = c.modules.clone();
+            let mut b = d.clone();
+            if m.name != "GIF picker" {
+                assert_eq!(*(m.get)(&mut a), *(m.get)(&mut b), "{}", m.name);
+            }
+        }
+        assert!(c.modules.reactions);
+    }
 
     #[test]
     fn identify_properties() {
