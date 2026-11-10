@@ -4065,7 +4065,15 @@ impl State {
             .id_salt("channels")
             .auto_shrink(false)
             .show(ui, |ui| {
-                let groups = guild.channel_groups();
+                let mut groups = guild.channel_groups();
+                // Like Discord: channels I can't view aren't listed, and a
+                // category left with nothing in it goes too.
+                if !guild.is_dms() {
+                    for g in &mut groups {
+                        g.channels.retain(|c| self.can_view_in(guild, c));
+                    }
+                    groups.retain(|g| !g.channels.is_empty());
+                }
                 egui::Frame::new()
                     .inner_margin(egui::Margin {
                         left: 8,
@@ -4515,27 +4523,41 @@ impl State {
         };
         let Some(count) = self.messages.get(&channel_id).map(Vec::len) else {
             match self.channel_error(&channel_id) {
-                // Minimal empty state; the design (doc §4.1) is the UI's.
-                Some(err) => {
-                    let (title, sub) = match err {
-                        ChannelError::NoAccess => {
-                            let name = self
-                                .find_channel(&channel_id)
-                                .map(|(_, c)| c.name.clone())
-                                .unwrap_or_default();
-                            (
-                                format!("You don't have access to #{name}"),
-                                "Ask a server admin for the role that can see it.".to_string(),
-                            )
-                        }
-                        ChannelError::Failed(e) => ("Couldn't load messages".into(), e.clone()),
+                // Doc §4.1: a centred state that fills the column, never a
+                // raw HTTP line.
+                Some(ChannelError::NoAccess) => {
+                    let name = self
+                        .find_channel(&channel_id)
+                        .map(|(_, c)| c.name.clone())
+                        .unwrap_or_default();
+                    empty_state(
+                        ui,
+                        icons::LOCK,
+                        &format!("You don't have access to #{name}"),
+                        "Ask a server admin for the role that can see it.",
+                        None,
+                        pal,
+                    );
+                }
+                Some(ChannelError::Failed(e)) => {
+                    let hint = if e.is_empty() {
+                        "Check your connection and try again.".to_string()
+                    } else {
+                        e.clone()
                     };
-                    ui.vertical_centered(|ui| {
-                        ui.add_space((ui.available_height() / 2.0 - 48.0).max(0.0));
-                        ui.label(RichText::new(icons::LOCK).size(48.0).color(pal.muted));
-                        ui.label(RichText::new(title).size(16.0).color(pal.strong));
-                        ui.label(RichText::new(sub).color(pal.muted));
-                    });
+                    let retry = empty_state(
+                        ui,
+                        icons::WARNING,
+                        "Couldn't load messages",
+                        &hint,
+                        Some("Try again"),
+                        pal,
+                    );
+                    // A click, never automatic.
+                    if retry {
+                        self.channel_errors.remove(&channel_id);
+                        let _ = self.tx.send(ToBackend::LoadHistory { channel_id });
+                    }
                 }
                 None => {
                     ui.centered_and_justified(|ui| ui.spinner());
@@ -4544,9 +4566,14 @@ impl State {
             return;
         };
         if count == 0 {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("No messages yet").color(pal.muted))
-            });
+            empty_state(
+                ui,
+                icons::CHAT_CIRCLE,
+                "No messages yet",
+                "Say hi to get the conversation going.",
+                None,
+                pal,
+            );
             return;
         }
 
@@ -4905,6 +4932,14 @@ impl State {
 
     /// Scroll to a message, loading the messages around it if needed.
     fn jump_to(&mut self, channel_id: String, message_id: String) {
+        // Never fetch around a message in a channel I can't view (the chat
+        // column shows the no-access state instead).
+        if !self.can_view_channel(&channel_id) {
+            self.channel_errors
+                .insert(channel_id, ChannelError::NoAccess);
+            self.status = "No access".into();
+            return;
+        }
         let loaded = self
             .messages
             .get(&channel_id)
@@ -4978,9 +5013,15 @@ impl State {
     /// and channels whose server data isn't known yet count as visible.
     /// The channel list hides channels where this is false.
     pub fn can_view_channel(&self, channel_id: &str) -> bool {
-        let Some((g, c)) = self.find_channel(channel_id) else {
-            return true;
-        };
+        match self.find_channel(channel_id) {
+            Some((g, c)) => self.can_view_in(g, c),
+            None => true,
+        }
+    }
+
+    /// [`can_view_channel`](Self::can_view_channel) for a channel already
+    /// looked up (the channel list checks every row each frame).
+    fn can_view_in(&self, g: &Guild, c: &crate::types::Channel) -> bool {
         if g.is_dms() {
             return true;
         }
@@ -6676,12 +6717,18 @@ fn category_header(
         col,
         rect.width() - 20.0,
     );
+    let elided = galley.elided;
     ui.painter().galley(
         egui::pos2(rect.left() + 14.0, rect.center().y - galley.size().y / 2.0),
         galley,
         col,
     );
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if elided {
+        resp.on_hover_text(name)
+    } else {
+        resp
+    }
 }
 
 /// What a channel row needs to know besides the channel.
@@ -6809,8 +6856,8 @@ fn channel_row(
         8.0
     };
     let galley = truncated(ui, &c.name, font, color, rect.right() - right_pad - x);
-    // DM rows cut with "…" show the full name / status line on hover.
-    let mut cut = dm && galley.elided;
+    // Rows cut with "…" show the full name (plus status line for DMs) on hover.
+    let mut cut = galley.elided;
     match row.activity.as_deref().filter(|_| dm) {
         // Name over the custom status / activity, like Discord's DM list.
         Some(act) => {
@@ -6864,7 +6911,8 @@ fn channel_row(
         let status = row.status.filter(|_| dm).map(|st| st.label());
         if cut {
             let mut tip = c.name.clone();
-            for line in [row.activity.as_deref(), status].into_iter().flatten() {
+            let activity = row.activity.as_deref().filter(|_| dm);
+            for line in [activity, status].into_iter().flatten() {
                 tip.push('\n');
                 tip.push_str(line);
             }
@@ -7449,6 +7497,62 @@ fn folder_item(
 }
 
 /// Lay out one line of text, cut off with "…" past `max_width`.
+/// A pane's centred empty / error state (doc §4.1): a 48 px Phosphor icon
+/// in a soft disc, a bold title and a muted hint (both wrap and centre in
+/// a narrow pane), plus an optional button. Returns true when the button
+/// was clicked.
+fn empty_state(
+    ui: &mut egui::Ui,
+    icon: &str,
+    title: &str,
+    hint: &str,
+    button: Option<&str>,
+    pal: &Palette,
+) -> bool {
+    let mut clicked = false;
+    let width = (ui.available_width() - 32.0).clamp(120.0, 400.0);
+    // Rough block height, to centre it vertically.
+    let block = 80.0 + 16.0 + 22.0 + 6.0 + 20.0 + if button.is_some() { 48.0 } else { 0.0 };
+    ui.vertical_centered(|ui| {
+        ui.add_space(((ui.available_height() - block) / 2.0).max(16.0));
+        let (disc, _) = ui.allocate_exact_size(vec2(80.0, 80.0), egui::Sense::hover());
+        ui.painter().circle_filled(disc.center(), 40.0, pal.hover);
+        icons::paint(ui, disc, icon, icons::font(48.0), pal.muted);
+        ui.add_space(16.0);
+        ui.allocate_ui_with_layout(
+            vec2(width, 0.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.add(
+                    egui::Label::new(RichText::new(title).bold().size(15.0).color(pal.strong))
+                        .wrap()
+                        .selectable(false),
+                );
+                ui.add(
+                    egui::Label::new(RichText::new(hint).size(13.0).color(pal.muted))
+                        .wrap()
+                        .selectable(false),
+                );
+                if let Some(label) = button {
+                    ui.add_space(12.0);
+                    let btn =
+                        egui::Button::new(RichText::new(label).size(13.0).color(Color32::WHITE))
+                            .fill(pal.accent)
+                            .corner_radius(4)
+                            .min_size(vec2(96.0, 32.0))
+                            .wrap_mode(egui::TextWrapMode::Extend);
+                    clicked = ui
+                        .add(btn)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked();
+                }
+            },
+        );
+    });
+    clicked
+}
+
 pub(crate) fn truncated(
     ui: &egui::Ui,
     text: &str,
