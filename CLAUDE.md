@@ -48,9 +48,10 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   "Reset to default" for layout and theme. Other themes (Discord Light
   included) are `.rctheme` files in `examples/themes/`, imported by the
   user; `layout_presets::Preset` is internal (default tree, v2 migration).
-- Fonts: Noto Sans Regular + SemiBold are bundled (`assets/fonts/`, OFL) and
-  installed by `theme::install_fonts`; system fonts remain the fallback for
-  other scripts. egui's `strong()` only changes colour — for real bold use
+- Fonts: Cascadia Mono (variable, the default UI font; a theme's
+  `font_family = "sans"` picks Noto Sans instead) and Noto Sans Regular +
+  SemiBold are bundled (`assets/fonts/`, OFL) and installed by
+  `theme::install_fonts`; system fonts remain the fallback for other scripts. egui's `strong()` only changes colour — for real bold use
   `RichText::bold()` (`theme::Bold` trait) or `theme::bold_font(size)`.
   Stick to the sizes already in use (each size/family adds glyphs to the
   font atlas).
@@ -178,6 +179,10 @@ Every update pushed for Leo bumps `version` in `Cargo.toml` (x.y.z) and
 adds a `CHANGELOG.md` entry. Leo's scheme: x = big update, y = add-ons and
 improvements, z = bug and issue fixes. y resets to 0 when x goes up; z
 resets to 0 when x or y goes up. Settings → About shows it.
+- Default look (PR1b): blocky bordered panes with notch labels
+  (`[style.frame]` in .rctheme), no OS title bar: – □ X live in the
+  top-right pane header (`src/window_frame.rs`); "Use system title bar"
+  restores the native frame. The old look is `examples/themes/discord-classic`.
 
 ## Before finishing any change
 

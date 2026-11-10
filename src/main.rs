@@ -99,8 +99,8 @@ fn main() -> eframe::Result {
             // Images (avatars, server icons, attachments, emoji) load
             // straight from Discord's CDN / Twemoji.
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            // Noto Sans (bundled) as the UI font; system fonts stay the
-            // fallback for scripts it doesn't cover.
+            // Cascadia Mono (bundled) as the UI font, Noto Sans for "sans"
+            // themes; system fonts stay the fallback for other scripts.
             theme::install_fonts(&cc.egui_ctx);
             Ok(Box::new(app::RustCordApp::new(cc, env_token, demo)))
         }),
