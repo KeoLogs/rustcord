@@ -1530,6 +1530,8 @@ struct ThreadsState {
     dialog: Option<ThreadDialog>,
     /// Thread browser popout: (channel id, header button rect).
     browser: Option<(String, egui::Rect)>,
+    /// The popout's search box (filters loaded threads by name, locally).
+    search: String,
     /// Servers whose active-thread list answered 403/404: READY /
     /// GUILD_CREATE data only, "Not available here", never asked again.
     unavailable: HashSet<String>,
@@ -2878,6 +2880,7 @@ impl State {
                 before: None,
             }));
         }
+        ts.search.clear();
         ts.browser = Some((channel_id, anchor));
     }
 
@@ -2952,7 +2955,10 @@ impl State {
                 can_manage_threads: false,
             };
             let gid = self.selected_guild.clone().unwrap_or_default();
-            let width = 360.0;
+            let can_create = self.has_perm(&cid, perms::CREATE_PUBLIC_THREADS)
+                && self.slow_down_secs().is_none();
+            let width = (ctx.content_rect().width() - 24.0).clamp(280.0, 480.0);
+            let mut create = false;
             let area = egui::Area::new(egui::Id::unique("rc_thread_browser"))
                 .order(egui::Order::Foreground)
                 .fixed_pos(egui::pos2(
@@ -2962,36 +2968,42 @@ impl State {
                 .constrain(true)
                 .show(ctx, |ui| {
                     widgets::menu_frame(pal)
+                        .inner_margin(0)
                         .show(ui, |ui| {
                             ui.set_width(width);
-                            ui.label(
-                                RichText::new(icons::label(icons::CHATS, "Threads"))
-                                    .bold()
-                                    .color(pal.strong),
-                            );
-                            if ts.unavailable.contains(&gid) {
-                                ui.label(
-                                    RichText::new("Not available here (showing what Discord sent)")
-                                        .small()
-                                        .color(pal.muted),
-                                );
-                            }
-                            if ui
-                                .add(
-                                    pal.primary_button(&icons::label(icons::PLUS, "Create Thread")),
-                                )
-                                .clicked()
-                            {
-                                ts.dialog = Some(ThreadDialog::standalone(&cid));
-                            }
-                            ui.add_space(4.0);
-                            let more = ts.archived_more.get(&cid).copied().unwrap_or(false);
-                            threads::thread_browser(ui, &cid, &ts.store, &tctx, more)
+                            create |= threads_popup_header(ui, &mut ts.search, can_create, pal);
+                            egui::Frame::new()
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    if ts.unavailable.contains(&gid) {
+                                        widgets::menu_note(
+                                            ui,
+                                            icons::INFO,
+                                            "Not available here (showing what Discord sent)",
+                                            pal,
+                                        );
+                                    }
+                                    if threads::has_threads(&ts.store, &cid) {
+                                        let more =
+                                            ts.archived_more.get(&cid).copied().unwrap_or(false);
+                                        threads::thread_browser(
+                                            ui, &cid, &ts.store, &tctx, more, &ts.search,
+                                        )
+                                    } else {
+                                        create |= threads::empty_threads(ui, pal, can_create);
+                                        None
+                                    }
+                                })
+                                .inner
                         })
                         .inner
                 });
             if let Some(a) = area.inner {
                 action = Some(a);
+            }
+            if create {
+                ts.dialog = Some(ThreadDialog::standalone(&cid));
+                ts.browser = None;
             }
             let outside = ctx.input(|i| {
                 i.pointer.any_click()
@@ -7796,6 +7808,80 @@ pub(crate) fn paint_avatar(
 /// A top-row header drags the window, and the one in the window's top-right
 /// corner holds – □ X (`window_frame::header`); the returned rect is then
 /// the part left of the buttons.
+/// The Threads popup's header: icon, "Threads", the local search box and
+/// the Create button. Returns true when Create was clicked.
+fn threads_popup_header(
+    ui: &mut egui::Ui,
+    search: &mut String,
+    can_create: bool,
+    pal: &Palette,
+) -> bool {
+    let mut create = false;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom() - 0.5,
+        egui::Stroke::new(1.0, pal.divider),
+    );
+    let mut row = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(vec2(12.0, 0.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let ui = &mut row;
+    ui.spacing_mut().item_spacing.x = 8.0;
+    ui.label(RichText::new(icons::CHATS).size(20.0).color(pal.muted));
+    ui.label(RichText::new("Threads").bold().size(15.0).color(pal.strong));
+    // Narrow popup: the title stays, the search box shrinks first.
+    let (sep, _) = ui.allocate_exact_size(vec2(1.0, 24.0), egui::Sense::hover());
+    ui.painter().rect_filled(sep, 0, pal.divider);
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let btn = ui
+            .add_enabled(can_create, pal.primary_button("Create"))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_disabled_hover_text("You can't create threads in this channel");
+        create = btn.clicked();
+        egui::Frame::new()
+            .fill(pal.input)
+            .corner_radius(crate::theme::corner(4))
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.label(
+                        RichText::new(icons::MAGNIFYING_GLASS)
+                            .size(14.0)
+                            .color(pal.muted),
+                    );
+                    let w = (ui.available_width() - 22.0).max(40.0);
+                    ui.add(
+                        egui::TextEdit::singleline(search)
+                            .hint_text(RichText::new("Search for thread name").color(pal.muted))
+                            .frame(egui::Frame::NONE)
+                            .margin(egui::Margin::ZERO)
+                            .desired_width(w),
+                    );
+                    if !search.is_empty()
+                        && widgets::icon_button_sized(
+                            ui,
+                            icons::X,
+                            "Clear",
+                            false,
+                            true,
+                            18.0,
+                            14.0,
+                            pal,
+                        )
+                        .clicked()
+                    {
+                        search.clear();
+                    }
+                });
+            });
+    });
+    create
+}
+
 fn header_bar(ui: &mut egui::Ui, pal: &Palette) -> egui::Rect {
     let (full, _) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), egui::Sense::hover());
     let rect = crate::window_frame::header(ui, full, pal);

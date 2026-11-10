@@ -19,7 +19,7 @@ use eframe::egui::{self, Color32, RichText, Stroke, pos2, vec2};
 use serde_json::Value;
 
 use crate::forum::{ForumListing, ForumQuery, SortOrder};
-use crate::theme::{self, Palette};
+use crate::theme::{self, Bold as _, Palette};
 use crate::types::{Attachment, User};
 
 // ---------------------------------------------------------------------------
@@ -1217,55 +1217,199 @@ fn thread_tooltip(t: &Thread) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Thread browser (all threads of a text channel)
+// Threads popup (all threads of a text channel)
 // ---------------------------------------------------------------------------
 
-/// Compact list of a text channel's threads (active, then archived) with
-/// Join buttons, for a "Threads" popout. `has_more_archived`: show "Load
-/// older" (from the last archived page's `has_more`).
+/// Does a thread name match the popup's search text? Every word of `query`
+/// must appear in `name`, ignoring case. Local only: nothing is fetched.
+pub fn name_matches(name: &str, query: &str) -> bool {
+    let name = name.to_lowercase();
+    query
+        .split_whitespace()
+        .all(|w| name.contains(&w.to_lowercase()))
+}
+
+/// Does `channel_id` have any thread in the store (active or archived)?
+pub fn has_threads(store: &ThreadStore, channel_id: &str) -> bool {
+    store.children(channel_id).next().is_some()
+}
+
+/// The Threads popup's body: active, then archived threads of a text
+/// channel, filtered by `query` (see [`name_matches`]), with Join buttons.
+/// `has_more_archived`: show "Load older" (from the last archived page's
+/// `has_more`). Draw [`empty_threads`] instead when the channel has none.
 pub fn thread_browser(
     ui: &mut egui::Ui,
     channel_id: &str,
     store: &ThreadStore,
     ctx: &Ctx,
     has_more_archived: bool,
+    query: &str,
 ) -> Option<ThreadAction> {
     let pal = ctx.pal;
     let mut action = None;
-    let active = store.active_threads(channel_id);
-    let archived = store.archived_threads(channel_id);
+    let keep = |t: &&Thread| name_matches(&t.name, query);
+    let active: Vec<&Thread> = store
+        .active_threads(channel_id)
+        .into_iter()
+        .filter(keep)
+        .collect();
+    let archived: Vec<&Thread> = store
+        .archived_threads(channel_id)
+        .into_iter()
+        .filter(keep)
+        .collect();
+    let searching = !query.trim().is_empty();
+    let load_older = |ui: &mut egui::Ui, action: &mut Option<ThreadAction>, label: &str| {
+        let btn = egui::Button::new(RichText::new(label).size(13.0).color(pal.text))
+            .fill(pal.input)
+            .corner_radius(theme::corner(4));
+        if ui
+            .add(btn)
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            *action = Some(ThreadAction::LoadArchived {
+                channel_id: channel_id.to_string(),
+                before: store.oldest_archived_iso(channel_id),
+            });
+        }
+    };
     egui::ScrollArea::vertical()
         .id_salt(("thread_browser", channel_id))
-        .min_scrolled_height(320.0)
+        .auto_shrink([false, true])
         .max_height(420.0)
         .show(ui, |ui| {
+            if searching && active.is_empty() && archived.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(18.0);
+                    ui.label(
+                        RichText::new(crate::icons::MAGNIFYING_GLASS)
+                            .size(22.0)
+                            .color(pal.muted),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!("No threads match \"{}\"", query.trim()))
+                            .bold()
+                            .color(pal.strong),
+                    );
+                    ui.label(
+                        RichText::new("Only threads already loaded are searched.")
+                            .size(13.0)
+                            .color(pal.muted),
+                    );
+                    if has_more_archived {
+                        ui.add_space(8.0);
+                        load_older(ui, &mut action, "Load older threads");
+                    }
+                    ui.add_space(18.0);
+                });
+                return;
+            }
+            ui.add_space(4.0);
             ui.label(pal.section_label(&format!("Active threads — {}", active.len())));
+            ui.add_space(2.0);
             if active.is_empty() {
-                ui.label(RichText::new("No active threads.").color(pal.muted));
+                ui.label(
+                    RichText::new(if searching {
+                        "No active threads match."
+                    } else {
+                        "No active threads."
+                    })
+                    .size(13.0)
+                    .color(pal.muted),
+                );
             }
             for t in &active {
                 browser_row(ui, t, ctx, &mut action);
             }
-            ui.add_space(8.0);
-            ui.label(pal.section_label("Older threads"));
+            ui.add_space(10.0);
+            ui.label(pal.section_label(&format!("Archived threads — {}", archived.len())));
+            ui.add_space(2.0);
             for t in &archived {
                 browser_row(ui, t, ctx, &mut action);
             }
             if has_more_archived || archived.is_empty() {
+                ui.add_space(4.0);
                 let label = if archived.is_empty() {
                     "Load archived threads"
                 } else {
                     "Load older"
                 };
-                if ui.button(label).clicked() {
-                    action = Some(ThreadAction::LoadArchived {
-                        channel_id: channel_id.to_string(),
-                        before: store.oldest_archived_iso(channel_id),
-                    });
-                }
+                load_older(ui, &mut action, label);
             }
+            ui.add_space(4.0);
         });
     action
+}
+
+/// The popup's empty state: our own art (a chat-bubbles glyph on a disc
+/// with a small "+" badge), "No threads yet" and a hint. Returns true when
+/// its "Create Thread" button is clicked (`can_create`: the button shows).
+pub fn empty_threads(ui: &mut egui::Ui, pal: &Palette, can_create: bool) -> bool {
+    let mut clicked = false;
+    ui.vertical_centered(|ui| {
+        ui.add_space(20.0);
+        let (art, _) = ui.allocate_exact_size(vec2(96.0, 80.0), egui::Sense::hover());
+        let p = ui.painter();
+        let c = art.center();
+        p.circle_filled(c, 40.0, pal.hover);
+        p.text(
+            c,
+            egui::Align2::CENTER_CENTER,
+            crate::icons::CHATS,
+            crate::icons::font(48.0),
+            pal.muted,
+        );
+        // The badge: an accent disc ringed in the popup colour.
+        let badge = c + vec2(30.0, 26.0);
+        p.circle_filled(badge, 15.0, pal.menu_bg());
+        p.circle_filled(badge, 12.0, pal.accent);
+        p.text(
+            badge,
+            egui::Align2::CENTER_CENTER,
+            crate::icons::PLUS,
+            crate::icons::font(16.0),
+            Color32::WHITE,
+        );
+        ui.add_space(14.0);
+        ui.label(
+            RichText::new("No threads yet")
+                .bold()
+                .size(15.0)
+                .color(pal.strong),
+        );
+        ui.add_space(2.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Threads keep a side conversation out of the main chat.                      Start one here, or from a message's menu.",
+                )
+                .size(13.0)
+                .color(pal.muted),
+            )
+            .wrap()
+            .selectable(false),
+        );
+        if can_create {
+            ui.add_space(12.0);
+            let btn = egui::Button::new(
+                RichText::new(crate::icons::label(crate::icons::PLUS, "Create Thread"))
+                    .size(13.0)
+                    .color(Color32::WHITE),
+            )
+            .fill(pal.accent)
+            .corner_radius(theme::corner(4))
+            .min_size(vec2(120.0, 32.0));
+            clicked = ui
+                .add(btn)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked();
+        }
+        ui.add_space(20.0);
+    });
+    clicked
 }
 
 fn browser_row(ui: &mut egui::Ui, t: &Thread, ctx: &Ctx, action: &mut Option<ThreadAction>) {
@@ -1283,13 +1427,13 @@ fn browser_row(ui: &mut egui::Ui, t: &Thread, ctx: &Ctx, action: &mut Option<Thr
             join_rect,
             egui::Button::new(RichText::new("Join").color(pal.text))
                 .fill(pal.input)
-                .corner_radius(4),
+                .corner_radius(theme::corner(4)),
         )
     });
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if resp.hovered() || join.as_ref().is_some_and(egui::Response::hovered) {
-            painter.rect_filled(rect, 4, pal.hover);
+            painter.rect_filled(rect, theme::corner(4), pal.hover);
         }
         painter.text(
             egui::pos2(rect.left() + 18.0, rect.center().y),
@@ -1527,6 +1671,27 @@ mod tests {
             },
             "applied_tags": ["t1"], "flags": 2
         })
+    }
+
+    #[test]
+    fn popup_search_matches_every_word_ignoring_case() {
+        assert!(name_matches("Release Plans", ""));
+        assert!(name_matches("Release Plans", "  "));
+        assert!(name_matches("Release Plans", "plan"));
+        assert!(name_matches("Release Plans", "PLANS release"));
+        assert!(!name_matches("Release Plans", "plans theme"));
+        assert!(!name_matches("old bug hunt", "release"));
+    }
+
+    #[test]
+    fn has_threads_sees_active_and_archived() {
+        let mut store = ThreadStore::new();
+        assert!(!has_threads(&store, "c1"));
+        let mut t = Thread::from_json(&thread_json("t9", "c1"), None);
+        t.meta.archived = true;
+        store.apply(ThreadEvent::Upsert(t));
+        assert!(has_threads(&store, "c1"));
+        assert!(!has_threads(&store, "c2"));
     }
 
     /// Snowflake for a unix time (seconds).
