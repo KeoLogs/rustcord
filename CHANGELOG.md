@@ -6,6 +6,16 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## 0.4.0: Multiple accounts (PR2)
+- Tokens live in the OS credential store, not the settings file; an old
+  saved token moves there once.
+- Account switcher in the user panel: left-click switches, right-click opens
+  the account in its own window or removes it. Up to 5 saved accounts.
+- QR code login (approve on your phone).
+- Account windows use the same frame as the main window (– □ X in the
+  top-right header, drag and edge resize); their X closes only that window.
+  Each one keeps its own minimum size for its own layout.
+
 ## 0.3.1: Resize fix
 - The window can't shrink below what the layout needs (borders and labels
   included), so short windows no longer squash the chat into a strip; lists
