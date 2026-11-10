@@ -5319,7 +5319,11 @@ impl State {
         let mut emoji_btn: Option<egui::Response> = None;
         let mut toggle_spoiler = None;
         self.refresh_emoji_groups();
-        self.paste_media(ui);
+        if config.modules.paste_media {
+            self.paste_media(ui);
+        } else {
+            self.paste_v_down = false;
+        }
 
         // Autocomplete keys go first so the text box doesn't see them.
         let ac_on = config.modules.autocomplete;
@@ -6364,7 +6368,11 @@ impl State {
                 ctx,
                 *anchor,
                 config.modules.images,
-                &config.favourite_gifs,
+                // Favourite GIFs module off: no star, no Favourites tab.
+                config
+                    .modules
+                    .favourite_gifs
+                    .then_some(config.favourite_gifs.as_slice()),
                 pal,
             ) {
                 Some(GifAction::Load(query)) => {

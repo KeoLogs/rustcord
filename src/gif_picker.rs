@@ -184,10 +184,14 @@ impl GifPicker {
         ctx: &egui::Context,
         anchor: egui::Rect,
         images: bool,
-        favourites: &[Gif],
+        favourites: Option<&[Gif]>,
         pal: &Palette,
     ) -> Option<GifAction> {
         let mut action = None;
+        // Favourite GIFs module off (`None`): only the GIFs tab.
+        if favourites.is_none() {
+            self.tab = Tab::Gifs;
+        }
         if self.tab == Tab::Gifs && self.shown.is_none() && !self.loading {
             self.loading = true;
             action = Some(GifAction::Load(None));
@@ -238,32 +242,36 @@ impl GifPicker {
                         }
                     }
                     ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        for (tab, icon, label) in [
-                            (Tab::Gifs, icons::GIF, "GIFs"),
-                            (Tab::Favourites, icons::STAR, "Favourites"),
-                        ] {
-                            if tab_button(ui, icon, label, self.tab == tab, pal).clicked() {
-                                self.tab = tab;
+                    if favourites.is_some() {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            for (tab, icon, label) in [
+                                (Tab::Gifs, icons::GIF, "GIFs"),
+                                (Tab::Favourites, icons::STAR, "Favourites"),
+                            ] {
+                                if tab_button(ui, icon, label, self.tab == tab, pal).clicked() {
+                                    self.tab = tab;
+                                }
                             }
+                        });
+                        ui.add_space(6.0);
+                    }
+                    let a = match (self.tab, favourites) {
+                        (Tab::Gifs, _) | (Tab::Favourites, None) => {
+                            self.grid(ui, images, favourites, pal)
                         }
-                    });
-                    ui.add_space(6.0);
-                    let a = match self.tab {
-                        Tab::Gifs => self.grid(ui, images, favourites, pal),
-                        Tab::Favourites if favourites.is_empty() => {
+                        (Tab::Favourites, Some([])) => {
                             empty_favourites(ui, pal);
                             None
                         }
-                        Tab::Favourites => {
+                        (Tab::Favourites, Some(favourites)) => {
                             egui::ScrollArea::vertical()
                                 .auto_shrink(false)
                                 .show(ui, |ui| {
                                     gif_grid(
                                         ui,
                                         favourites,
-                                        favourites,
+                                        Some(favourites),
                                         &mut self.uris,
                                         images,
                                         pal,
@@ -294,7 +302,7 @@ impl GifPicker {
         &mut self,
         ui: &mut egui::Ui,
         images: bool,
-        favourites: &[Gif],
+        favourites: Option<&[Gif]>,
         pal: &Palette,
     ) -> Option<GifAction> {
         let mut action = None;
@@ -401,10 +409,11 @@ fn empty_favourites(ui: &mut egui::Ui, pal: &Palette) {
 
 /// Two columns of GIFs (each keeps its aspect ratio), with a star in the
 /// corner of each: shown on hover, always shown (filled) for favourites.
+/// `favourites` is `None` when the Favourite GIFs module is off (no star).
 fn gif_grid(
     ui: &mut egui::Ui,
     gifs: &[Gif],
-    favourites: &[Gif],
+    favourites: Option<&[Gif]>,
     uris: &mut HashSet<String>,
     images: bool,
     pal: &Palette,
@@ -467,9 +476,11 @@ fn gif_grid(
                     if resp.clicked() {
                         action = Some(GifAction::Pick(g.url.clone()));
                     }
-                    let fav = favourites.iter().any(|f| f.url == g.url);
-                    if (hovered || fav) && star(ui, rect, &g.url, fav, pal) {
-                        action = Some(GifAction::ToggleFavourite((*g).clone()));
+                    if let Some(favourites) = favourites {
+                        let fav = favourites.iter().any(|f| f.url == g.url);
+                        if (hovered || fav) && star(ui, rect, &g.url, fav, pal) {
+                            action = Some(GifAction::ToggleFavourite((*g).clone()));
+                        }
                     }
                 }
             });

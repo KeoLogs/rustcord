@@ -229,6 +229,12 @@ pub struct Modules {
     /// Themes imported from .rctheme files.
     #[serde(default = "on")]
     pub custom_themes: bool,
+    /// Ctrl+V of images / copied files into the upload cards.
+    #[serde(default = "on")]
+    pub paste_media: bool,
+    /// The star on GIFs and the GIF picker's Favourites tab.
+    #[serde(default = "on")]
+    pub favourite_gifs: bool,
 }
 
 impl Default for Modules {
@@ -251,6 +257,8 @@ impl Default for Modules {
             invites: true,
             layout_sharing: true,
             custom_themes: true,
+            paste_media: true,
+            favourite_gifs: true,
         }
     }
 }
@@ -429,6 +437,18 @@ pub const MODULES: &[ModuleInfo] = &[
         description: "Import and apply your own themes (Settings, Themes). Off = only the default theme, and no theme files are read.",
         get: |m| &mut m.custom_themes,
     },
+    ModuleInfo {
+        name: "Paste media",
+        category: ModuleCategory::Messaging,
+        description: "Ctrl+V in the message box adds copied images and files as uploads (never sends). Off = the clipboard is only read for text.",
+        get: |m| &mut m.paste_media,
+    },
+    ModuleInfo {
+        name: "Favourite GIFs",
+        category: ModuleCategory::Messaging,
+        description: "A star on each GIF and a Favourites tab in the GIF picker. Off = no star or tab; saved favourites are kept for later.",
+        get: |m| &mut m.favourite_gifs,
+    },
 ];
 
 #[cfg(test)]
@@ -465,6 +485,7 @@ mod tests {
         assert!(c.modules.reactions);
         assert_eq!(c.custom_theme, None);
         assert!(c.modules.custom_themes);
+        assert!(c.modules.paste_media && c.modules.favourite_gifs);
         // Favourite GIFs came later: none yet.
         assert!(c.favourite_gifs.is_empty());
     }
