@@ -811,7 +811,10 @@ fn member_row(
         ui.add_space(top.max(0.0));
         ui.horizontal(|ui| {
             let name = RichText::new(m.display_name()).size(14.5).color(name_color);
-            ui.add(egui::Label::new(name).truncate().selectable(false));
+            // The BOT tag keeps its room; the name is cut first (full
+            // name on hover).
+            let reserve = if m.user.bot { 36.0 } else { 0.0 };
+            crate::widgets::truncated_label(ui, egui::Label::new(name).selectable(false), reserve);
             if m.user.bot {
                 bot_tag(ui, pal);
             }

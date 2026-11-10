@@ -825,7 +825,11 @@ fn ready_card(ui: &mut egui::Ui, inv: &Invite, cx: &CardCtx) -> Option<InviteAct
                     .color(pal.idle),
             );
             if ui
-                .add(egui::Button::new("Open invite in browser").fill(pal.input))
+                .add(
+                    egui::Button::new("Open invite in browser")
+                        .fill(pal.input)
+                        .wrap_mode(egui::TextWrapMode::Truncate),
+                )
                 .clicked()
             {
                 action = Some(InviteAction::OpenLink(invite_url(&inv.code)));

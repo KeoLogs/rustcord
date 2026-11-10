@@ -21,7 +21,7 @@ use crate::theme::Palette;
 /// Widest an embed card gets (Discord: 516px + bar).
 pub const MAX_WIDTH: f32 = 520.0;
 /// Large image inside a card, or a bare image / GIF embed.
-pub const IMAGE_MAX: (f32, f32) = (400.0, 300.0);
+pub const IMAGE_MAX: (f32, f32) = (400.0, 350.0);
 /// Video preview (YouTube etc.).
 pub const VIDEO_MAX: (f32, f32) = (400.0, 225.0);
 /// Small thumbnail at the top right of a card.
@@ -471,7 +471,9 @@ pub fn render_embed(ui: &mut egui::Ui, embed: &Embed, ctx: &EmbedCtx) -> EmbedOu
     {
         let resp = if ctx.images() {
             let gif = embed.kind == EmbedKind::Gifv;
-            media_image(ui, embed, media, IMAGE_MAX, max_width, gif, &mut out)
+            // Same fit as attachments: min(400, column - 16), 350 high.
+            let fit = crate::widgets::media_width(max_width, IMAGE_MAX.0);
+            media_image(ui, embed, media, IMAGE_MAX, fit, gif, &mut out)
         } else {
             let link = embed.media_link(media);
             link_text(ui, RichText::new(&link), Some(&link), &mut out)
@@ -708,7 +710,7 @@ fn media_image(
 ) -> egui::Response {
     // The URL depends only on `max`, so `Embed::image_uris` can list it.
     let url = media.sized_url(max.0, max.1);
-    let fit_w = max.0.min(avail_w.max(16.0));
+    let fit_w = max.0.min(avail_w).min(ui.available_width()).max(16.0);
     let mut image = egui::Image::from_uri(url)
         .corner_radius(4)
         .sense(egui::Sense::click());

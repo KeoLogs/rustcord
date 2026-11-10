@@ -50,7 +50,7 @@ use crate::{icons, sysmsg};
 
 const TYPING_TIMEOUT: Duration = Duration::from_secs(10);
 const TYPING_RESEND: Duration = Duration::from_secs(8);
-const IMAGE_MAX: (f32, f32) = (400.0, 300.0);
+const IMAGE_MAX: (f32, f32) = (400.0, 350.0);
 /// Discord's default upload limit for accounts without Nitro.
 const UPLOAD_LIMIT: u64 = 10 * 1024 * 1024;
 /// Acks for messages arriving in the open channel are sent at most this often.
@@ -3280,7 +3280,12 @@ impl State {
             return true;
         }
         self.select_guild(guild.clone());
-        let channel = if view == "forum" { "205" } else { "201" };
+        // `welcome`: #welcome, with the embeds and the image attachment.
+        let channel = match view {
+            "forum" => "205",
+            "welcome" => "200",
+            _ => "201",
+        };
         self.select_channel(channel.into(), ctx, config);
         let screen = ctx.content_rect();
         match view {
@@ -6804,6 +6809,8 @@ fn channel_row(
         8.0
     };
     let galley = truncated(ui, &c.name, font, color, rect.right() - right_pad - x);
+    // DM rows cut with "…" show the full name / status line on hover.
+    let mut cut = dm && galley.elided;
     match row.activity.as_deref().filter(|_| dm) {
         // Name over the custom status / activity, like Discord's DM list.
         Some(act) => {
@@ -6814,6 +6821,7 @@ fn channel_row(
                 pal.muted,
                 rect.right() - right_pad - x,
             );
+            cut |= sub.elided;
             let total = galley.size().y + sub.size().y - 3.0;
             let top = rect.center().y - total / 2.0;
             let gh = galley.size().y;
@@ -6853,9 +6861,19 @@ fn channel_row(
     let resp = if show_close && ui.rect_contains_pointer(close_rect) {
         resp.on_hover_text("Close DM")
     } else {
-        match row.status.filter(|_| dm) {
-            Some(st) => resp.on_hover_text(st.label()),
-            None => resp,
+        let status = row.status.filter(|_| dm).map(|st| st.label());
+        if cut {
+            let mut tip = c.name.clone();
+            for line in [row.activity.as_deref(), status].into_iter().flatten() {
+                tip.push('\n');
+                tip.push_str(line);
+            }
+            resp.on_hover_text(tip)
+        } else {
+            match status {
+                Some(st) => resp.on_hover_text(st),
+                None => resp,
+            }
         }
     };
     (resp, close)
@@ -7609,7 +7627,20 @@ fn message_row(
                             ui.spacing_mut().item_spacing = vec2(6.0, 2.0);
                             if !rc.grouped {
                                 ui.horizontal(|ui| {
-                                    if author_name(ui, m, author, 15.0, pal) {
+                                    let time = timefmt::full(m.time);
+                                    // Keep the timestamp on the line: the
+                                    // name gives way first.
+                                    let time_w = ui
+                                        .painter()
+                                        .layout_no_wrap(
+                                            time.clone(),
+                                            egui::FontId::proportional(12.0),
+                                            pal.muted,
+                                        )
+                                        .size()
+                                        .x;
+                                    let reserve = time_w + ui.spacing().item_spacing.x + 2.0;
+                                    if author_name(ui, m, author, 15.0, reserve, pal) {
                                         action = Some(MessageAction::Profile(
                                             m.author.clone(),
                                             ui.min_rect(),
@@ -7617,10 +7648,9 @@ fn message_row(
                                     }
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(timefmt::full(m.time))
-                                                .size(12.0)
-                                                .color(pal.muted),
+                                            RichText::new(time).size(12.0).color(pal.muted),
                                         )
+                                        .truncate()
                                         .selectable(false),
                                     )
                                     .on_hover_text(timefmt::long(m.time));
@@ -7706,25 +7736,33 @@ fn message_row(
     (action, rect)
 }
 
+/// Width of Discord's BOT tag plus its gap (reserved before the name).
+const BOT_TAG_W: f32 = 36.0;
+
 /// Bold author name (role colour) and BOT tag. Returns true if clicked.
+/// The name is one line, cut with "…" (full name on hover) so that
+/// `reserve` px stay free after it for the timestamp.
 fn author_name(
     ui: &mut egui::Ui,
     m: &Message,
     author: &AuthorStyle<'_>,
     size: f32,
+    reserve: f32,
     pal: &Palette,
 ) -> bool {
     let name = RichText::new(author.name)
         .bold()
         .size(size)
         .color(author.color.unwrap_or(pal.strong));
-    let resp = ui
-        .add(
-            egui::Label::new(name)
-                .sense(egui::Sense::click())
-                .selectable(false),
-        )
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let reserve = reserve + if m.author.bot { BOT_TAG_W } else { 0.0 };
+    let resp = widgets::truncated_label(
+        ui,
+        egui::Label::new(name)
+            .sense(egui::Sense::click())
+            .selectable(false),
+        reserve,
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand);
     if m.author.bot {
         members::bot_tag(ui, pal);
     }
@@ -7762,7 +7800,10 @@ fn compact_line(
         let name_rect = ui
             .horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                if author_name(ui, m, author, 14.5, pal) {
+                // At most ~40% of the line, so the message still has room.
+                let avail = ui.available_width();
+                let reserve = avail - (avail * 0.4).max(60.0);
+                if author_name(ui, m, author, 14.5, reserve, pal) {
                     *action = Some(MessageAction::Profile(m.author.clone(), ui.min_rect()));
                 }
             })
@@ -7979,9 +8020,11 @@ fn sticker_ui(ui: &mut egui::Ui, st: &sysmsg::Sticker, config: &Config, pal: &Pa
         .filter(|_| config.modules.images)
     {
         Some(url) => {
+            // Loaded at 160 (freed by that URL); shown smaller in a narrow column.
+            let side = widgets::media_width(ui.available_width(), STICKER_SIZE);
             ui.add(
                 egui::Image::from_uri(url)
-                    .fit_to_exact_size(vec2(STICKER_SIZE, STICKER_SIZE))
+                    .fit_to_exact_size(vec2(side, side))
                     .show_loading_spinner(true),
             )
             .on_hover_text(format!("Sticker: {}", st.name));
@@ -8167,7 +8210,9 @@ fn reply_preview(
         pal,
     );
     x += 20.0;
-    let name = truncated(ui, &reply.author, theme::bold_font(13.0), pal.text, 160.0);
+    // Narrow column: the name takes at most half of what's left.
+    let name_w = 160f32.min(((rect.right() - x) * 0.5).max(20.0));
+    let name = truncated(ui, &reply.author, theme::bold_font(13.0), pal.text, name_w);
     let w = name.size().x;
     ui.painter()
         .galley(egui::pos2(x, y - name.size().y / 2.0), name, pal.text);
@@ -8553,8 +8598,11 @@ fn attachment_ui(
 ) -> Option<String> {
     let mut clicked = None;
     if a.is_image() && config.modules.images {
-        let (max_w, max_h) = IMAGE_MAX;
-        let url = a.thumbnail_url(max_w as u32, max_h as u32);
+        let (cap_w, max_h) = IMAGE_MAX;
+        // Load at the cap (one texture per image, freed by
+        // `forget_message_images`); only the shown size follows the column.
+        let url = a.thumbnail_url(cap_w as u32, max_h as u32);
+        let max_w = widgets::media_width(ui.available_width(), cap_w);
         let mut image = egui::Image::from_uri(url)
             .corner_radius(6)
             .sense(egui::Sense::click());
@@ -8571,23 +8619,29 @@ fn attachment_ui(
             clicked = Some(a.url.clone());
         }
     } else {
+        // Discord's file card is 432 wide; narrower columns shrink it and
+        // the name is cut with "…" (full name and URL on hover).
+        let card_w = widgets::media_width(ui.available_width(), 432.0);
         egui::Frame::new()
             .fill(pal.sidebar)
             .corner_radius(6)
             .inner_margin(10)
             .show(ui, |ui| {
+                ui.set_max_width(card_w - 20.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(icons::FILE_TEXT).size(30.0).color(pal.muted));
                     ui.vertical(|ui| {
-                        let link = ui
-                            .add(
-                                egui::Label::new(
-                                    RichText::new(&a.filename).color(ui.visuals().hyperlink_color),
-                                )
-                                .sense(egui::Sense::click()),
+                        let link = widgets::truncated_label(
+                            ui,
+                            egui::Label::new(
+                                RichText::new(&a.filename).color(ui.visuals().hyperlink_color),
                             )
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .on_hover_text(&a.url);
+                            .sense(egui::Sense::click())
+                            .show_tooltip_when_elided(false),
+                            0.0,
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(format!("{}\n{}", a.filename, a.url));
                         if link.clicked() {
                             clicked = Some(a.url.clone());
                         }

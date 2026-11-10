@@ -225,3 +225,39 @@ pub fn field_style<R>(ui: &mut egui::Ui, pal: &Palette, add: impl FnOnce(&mut eg
     })
     .inner
 }
+
+/// Widest a picture in the message list may be: `min(cap, avail - 16)`
+/// (doc §3.4), never below 32 so a very narrow column still shows
+/// something. Images, video previews, embeds and stickers all use it.
+pub fn media_width(avail: f32, cap: f32) -> f32 {
+    cap.min(avail - 16.0).max(32.0)
+}
+
+/// A one-line label that never wraps: it is cut off with "…" and shows the
+/// full text as a tooltip when cut. `reserve` keeps that much room on the
+/// right for whatever follows on the same line (a timestamp, a BOT tag),
+/// so the name shrinks instead of pushing those out of the pane.
+pub fn truncated_label(ui: &mut egui::Ui, label: egui::Label, reserve: f32) -> egui::Response {
+    let max = (ui.available_width() - reserve).max(16.0);
+    ui.scope(|ui| {
+        ui.set_max_width(max);
+        ui.add(label.truncate())
+    })
+    .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_width_caps_and_fits_the_column() {
+        // Wide column: the cap wins.
+        assert_eq!(media_width(900.0, 400.0), 400.0);
+        // Narrow column: 16 px less than what's left.
+        assert_eq!(media_width(250.0, 400.0), 234.0);
+        // Never collapses to nothing.
+        assert_eq!(media_width(10.0, 400.0), 32.0);
+        assert_eq!(media_width(120.0, 160.0), 104.0);
+    }
+}
