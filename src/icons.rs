@@ -78,6 +78,9 @@ pub const PAPERCLIP: &str = "\u{E39A}";
 pub const IMAGE: &str = "\u{E2CA}";
 pub const UPLOAD: &str = "\u{E4C0}";
 pub const X: &str = "\u{E4F6}";
+// Window controls (`window_frame`)
+pub const MINUS: &str = "\u{E32A}";
+pub const SQUARE: &str = "\u{E45E}";
 pub const CHECK: &str = "\u{E182}";
 pub const CHECKS: &str = "\u{E53A}";
 pub const PROHIBIT: &str = "\u{E3DE}";

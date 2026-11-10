@@ -535,6 +535,19 @@ impl SettingsPage {
                      your theme's colours.",
                     pal,
                 );
+                if crate::window_frame::SUPPORTED {
+                    ui.add_space(12.0);
+                    label(ui, pal, "WINDOW");
+                    switch_row(
+                        ui,
+                        &mut config.system_title_bar,
+                        "Use system title bar",
+                        "Show your system's title bar instead of RustCord's own minimise, \
+                         maximise and close buttons in the top-right panel. Applied when \
+                         you save.",
+                        pal,
+                    );
+                }
             }
             Section::Chat => chat(ui, config, pal),
             Section::Notifications => notifications(ui, config, pal),

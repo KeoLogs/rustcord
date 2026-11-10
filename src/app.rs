@@ -468,7 +468,32 @@ impl eframe::App for RustCordApp {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        // Own window frame (– □ X in the top-right header, edge resize)
+        // unless the user picked the system title bar.
+        crate::window_frame::begin_pass(&ctx, self.config.system_title_bar);
+        self.screen_ui(ui, frame);
+        let pal = self.active_theme.palette;
+        crate::window_frame::end_pass(&ctx, &pal);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if self.demo_shot {
+            return;
+        }
+        if !self.config.remember_login {
+            self.config.saved_token = None;
+        }
+        eframe::set_value(storage, CONFIG_KEY, &self.config);
+        eframe::set_value(storage, LAYOUT_KEY, &self.tree);
+    }
+}
+
+impl RustCordApp {
+    /// One pass of the login or main screen (`ui` wraps it with the window
+    /// frame).
+    fn screen_ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
         timefmt::set_12_hour(self.config.use_12_hour_time);
@@ -681,17 +706,6 @@ impl eframe::App for RustCordApp {
 
         state.overlays(ui, &self.config, &pal);
         apply_config_updates(&mut self.config, state);
-    }
-
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        if self.demo_shot {
-            return;
-        }
-        if !self.config.remember_login {
-            self.config.saved_token = None;
-        }
-        eframe::set_value(storage, CONFIG_KEY, &self.config);
-        eframe::set_value(storage, LAYOUT_KEY, &self.tree);
     }
 }
 
@@ -6961,16 +6975,21 @@ pub(crate) fn paint_avatar(
 /// A 48 px header strip across the top of a panel with a 1 px border and a
 /// soft shadow under it (Discord's channel-list and chat headers). Returns
 /// the header's rect.
+///
+/// A top-row header drags the window, and the one in the window's top-right
+/// corner holds – □ X (`window_frame::header`); the returned rect is then
+/// the part left of the buttons.
 fn header_bar(ui: &mut egui::Ui, pal: &Palette) -> egui::Rect {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), egui::Sense::hover());
-    let y = rect.bottom();
+    let (full, _) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), egui::Sense::hover());
+    let rect = crate::window_frame::header(ui, full, pal);
+    let y = full.bottom();
     let painter = ui.painter();
-    painter.hline(rect.x_range(), y - 0.5, egui::Stroke::new(1.0, pal.servers));
+    painter.hline(full.x_range(), y - 0.5, egui::Stroke::new(1.0, pal.servers));
     let shadow = if pal.dark { 40 } else { 14 };
     for i in 0..3 {
         let a = (shadow / (i + 1)) as u8;
         painter.hline(
-            rect.x_range(),
+            full.x_range(),
             y + 0.5 + i as f32,
             egui::Stroke::new(1.0, Color32::from_black_alpha(a)),
         );

@@ -638,11 +638,13 @@ fn header_bar<R>(
     title: &str,
     tabs: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
-    let (rect, _) =
+    let (full, _) =
         ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H), egui::Sense::hover());
+    // Top-row headers drag the window; the top-right one holds – □ X.
+    let rect = crate::window_frame::header(ui, full, pal);
     ui.painter().hline(
-        rect.x_range(),
-        rect.bottom() - 0.5,
+        full.x_range(),
+        full.bottom() - 0.5,
         egui::Stroke::new(1.0, pal.divider),
     );
     let mut child = ui.new_child(

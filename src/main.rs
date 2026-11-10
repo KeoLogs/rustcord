@@ -53,6 +53,7 @@ mod timefmt;
 mod types;
 mod unicode_symbols;
 mod widgets;
+mod window_frame;
 
 fn main() -> eframe::Result {
     // Two dependencies enable different rustls crypto backends (aws-lc-rs via
@@ -76,7 +77,11 @@ fn main() -> eframe::Result {
             .with_app_id(storage::app_id(demo))
             .with_inner_size([1200.0, 760.0])
             // Doc §3.2: drawers take over below 700 px.
-            .with_min_inner_size(responsive::WINDOW_MIN),
+            .with_min_inner_size(responsive::WINDOW_MIN)
+            // No OS title bar: – □ X live in the top-right pane's header
+            // (`window_frame`). macOS keeps its native frame; Settings →
+            // Appearance → "Use system title bar" brings it back elsewhere.
+            .with_decorations(!window_frame::SUPPORTED),
         // OpenGL renderer: noticeably less RAM than wgpu for a 2D chat UI.
         renderer: eframe::Renderer::Glow,
         // Demo screenshot runs resize the window; don't let them overwrite

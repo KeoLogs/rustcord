@@ -67,6 +67,9 @@ pub struct Config {
     /// Profile cards show people's Nitro profile themes (gradient colours)
     /// and avatar decorations.
     pub profile_themes: bool,
+    /// Use the OS title bar instead of RustCord's own – □ X in the pane
+    /// headers (`window_frame`). Ignored on macOS, which always has it.
+    pub system_title_bar: bool,
     /// Emoji picker: most recently used emoji (newest first).
     #[serde(default)]
     pub recent_emoji: crate::emoji_picker::RecentEmoji,
@@ -103,6 +106,7 @@ impl Default for Config {
             compact_member_list: false,
             bot_member_intents: false,
             profile_themes: true,
+            system_title_bar: false,
             recent_emoji: Default::default(),
             skin_tone: 0,
             favourite_gifs: Vec::new(),
