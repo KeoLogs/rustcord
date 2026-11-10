@@ -6,7 +6,7 @@
 | NotoSansSymbols-Regular.ttf | Noto Sans Symbols | SIL OFL 1.1 |
 | NotoSansSymbols2-Subset.ttf | Noto Sans Symbols 2 (subset: arrows, technical, geometric shapes, dingbats, Braille, misc symbols) | SIL OFL 1.1 |
 | NotoSansMath-Subset.ttf | Noto Sans Math (subset: math alphanumerics "fancy text", operators, letterlike, arrows) | SIL OFL 1.1 |
-| NotoSansMono-Box.ttf | Noto Sans Mono (subset: box drawing + block elements) | SIL OFL 1.1 |
+| NotoSansMono-Box.ttf | Noto Sans Mono (subset: box drawing + block elements; U+FE31, U+FE32 and U+FF5C mapped to the U+2502 glyph so Discord channel separators like "︱" render) | SIL OFL 1.1 |
 | Phosphor.ttf, Phosphor-Fill.ttf | Phosphor Icons (regular + fill) | MIT (Phosphor-LICENSE.txt) |
 
 Noto fonts © The Noto Project Authors (https://github.com/notofonts).
@@ -20,6 +20,7 @@ pyftsubset NotoSansSymbols2-Regular.ttf --layout-features='*' \
   --unicodes="U+2190-21FF,U+2300-23FF,U+2400-243F,U+25A0-27BF,U+2800-28FF,U+2B00-2BFF,U+1F000-1F0FF,U+1F780-1F7FF,U+1F800-1F8FF,U+1FB00-1FBFF,U+2010-2027,U+2030-205E" \
   --output-file=NotoSansSymbols2-Subset.ttf
 pyftsubset NotoSansMono-Regular.ttf --unicodes="U+2500-259F" --output-file=NotoSansMono-Box.ttf
+# then add cmap entries U+FE31, U+FE32, U+FF5C -> the glyph of U+2502
 ```
 
 Everything else (CJK, Arabic, Hebrew, Thai, Devanagari, Korean, Tibetan…)

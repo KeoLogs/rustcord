@@ -48,7 +48,6 @@ const CDN: &str = "https://cdn.discordapp.com";
 
 const CARD_WIDTH: f32 = 432.0;
 const CARD_ICON: f32 = 50.0;
-const RAIL_SIZE: f32 = 48.0;
 
 // ---------------------------------------------------------------------------
 // Finding invite links
@@ -970,43 +969,35 @@ fn plus_icon(p: &egui::Painter, c: egui::Pos2, r: f32, color: Color32) {
 // ---------------------------------------------------------------------------
 
 /// The "Add a Server" button at the bottom of the server rail: a green "+"
-/// that turns into a green tile on hover, like Discord. `wide`: the rail
-/// shows names (`RAIL_NAMES_WIDTH`), so draw the label too.
-pub fn rail_add_button(ui: &mut egui::Ui, pal: &Palette, wide: bool) -> egui::Response {
-    let width = ui.available_width();
-    let (row, resp) = ui.allocate_exact_size(vec2(width, RAIL_SIZE), Sense::click());
-    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+/// that turns into a green tile on hover, like Discord. In a widened rail
+/// it stretches into a pill with the label (`widgets::RailButton`).
+pub fn rail_add_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
+    let (b, resp) = crate::widgets::RailButton::allocate(ui);
     let hovered = resp.hovered();
-    let t = ui
-        .ctx()
-        .animate_bool_with_time(resp.id.with("shape"), hovered, 0.12);
-    let radius = egui::lerp(RAIL_SIZE / 2.0..=16.0, t);
-    let x = if wide {
-        row.left() + 12.0
-    } else {
-        row.center().x - RAIL_SIZE / 2.0
-    };
-    let rect = egui::Rect::from_min_size(egui::pos2(x, row.top()), vec2(RAIL_SIZE, RAIL_SIZE));
+    let ctx = ui.ctx().clone();
+    let t = ctx.animate_value_with_time(resp.id.with("shape"), hovered as u8 as f32, 0.15);
+    let radius = b.radius(t);
+    b.paint_pill(ui, radius, false, pal);
     let p = ui.painter();
     p.rect_filled(
-        rect,
+        b.icon,
         radius,
         if hovered { pal.online } else { pal.rail_icon },
     );
     plus_icon(
         p,
-        rect.center(),
-        8.0,
+        b.icon.center(),
+        8.0 * b.icon.width() / 48.0,
         if hovered { Color32::WHITE } else { pal.online },
     );
-    if wide {
-        p.text(
-            egui::pos2(rect.right() + 12.0, row.center().y),
-            egui::Align2::LEFT_CENTER,
-            "Add a Server",
-            egui::FontId::proportional(15.0),
-            if hovered { pal.unread } else { pal.muted },
-        );
+    b.paint_hover(ui, radius, t);
+    let shown = b.paint_label(
+        ui,
+        "Add a Server",
+        egui::FontId::proportional(15.0),
+        if hovered { pal.unread } else { pal.muted },
+    );
+    if shown {
         resp
     } else {
         resp.on_hover_text("Add a Server")

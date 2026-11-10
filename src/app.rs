@@ -3592,8 +3592,8 @@ impl State {
 
     /// Discord's server rail: round icons, a white pill on the left for
     /// unread / hovered / selected, Home (DMs) at the top, then servers and
-    /// folders in the user's synced order. Wider than `RAIL_NAMES_WIDTH`
-    /// (the user dragged it), it shows names too.
+    /// folders in the user's synced order. Dragged wider than the icon
+    /// column, the buttons stretch into pills and reveal the names.
     fn servers_pane(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let mut ev = RailEvents::default();
         let now = notify::now_iso();
@@ -3675,18 +3675,14 @@ impl State {
                     pal.divider,
                 );
             } else {
+                // Stretches with the buttons as the rail widens.
                 let (sep, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 2.0), egui::Sense::hover());
-                let x = if sep.width() >= RAIL_NAMES_WIDTH {
-                    sep.left() + 12.0 + 24.0
-                } else {
-                    sep.center().x
-                };
-                ui.painter().rect_filled(
-                    egui::Rect::from_center_size(egui::pos2(x, sep.center().y), vec2(32.0, 2.0)),
-                    1,
-                    pal.divider,
-                );
+                let w = sep.width();
+                let row =
+                    egui::Rect::from_center_size(sep.center(), vec2(w, widgets::rail_icon_size(w)));
+                ui.painter()
+                    .rect_filled(widgets::RailButton::new(row).divider(), 1, pal.divider);
             }
             for item in &items {
                 match item {
@@ -3747,13 +3743,13 @@ impl State {
                                 self.rail_guild(ui, g, &now, &mut ev, config, pal);
                             }
                             let w = ui.available_width();
-                            let x = if w >= RAIL_NAMES_WIDTH {
-                                ui.min_rect().left() + 12.0 + 24.0
-                            } else {
-                                ui.min_rect().center().x
-                            };
+                            let row = egui::Rect::from_min_size(
+                                egui::pos2(ui.min_rect().left(), top),
+                                vec2(w, widgets::rail_icon_size(w)),
+                            );
+                            let b = widgets::RailButton::new(row).button.expand(4.0);
                             let rect = egui::Rect::from_x_y_ranges(
-                                x - 28.0..=x + 28.0,
+                                b.x_range(),
                                 top - 4.0..=ui.cursor().top() - 4.0,
                             );
                             ui.painter().set(
@@ -3769,11 +3765,8 @@ impl State {
                 }
             }
             // --- onboarding --- Add a Server.
-            if self.invites.is_some() {
-                let wide = !strip && ui.available_width() >= RAIL_NAMES_WIDTH;
-                if cell!(ui, invites::rail_add_button(ui, pal, wide)).clicked() {
-                    ev.add_server = true;
-                }
+            if self.invites.is_some() && cell!(ui, invites::rail_add_button(ui, pal)).clicked() {
+                ev.add_server = true;
             }
         };
         if strip {
@@ -7519,16 +7512,8 @@ fn inbox_row(ui: &mut egui::Ui, item: &InboxItem, pal: &Palette) -> egui::Respon
     resp.on_hover_text("Jump to message")
 }
 
-/// The rail shows server names when dragged at least this wide.
-const RAIL_NAMES_WIDTH: f32 = 160.0;
 /// One server cell when the rail is docked as a strip (a row).
 const RAIL_STRIP_CELL: f32 = 64.0;
-
-/// Server icons are 48 px; a rail squeezed below Discord's 72 px (small
-/// window, custom layout) shrinks them instead of clipping them.
-fn rail_icon_size(width: f32) -> f32 {
-    (width - 20.0).clamp(28.0, 48.0)
-}
 
 enum RailIcon<'a> {
     Home,
@@ -7539,7 +7524,9 @@ enum RailIcon<'a> {
 /// One server in the rail: a 48 px icon that morphs from a circle into a
 /// rounded square when hovered or selected, the white pill on the left
 /// (small = unread, medium = hover, tall = selected), a red mention badge,
-/// and greyed out when muted.
+/// and greyed out when muted. Dragged wider than the icon column, the
+/// button stretches into a pill and reveals the name beside the icon
+/// (`widgets::RailButton`).
 fn rail_item(
     ui: &mut egui::Ui,
     icon: RailIcon<'_>,
@@ -7549,24 +7536,15 @@ fn rail_item(
     config: &Config,
     pal: &Palette,
 ) -> egui::Response {
-    let width = ui.available_width();
-    let wide = width >= RAIL_NAMES_WIDTH;
-    let size = rail_icon_size(width);
-    let (row, resp) = ui.allocate_exact_size(vec2(width, size), egui::Sense::click());
-    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let (b, resp) = widgets::RailButton::allocate(ui);
     let hovered = resp.hovered();
     let ctx = ui.ctx().clone();
-
-    // Circle (radius 24) → rounded square (radius 16).
-    let t = ctx.animate_bool_with_time(resp.id.with("shape"), selected || hovered, 0.12);
-    let radius = egui::lerp(size / 2.0..=size / 3.0, t);
-    let x = if wide {
-        row.left() + 12.0
-    } else {
-        row.center().x - size / 2.0
-    };
-    let rect = egui::Rect::from_min_size(egui::pos2(x, row.top()), vec2(size, size));
     let active = selected || hovered;
+    let t = ctx.animate_value_with_time(resp.id.with("shape"), active as u8 as f32, 0.15);
+    let hover_t = ctx.animate_value_with_time(resp.id.with("hover"), hovered as u8 as f32, 0.1);
+    let radius = b.radius(t);
+    let rect = b.icon;
+    b.paint_pill(ui, radius, selected, pal);
 
     match icon {
         RailIcon::Image(url) => {
@@ -7603,6 +7581,7 @@ fn rail_item(
                 .text(rect.center(), egui::Align2::CENTER_CENTER, text, font, col);
         }
     }
+    b.paint_hover(ui, radius, hover_t);
 
     // The pill sits on the panel's left edge; only its right half shows.
     let target = if selected {
@@ -7632,39 +7611,28 @@ fn rail_item(
         );
     }
 
-    if wide {
-        let color = if selected {
-            pal.strong
-        } else if badge.muted {
-            pal.muted_text()
-        } else if badge.unread || hovered {
-            pal.unread
-        } else {
-            pal.muted
-        };
-        let font = if badge.unread || selected {
-            theme::bold_font(15.0)
-        } else {
-            egui::FontId::proportional(15.0)
-        };
-        let max_w = row.right() - rect.right() - 20.0;
-        let galley = truncated(ui, name, font, color, max_w);
-        ui.painter().galley(
-            egui::pos2(rect.right() + 12.0, row.center().y - galley.size().y / 2.0),
-            galley,
-            color,
-        );
-    }
-    let _ = config;
-    let hover = if badge.muted {
-        format!("{name} (muted)")
+    let color = if selected {
+        pal.strong
+    } else if badge.muted {
+        pal.muted_text()
+    } else if badge.unread || hovered {
+        pal.unread
     } else {
-        name.to_string()
+        pal.muted
     };
-    if wide {
-        resp
+    let font = if badge.unread || selected {
+        theme::bold_font(15.0)
     } else {
-        resp.on_hover_text(hover)
+        egui::FontId::proportional(15.0)
+    };
+    let shown = b.paint_label(ui, name, font, color);
+    let _ = config;
+    if shown {
+        resp
+    } else if badge.muted {
+        resp.on_hover_text(format!("{name} (muted)"))
+    } else {
+        resp.on_hover_text(name)
     }
 }
 
@@ -7710,21 +7678,22 @@ fn folder_item(
     config: &Config,
     pal: &Palette,
 ) -> egui::Response {
-    let width = ui.available_width();
-    let wide = width >= RAIL_NAMES_WIDTH;
-    let size = rail_icon_size(width);
-    let (row, resp) = ui.allocate_exact_size(vec2(width, size), egui::Sense::click());
-    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let x = if wide {
-        row.left() + 12.0
-    } else {
-        row.center().x - size / 2.0
-    };
-    let rect = egui::Rect::from_min_size(egui::pos2(x, row.top()), vec2(size, size));
+    let (b, resp) = widgets::RailButton::allocate(ui);
+    let rect = b.icon;
+    let size = rect.width();
     let hovered = resp.hovered();
+    let ctx = ui.ctx().clone();
+    let hover_t = ctx.animate_value_with_time(resp.id.with("hover"), hovered as u8 as f32, 0.1);
+    // Folders are always the rounded square (Discord); the pill matches.
+    let radius = b.radius(1.0);
+    b.paint_pill(ui, radius, false, pal);
     let painter = ui.painter();
     if f.open {
-        painter.rect_filled(rect, 16, if hovered { pal.hover } else { pal.rail_icon });
+        painter.rect_filled(
+            rect,
+            radius,
+            if hovered { pal.hover } else { pal.rail_icon },
+        );
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -7735,7 +7704,7 @@ fn folder_item(
     } else {
         painter.rect_filled(
             rect,
-            16,
+            radius,
             f.color.gamma_multiply(if hovered { 0.5 } else { 0.35 }),
         );
         // 2×2 grid of mini icons.
@@ -7770,6 +7739,7 @@ fn folder_item(
             }
         }
     }
+    b.paint_hover(ui, radius, hover_t);
     // Pill: selected server inside a closed folder, hover, or unread.
     let target = if f.selected && !f.open {
         40.0
@@ -7780,9 +7750,7 @@ fn folder_item(
     } else {
         0.0
     };
-    let h = ui
-        .ctx()
-        .animate_value_with_time(resp.id.with("pill"), target, 0.12);
+    let h = ctx.animate_value_with_time(resp.id.with("pill"), target, 0.12);
     if h > 0.5 {
         let left = ui.clip_rect().left();
         let pill = egui::Rect::from_center_size(egui::pos2(left, rect.center().y), vec2(8.0, h));
@@ -7798,19 +7766,8 @@ fn folder_item(
             pal,
         );
     }
-    if wide {
-        let galley = truncated(
-            ui,
-            f.name,
-            egui::FontId::proportional(15.0),
-            pal.muted,
-            row.right() - rect.right() - 20.0,
-        );
-        ui.painter().galley(
-            egui::pos2(rect.right() + 12.0, row.center().y - galley.size().y / 2.0),
-            galley,
-            pal.muted,
-        );
+    let color = if hovered { pal.unread } else { pal.muted };
+    if b.paint_label(ui, f.name, egui::FontId::proportional(15.0), color) {
         resp
     } else {
         resp.on_hover_text(f.name)

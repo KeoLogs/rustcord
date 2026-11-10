@@ -246,9 +246,208 @@ pub fn truncated_label(ui: &mut egui::Ui, label: egui::Label, reserve: f32) -> e
     .inner
 }
 
+// ---------------------------------------------------------------------------
+// Server rail buttons
+// ---------------------------------------------------------------------------
+
+/// Gap between the rail's edges and its 48 px icons (Discord: 72 px rail).
+const RAIL_INSET: f32 = 12.0;
+/// How far past the icon the button stretches before its pill background is
+/// fully shown.
+const RAIL_FADE: f32 = 48.0;
+/// Width of the fade where a name is clipped at the button's right edge.
+const RAIL_LABEL_FADE: f32 = 18.0;
+
+/// Server icons are 48 px; a rail squeezed below Discord's 72 px (small
+/// window, custom layout) shrinks them instead of clipping them.
+pub fn rail_icon_size(width: f32) -> f32 {
+    (width - 20.0).clamp(28.0, 48.0)
+}
+
+/// Where one server-rail button goes. The icon never moves (12 px from the
+/// left, like the icon-only rail); as the rail is dragged wider the button
+/// stretches right from a circle into a pill that fills the rail, and the
+/// name is revealed beside the icon.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RailButton {
+    /// The whole row (allocated, clickable).
+    pub row: egui::Rect,
+    /// The icon square.
+    pub icon: egui::Rect,
+    /// The pill: from the icon's left edge to the rail's right inset. Equal
+    /// to `icon` in the icon-only rail.
+    pub button: egui::Rect,
+    /// 0 = icon only … 1 = stretched far enough to show the pill fully.
+    pub widen: f32,
+}
+
+impl RailButton {
+    pub fn new(row: egui::Rect) -> Self {
+        let size = rail_icon_size(row.width()).min(row.height());
+        let inset = ((row.width() - size) / 2.0).clamp(0.0, RAIL_INSET);
+        let icon =
+            egui::Rect::from_min_size(egui::pos2(row.left() + inset, row.top()), vec2(size, size));
+        let right = (row.right() - inset).max(icon.right());
+        let button = egui::Rect::from_x_y_ranges(icon.left()..=right, icon.y_range());
+        let widen = ((button.width() - size) / RAIL_FADE).clamp(0.0, 1.0);
+        Self {
+            row,
+            icon,
+            button,
+            widen,
+        }
+    }
+
+    /// Allocate a full-width row for one button.
+    pub fn allocate(ui: &mut egui::Ui) -> (Self, egui::Response) {
+        let width = ui.available_width();
+        let (row, resp) =
+            ui.allocate_exact_size(vec2(width, rail_icon_size(width)), egui::Sense::click());
+        (
+            Self::new(row),
+            resp.on_hover_cursor(egui::CursorIcon::PointingHand),
+        )
+    }
+
+    /// Corner radius: a circle / full pill at rest, easing to Discord's
+    /// rounded square when `active` (0..1, hovered or selected).
+    pub fn radius(&self, active: f32) -> f32 {
+        let size = self.icon.height();
+        egui::lerp(size / 2.0..=size / 3.0, active)
+    }
+
+    /// Paint the stretched pill behind the icon (nothing in the icon-only
+    /// rail). `hover` (0..1) brightens it.
+    pub fn paint_pill(&self, ui: &egui::Ui, radius: f32, selected: bool, pal: &Palette) {
+        if self.widen <= 0.0 {
+            return;
+        }
+        let fill = if selected {
+            pal.selected
+        } else {
+            pal.rail_icon.gamma_multiply(0.55)
+        };
+        ui.painter()
+            .rect_filled(self.button, radius, fill.gamma_multiply(self.widen));
+    }
+
+    /// A light wash over the whole button while hovered, so it reads as
+    /// clickable; drawn after the icon.
+    pub fn paint_hover(&self, ui: &egui::Ui, radius: f32, hover: f32) {
+        let a = (hover * 14.0).round() as u8;
+        if a > 0 {
+            ui.painter()
+                .rect_filled(self.button, radius, Color32::from_white_alpha(a));
+        }
+    }
+
+    /// Where the name goes: from 12 px after the icon to 10 px before the
+    /// pill's right end (empty in the icon-only rail).
+    fn label_span(&self) -> (f32, f32) {
+        (self.icon.right() + 12.0, self.button.right() - 10.0)
+    }
+
+    /// The name beside the icon, revealed as the rail widens: clipped at the
+    /// pill's right end with a short fade, and cut with "…" only once the
+    /// rail is at its widest. Returns true when the whole name shows.
+    pub fn paint_label(
+        &self,
+        ui: &egui::Ui,
+        text: &str,
+        font: egui::FontId,
+        color: Color32,
+    ) -> bool {
+        let (x0, x1) = self.label_span();
+        let room = x1 - x0;
+        if room <= 1.0 || text.is_empty() {
+            return text.is_empty();
+        }
+        let fully_wide = self.row.width() >= crate::responsive::RAIL_NAMES.max - 0.5;
+        let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, color);
+        if fully_wide {
+            job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+        }
+        let galley = ui.painter().layout_job(job);
+        let pos = egui::pos2(x0, self.row.center().y - galley.size().y / 2.0);
+        let clip = ui.clip_rect();
+        if galley.size().x <= room || fully_wide {
+            ui.painter().galley(pos, galley.clone(), color);
+            return !galley.elided;
+        }
+        // Clipped: solid up to the fade, then thin slices fading out. Plain
+        // opacity, so it works over any theme background or gradient.
+        let fade = RAIL_LABEL_FADE.min(room);
+        let y = self.row.y_range();
+        let solid = egui::Rect::from_x_y_ranges(x0 - 2.0..=x1 - fade, y);
+        ui.painter()
+            .with_clip_rect(solid.intersect(clip))
+            .galley(pos, galley.clone(), color);
+        const SLICES: usize = 8;
+        let step = fade / SLICES as f32;
+        for i in 0..SLICES {
+            let left = x1 - fade + step * i as f32;
+            let slice = egui::Rect::from_x_y_ranges(left..=left + step, y);
+            let alpha = 1.0 - (i as f32 + 0.5) / SLICES as f32;
+            ui.painter().with_clip_rect(slice.intersect(clip)).add(
+                egui::epaint::TextShape::new(pos, galley.clone(), color).with_opacity_factor(alpha),
+            );
+        }
+        false
+    }
+
+    /// The short divider under Home: 32 px under the icon in the icon-only
+    /// rail, stretching with the pills.
+    pub fn divider(&self) -> egui::Rect {
+        let inset = self.icon.width() / 6.0;
+        egui::Rect::from_x_y_ranges(
+            self.button.left() + inset..=self.button.right() - inset,
+            self.row.center().y - 1.0..=self.row.center().y + 1.0,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row(width: f32) -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(width, rail_icon_size(width)))
+    }
+
+    #[test]
+    fn rail_button_is_the_icon_rail_at_minimum_width() {
+        let b = RailButton::new(row(72.0));
+        assert_eq!(
+            b.icon,
+            egui::Rect::from_min_size(egui::pos2(12.0, 0.0), vec2(48.0, 48.0))
+        );
+        assert_eq!(b.button, b.icon);
+        assert_eq!(b.widen, 0.0);
+        // Divider: 32 px centred under the icon.
+        let d = b.divider();
+        assert_eq!((d.left(), d.right()), (20.0, 52.0));
+    }
+
+    #[test]
+    fn rail_button_stretches_smoothly_and_keeps_the_icon_still() {
+        let mut last = RailButton::new(row(72.0));
+        for w in (73..=220).map(|w| w as f32) {
+            let b = RailButton::new(row(w));
+            assert_eq!(b.icon, last.icon, "icon moved at {w}");
+            assert_eq!(b.button.right(), w - 12.0);
+            assert!(b.widen >= last.widen && b.widen - last.widen <= 1.0 / 40.0);
+            last = b;
+        }
+        assert_eq!(last.widen, 1.0);
+    }
+
+    #[test]
+    fn squeezed_rail_centres_a_smaller_icon() {
+        let b = RailButton::new(row(56.0));
+        assert_eq!(b.icon.width(), 36.0);
+        assert_eq!(b.icon.center().x, 28.0);
+        assert_eq!(b.button, b.icon);
+    }
 
     #[test]
     fn media_width_caps_and_fits_the_column() {

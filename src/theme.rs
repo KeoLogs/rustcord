@@ -169,6 +169,11 @@ const SYMBOL_FONTS: [(&str, &[u8]); 4] = [
 /// `icons.rs`) and the symbol fallbacks, keeping egui's fonts as fallbacks
 /// (and the system font fallback eframe adds for other scripts).
 pub fn install_fonts(ctx: &egui::Context) {
+    ctx.set_fonts(font_definitions());
+}
+
+/// The font set `install_fonts` installs.
+fn font_definitions() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let mut add = |name: &str, bytes: &'static [u8]| {
         fonts
@@ -225,7 +230,7 @@ pub fn install_fonts(ctx: &egui::Context) {
         FontFamily::Name(crate::icons::FILL.into()),
         vec!["Phosphor-Fill".into(), "NotoSans-Regular".into()],
     );
-    ctx.set_fonts(fonts);
+    fonts
 }
 
 const fn hex(rgb: u32) -> Color32 {
@@ -368,5 +373,27 @@ impl Palette {
             .extra_letter_spacing(0.3)
             .color(self.muted)
             .bold()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Separators Discord servers put between a channel's emoji and its
+    /// name ("🍕︱la-pizza-del-gatto") come from the bundled fonts, not tofu
+    /// (U+FE31, U+FE32 and U+FF5C are mapped into NotoSansMono-Box).
+    #[test]
+    fn bundled_fonts_cover_channel_separators() {
+        let mut fonts = egui::epaint::text::Fonts::new(Default::default(), font_definitions());
+        let seps = [
+            '\u{FE31}', '\u{FE32}', '\u{FF5C}', '\u{2502}', '\u{2503}', '|', '\u{00B7}',
+            '\u{2022}', '\u{2013}', '\u{2014}',
+        ];
+        for font in [egui::FontId::proportional(15.0), bold_font(15.0)] {
+            for c in seps {
+                assert!(fonts.has_glyph(&font, c), "no glyph for U+{:04X}", c as u32);
+            }
+        }
     }
 }
