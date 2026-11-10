@@ -6,6 +6,20 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## 0.5.0: Threads (PR1c)
+- A thread start is one card in the chat: the thread name, a preview of the
+  last message (or the message count) and a › to open it.
+- Threads popup (header button): search, active and archived threads, and
+  our own empty state when a channel has none.
+- An opened thread shows as a side panel next to its channel, with a button
+  to pop it out into the big panel. Under 1000 px wide it always opens big.
+- Threads you haven't joined show a join bar; joining happens only when you
+  click it.
+- Archived or locked threads show a read-only note instead of the message
+  box.
+- Threads are only created when you click Create (message menu or the
+  popup).
+
 ## 0.4.0: Multiple accounts (PR2)
 - Tokens live in the OS credential store, not the settings file; an old
   saved token moves there once.
