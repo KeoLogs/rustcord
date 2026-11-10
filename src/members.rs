@@ -489,6 +489,45 @@ impl MemberList {
         while matches!(self.rows.last(), Some(None)) {
             self.rows.pop();
         }
+        self.fix_group_counts();
+    }
+
+    /// Group headers in the ops don't always carry a count (Discord sends
+    /// `{ group: { id } }`), which showed "ONLINE — 0" above online people.
+    /// Use the update's `groups` counts, else count the loaded rows.
+    fn fix_group_counts(&mut self) {
+        let mut i = 0;
+        while i < self.rows.len() {
+            let Some(Row::Group { id, count }) = &self.rows[i] else {
+                i += 1;
+                continue;
+            };
+            let from_groups = self
+                .groups
+                .iter()
+                .find(|(g, _)| g == id)
+                .map(|(_, n)| *n)
+                .filter(|n| *n > 0);
+            let below = self.rows[i + 1..]
+                .iter()
+                .take_while(|r| !matches!(r, Some(Row::Group { .. })))
+                .count() as u32;
+            let n = from_groups.unwrap_or(if *count > 0 { *count } else { below });
+            if let Some(Row::Group { count, .. }) = &mut self.rows[i] {
+                *count = n;
+            }
+            i += 1;
+        }
+    }
+
+    /// Online and offline totals for the header pills. Uses Discord's
+    /// counts when present, else counts the (bot) list's rows.
+    pub fn online_offline(&self, presences: &Presences) -> (u32, u32) {
+        if self.member_count > 0 {
+            let online = self.online_count.min(self.member_count);
+            return (online, self.member_count - online);
+        }
+        count_online(self.rows.iter().flatten(), presences)
     }
 
     /// Rows in the whole list going by the group counts (headers included).
@@ -504,6 +543,62 @@ impl MemberList {
 
     pub fn row(&self, i: usize) -> Option<&Row> {
         self.rows.get(i).and_then(Option::as_ref)
+    }
+}
+
+/// (online, offline) among the member rows.
+pub fn count_online<'a>(rows: impl Iterator<Item = &'a Row>, presences: &Presences) -> (u32, u32) {
+    let (mut on, mut off) = (0, 0);
+    for r in rows {
+        if let Row::Member(m) = r {
+            let st = presences
+                .status(&m.user.id)
+                .or(m.presence.as_ref().map(|p| p.status))
+                .unwrap_or(Status::Offline);
+            if st == Status::Offline {
+                off += 1;
+            } else {
+                on += 1;
+            }
+        }
+    }
+    (on, off)
+}
+
+/// The member pane header: a green pill with the online count and a grey
+/// one with the offline count, from `left` along `center_y`.
+pub fn count_pills(
+    ui: &egui::Ui,
+    left: f32,
+    center_y: f32,
+    online: u32,
+    offline: u32,
+    pal: &Palette,
+) {
+    let mut x = left;
+    for (n, fill, tip, key) in [
+        (online, pal.online, format!("{online} online"), "pill_on"),
+        (
+            offline,
+            pal.offline,
+            format!("{offline} offline"),
+            "pill_off",
+        ),
+    ] {
+        let galley = ui.painter().layout_no_wrap(
+            n.to_string(),
+            crate::theme::bold_font(12.0),
+            Color32::WHITE,
+        );
+        let h = 20.0;
+        let w = (galley.size().x + 16.0).max(h + 8.0);
+        let rect = egui::Rect::from_min_size(egui::pos2(x, center_y - h / 2.0), vec2(w, h));
+        ui.painter().rect_filled(rect, h / 2.0, fill);
+        ui.painter()
+            .galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+        ui.interact(rect, ui.scope_id().with(key), egui::Sense::hover())
+            .on_hover_text(tip);
+        x = rect.right() + 6.0;
     }
 }
 
@@ -690,6 +785,10 @@ pub fn list_ui(
     let h = row_height(compact);
     let mut clicked = None;
     let mut visible = 0..0;
+    // show_rows spaces rows by row height + item_spacing.y; we draw them
+    // back to back, so without this the list ended in a blank strip.
+    let spacing = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = 0.0;
     egui::ScrollArea::vertical()
         .id_salt("member_list")
         .auto_shrink(false)
@@ -743,6 +842,7 @@ pub fn list_ui(
                 }
             }
         });
+    ui.spacing_mut().item_spacing.y = spacing;
     (clicked, visible)
 }
 
@@ -945,6 +1045,30 @@ mod tests {
         assert_eq!(ids(&list), ["-", "-", "b", "c", "g:offline"]);
         list.apply(update(json!([{ "op": "INVALIDATE", "range": [2, 99] }])));
         assert!(list.rows.is_empty());
+    }
+
+    #[test]
+    fn group_counts_without_count_field() {
+        let count = |list: &MemberList, i: usize| match list.row(i) {
+            Some(Row::Group { count, .. }) => *count,
+            _ => panic!("not a group"),
+        };
+        // No counts on the header items: the `groups` counts are used.
+        let mut list = MemberList::new("g", "everyone");
+        list.apply(update(json!([{ "op": "SYNC", "range": [0, 99], "items": [
+            { "group": { "id": "online" } }, member("a"), member("b"),
+            { "group": { "id": "offline" } }, member("c"),
+        ]}])));
+        assert_eq!((count(&list, 0), count(&list, 3)), (2, 1));
+        // No `groups` either: count the rows under each header.
+        let mut upd = update(json!([{ "op": "SYNC", "range": [0, 99], "items": [
+            { "group": { "id": "online" } }, member("a"), member("b"), member("d"),
+        ]}]));
+        upd.groups.clear();
+        let mut list = MemberList::new("g", "everyone");
+        list.apply(upd);
+        assert_eq!(count(&list, 0), 3);
+        assert_eq!(list.online_offline(&Presences::default()), (3, 2));
     }
 
     #[test]

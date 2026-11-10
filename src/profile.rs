@@ -19,6 +19,7 @@ use eframe::egui::{self, Color32, RichText, vec2};
 use serde_json::Value;
 
 use crate::config::Config;
+use crate::markdown;
 use crate::members::{self, CachedMember, Role};
 use crate::presence::Presence;
 use crate::theme::Palette;
@@ -202,11 +203,19 @@ pub struct CardData<'a> {
     pub note: Option<&'a str>,
     /// Notes and profiles need a user account.
     pub is_bot_session: bool,
+    /// Mention / channel names for the About Me markdown.
+    pub lookup: &'a dyn crate::markdown::Lookup,
+    /// Emoji as images (Emoji images module).
+    pub emoji_images: bool,
+    /// Settings: show markdown as typed.
+    pub disable_formatting: bool,
 }
 
 pub enum PopoutAction {
     Close,
     SaveNote(String),
+    /// A link in the About Me was clicked.
+    OpenLink(String),
 }
 
 /// Draw the card. Returns Close when clicked outside / Esc, or SaveNote
@@ -406,7 +415,21 @@ fn inner(
     // ---- About me
     if let Some(bio) = data.profile.map(|p| p.bio.trim()).filter(|b| !b.is_empty()) {
         heading(ui, pal, "ABOUT ME");
-        ui.add(egui::Label::new(RichText::new(bio)).wrap());
+        // Same renderer as chat, so **bold**, links and emoji show properly.
+        let blocks = if data.disable_formatting {
+            markdown::plain(bio)
+        } else {
+            markdown::parse(bio)
+        };
+        let key = format!("bio:{}", user.id);
+        let mut rctx = markdown::RenderCtx::new(pal, data.lookup, &key);
+        rctx.emoji_images = data.emoji_images;
+        rctx.bold_family = Some(crate::theme::bold_family());
+        if let Some(markdown::MarkdownAction::Link(url)) =
+            markdown::render(ui, &blocks, &rctx).action
+        {
+            *action = Some(PopoutAction::OpenLink(url));
+        }
         ui.add_space(8.0);
     } else if data.loading {
         ui.horizontal(|ui| {
@@ -504,21 +527,34 @@ fn divider(ui: &mut egui::Ui, pal: &Palette) {
         .hline(r.x_range(), r.center().y, egui::Stroke::new(1.0, pal.hover));
 }
 
-/// A role "chip": coloured dot + name.
+/// A role "chip": coloured dot + name. Sized up front and allocated in one
+/// go, so a `horizontal_wrapped` row moves it to the next line when it
+/// doesn't fit (a Frame would never wrap and pushed the card wider).
 fn role_chip(ui: &mut egui::Ui, r: &Role, pal: &Palette) {
-    egui::Frame::new()
-        .fill(pal.input)
-        .corner_radius(4)
-        .inner_margin(egui::Margin::symmetric(6, 2))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let (dot, _) = ui.allocate_exact_size(vec2(10.0, 14.0), egui::Sense::hover());
-                ui.painter()
-                    .circle_filled(dot.center(), 5.0, r.color32().unwrap_or(pal.offline));
-                ui.label(RichText::new(&r.name));
-            });
-        });
+    let pad = vec2(6.0, 2.0);
+    let dot_w = 14.0;
+    let max_text = (ui.max_rect().width() - 2.0 * pad.x - dot_w).max(20.0);
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::simple_singleline(r.name.clone(), font, pal.text);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_text);
+    let galley = ui.painter().layout_job(job);
+    let size = vec2(
+        2.0 * pad.x + dot_w + galley.size().x,
+        2.0 * pad.y + galley.size().y.max(14.0),
+    );
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
+    if galley.elided {
+        resp.on_hover_text(&r.name);
+    }
+    let p = ui.painter();
+    p.rect_filled(rect, 4, pal.input);
+    let dot = egui::pos2(rect.left() + pad.x + 5.0, rect.center().y);
+    p.circle_filled(dot, 5.0, r.color32().unwrap_or(pal.offline));
+    let text_pos = egui::pos2(
+        rect.left() + pad.x + dot_w,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    p.galley(text_pos, galley, pal.text);
 }
 
 /// Banner colour when the profile has none: Discord uses the avatar's main

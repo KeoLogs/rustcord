@@ -4502,8 +4502,22 @@ impl State {
         );
         let ui = &mut inner;
         ui.spacing_mut().item_spacing.x = 4.0;
-        // Right-hand buttons (right to left).
-        if config.modules.member_list
+        // Right-hand buttons (right to left). A 1:1 DM has no member list
+        // worth showing: the button opens the other person's profile.
+        let dm_peer = self
+            .selected_channel
+            .as_deref()
+            .and_then(|id| self.dms.channel(id))
+            .filter(|c| c.kind == CHANNEL_DM)
+            .and_then(|c| c.recipients.first().cloned());
+        if let Some(peer) = dm_peer {
+            let open = self.popout.as_ref().is_some_and(|p| p.user.id == peer.id);
+            let btn = icon_button(ui, icons::USER_CIRCLE, "View Profile", open, true, pal);
+            if btn.clicked() {
+                let ctx = ui.ctx().clone();
+                self.open_profile(peer, None, btn.rect, &ctx);
+            }
+        } else if config.modules.member_list
             && icon_button(
                 ui,
                 icons::USERS,
@@ -5884,25 +5898,38 @@ impl State {
             None => fallback.get(i).and_then(Option::as_ref),
         };
         let total = list.map_or(fallback.len(), |l| l.total_rows().min(100_000));
-        let title = match list.filter(|l| l.member_count > 0) {
-            Some(l) => format!("Members — {} · {} online", l.member_count, l.online_count),
-            None => "Members".to_string(),
+        // Header: green "online" and grey "offline" count pills (the
+        // "recently active" fallback has no meaningful counts).
+        let counts = match list {
+            Some(l) => Some(l.online_offline(&self.presences)),
+            None if self.dms.channel(&channel_id).is_some() => Some(members::count_online(
+                fallback.iter().flatten(),
+                &self.presences,
+            )),
+            None => None,
         };
-        let galley = truncated(
-            ui,
-            &title,
-            theme::bold_font(14.0),
-            pal.muted,
-            header.width() - 32.0,
-        );
-        ui.painter().galley(
-            egui::pos2(
-                header.left() + 16.0,
-                header.center().y - galley.size().y / 2.0,
-            ),
-            galley,
-            pal.muted,
-        );
+        match counts {
+            Some((on, off)) if on + off > 0 => {
+                members::count_pills(ui, header.left() + 16.0, header.center().y, on, off, pal)
+            }
+            _ => {
+                let galley = truncated(
+                    ui,
+                    "Members",
+                    theme::bold_font(14.0),
+                    pal.muted,
+                    header.width() - 32.0,
+                );
+                ui.painter().galley(
+                    egui::pos2(
+                        header.left() + 16.0,
+                        header.center().y - galley.size().y / 2.0,
+                    ),
+                    galley,
+                    pal.muted,
+                );
+            }
+        }
         let (clicked, visible) = members::list_ui(
             ui,
             members::ListView {
@@ -6824,6 +6851,15 @@ impl State {
             .and_then(|g| self.guilds.iter().find(|x| &x.id == g))
             .map_or(&[][..], |g| g.roles.as_slice());
         let profile = self.profiles.get(&uid, gid.as_deref());
+        let lookup = ChatLookup {
+            guild: gid
+                .as_ref()
+                .and_then(|g| self.guilds.iter().find(|x| &x.id == g)),
+            guilds: &self.guilds,
+            dms: &self.dms,
+            members: &self.member_cache,
+            names: &self.user_names,
+        };
         let data = profile::CardData {
             profile,
             loading: profile.is_none() && !is_bot_session && !self.profiles.is_unavailable(&uid),
@@ -6836,8 +6872,12 @@ impl State {
             roles,
             note: self.profiles.note(&uid),
             is_bot_session,
+            lookup: &lookup,
+            emoji_images: config.modules.emoji_images,
+            disable_formatting: config.disable_formatting,
         };
         match profile::popout_ui(ctx, pop, data, config, pal) {
+            Some(PopoutAction::OpenLink(url)) => self.open_link(&url, ctx, config),
             Some(PopoutAction::Close) => self.close_popout(ctx),
             Some(PopoutAction::SaveNote(note)) => {
                 // Explicit user action (Save button / Ctrl+Enter).
