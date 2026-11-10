@@ -6,6 +6,16 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## 0.6.1: Composer and user panel match the blocky look
+- The message box has no bubble any more: one flat row with a plain +,
+  the message field, and GIF and emoji icons on the right.
+- The message box and the user panel are the same compact height, so the
+  bottom row lines up. A message box saved at the old height shrinks once;
+  one you made taller keeps its size.
+- Replying works again: the "Replying to" bar (and who's typing) floats
+  above the message box instead of being cut off inside it. X or Esc
+  cancels. Same in the thread panel.
+
 ## 0.6.0: Taskbar unread badge
 - A red count over RustCord's taskbar icon: your mentions plus unread DMs,
   "9+" past nine. Muted servers and channels don't count; it is always the
