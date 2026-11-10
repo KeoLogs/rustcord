@@ -236,6 +236,83 @@ pub fn end_frame(tree: &Tree<Pane>, ctx: &egui::Context) {
     }
 }
 
+// ---- Frame drag ---------------------------------------------------------
+//
+// Themes with an `inset` draw each pane as a card with a strip of backdrop
+// (the "frame") around it. Pressing on that empty strip and dragging moves
+// the OS window, like a title bar. The card itself and every widget keep
+// their clicks: the strips are registered *before* the tiles draw, so
+// anything egui_tiles or a pane registers on top (resize handles, tab bars)
+// wins, and the strips never overlap a card. Popups, menus and drawers are
+// separate layers and also win.
+//
+// `ViewportCommand::StartDrag` is supported by winit on Windows, macOS, X11
+// and Wayland, so it isn't gated by platform.
+
+/// Memory key for the card frames drawn last frame.
+fn frame_rects_id() -> egui::Id {
+    egui::Id::unique("rustcord_frame_rects")
+}
+
+/// Remember a pane's tile rect and inset (only panes with an inset leave
+/// empty frame space). Called from `pane_ui`, so only panes on screen count.
+fn note_frame(ctx: &egui::Context, tile: egui::Rect, inset: f32) {
+    if inset <= 0.0 {
+        return;
+    }
+    ctx.data_mut(|d| {
+        d.get_temp_mut_or_default::<Vec<(egui::Rect, f32)>>(frame_rects_id())
+            .push((tile, inset))
+    });
+}
+
+/// The empty strips of a tile around its card (`tile` shrunk by `inset`).
+pub fn frame_strips(tile: egui::Rect, inset: f32) -> [egui::Rect; 4] {
+    let card = tile.shrink(inset);
+    let r = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        egui::Rect::from_min_max([x0, y0].into(), [x1, y1].into())
+    };
+    [
+        r(tile.min.x, tile.min.y, tile.max.x, card.min.y),
+        r(tile.min.x, card.max.y, tile.max.x, tile.max.y),
+        r(tile.min.x, card.min.y, card.min.x, card.max.y),
+        r(card.max.x, card.min.y, tile.max.x, card.max.y),
+    ]
+}
+
+/// Call once per frame in the tiles' `Ui`, **before** `tree.ui`: makes last
+/// frame's empty card frames drag the window (egui hit-tests against last
+/// frame's widgets anyway), then clears the list for this frame's panes.
+/// `enabled` is false while editing the layout (dragging there moves
+/// panels) or while a drawer covers the tiles.
+pub fn frame_drag(ui: &mut egui::Ui, enabled: bool) {
+    let ctx = ui.ctx().clone();
+    let frames = ctx.data_mut(|d| {
+        d.get_temp_mut_or_default::<Vec<(egui::Rect, f32)>>(frame_rects_id())
+            .split_off(0)
+    });
+    if !enabled {
+        return;
+    }
+    let base = ui.scope_id().with("frame_drag");
+    for (n, (tile, inset)) in frames.into_iter().enumerate() {
+        for (k, strip) in frame_strips(tile, inset).into_iter().enumerate() {
+            if strip.width() <= 0.0 || strip.height() <= 0.0 {
+                continue;
+            }
+            let resp = ui.interact(strip, base.with((n, k)), Sense::drag());
+            if resp.drag_started_by(egui::PointerButton::Primary) {
+                // Only when nothing floats over this spot (menus, drawers).
+                let origin = ctx.input(|i| i.pointer.press_origin());
+                let layer = origin.and_then(|p| ctx.layer_id_at(p));
+                if layer.is_none() || layer == Some(ui.layer_id()) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+            }
+        }
+    }
+}
+
 /// Everything a pane needs to draw itself, whatever hosts it.
 pub struct PaneCtx<'a> {
     pub state: &'a mut State,
@@ -307,6 +384,11 @@ pub struct LayoutBehavior<'a> {
 impl Behavior<Pane> for LayoutBehavior<'_> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, tile_id: TileId, pane: &mut Pane) -> UiResponse {
         let rect = ui.max_rect();
+        note_frame(
+            ui.ctx(),
+            rect,
+            f32::from(self.theme.style.pane(*pane).inset),
+        );
         draw_pane(
             ui,
             *pane,
@@ -686,4 +768,22 @@ fn scrim_clicked(egui_ctx: &egui::Context, id: egui::Id) -> bool {
         d.remove_temp::<bool>(id.with("scrim_clicked"))
             .unwrap_or(false)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_strips_surround_the_card_without_overlap() {
+        let tile = egui::Rect::from_min_max([0.0, 0.0].into(), [100.0, 50.0].into());
+        let card = tile.shrink(4.0);
+        let strips = frame_strips(tile, 4.0);
+        let area: f32 = strips.iter().map(|s| s.area()).sum();
+        assert!((area + card.area() - tile.area()).abs() < 0.01);
+        for s in strips {
+            assert!(tile.contains_rect(s));
+            assert!(!s.intersects(card.shrink(0.01)));
+        }
+    }
 }

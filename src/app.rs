@@ -633,6 +633,11 @@ impl eframe::App for RustCordApp {
             // Theme backdrop behind inset / glass panes and the gaps.
             self.active_theme
                 .paint_backdrop(ui.painter(), ui.max_rect());
+            // Empty frame space around inset cards drags the window.
+            let host = &behavior.state.host;
+            let drawer_open = (host.lists_in_drawer && host.left_open)
+                || (host.aside_in_drawer && host.aside_open);
+            layout::frame_drag(ui, !self.editing_layout && !drawer_open);
             self.tree.ui(&mut behavior, ui);
         });
         crate::tile_fit::restore(&mut self.tree, &folded);
