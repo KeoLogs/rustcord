@@ -52,6 +52,7 @@ pub const CHATS: &str = "\u{E17C}";
 pub const CHAT_CIRCLE: &str = "\u{E168}";
 pub const CARET_DOWN: &str = "\u{E136}";
 pub const CARET_RIGHT: &str = "\u{E13A}";
+pub const CARET_LEFT: &str = "\u{E138}";
 pub const FOLDER: &str = "\u{E24A}";
 pub const DISCORD_LOGO: &str = "\u{E61A}";
 

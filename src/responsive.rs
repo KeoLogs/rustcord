@@ -424,10 +424,51 @@ fn effective_dock(layout: &LayoutV3, rail: Slot, sidebar: Slot, aside: Slot) -> 
     .unwrap_or(UserPanelDock::Sidebar)
 }
 
+/// An opened thread's side panel next to the chat.
+pub const THREAD_PANEL: PaneSize = PaneSize::new(400.0, 320.0, 460.0);
+/// Below this window width an opened thread can't sit next to the chat
+/// (rail 72 + sidebar 200 + chat 380 + thread panel 320, plus a little
+/// room): it shows as the big panel over the window instead.
+pub const THREAD_DOCK_MIN_WIDTH: f32 = 1000.0;
+
+/// Does an opened thread fit as a side panel in a window this wide?
+/// `was_docked`: last frame's answer ([`HYSTERESIS`] keeps it from
+/// flickering while the window is dragged across the edge).
+pub fn thread_docks(window_width: f32, was_docked: bool) -> bool {
+    let edge = if was_docked {
+        THREAD_DOCK_MIN_WIDTH - HYSTERESIS
+    } else {
+        THREAD_DOCK_MIN_WIDTH + HYSTERESIS
+    };
+    window_width >= edge
+}
+
+/// The thread side panel's width: 30% of the window, within
+/// [`THREAD_PANEL`]'s min / max.
+pub fn thread_panel_width(window_width: f32) -> f32 {
+    THREAD_PANEL.clamp(window_width * 0.3)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::layout_presets::Preset;
+
+    #[test]
+    fn thread_panel_docks_only_when_it_fits() {
+        assert!(!thread_docks(900.0, false));
+        assert!(!thread_docks(1010.0, false));
+        assert!(thread_docks(1020.0, false));
+        // Hysteresis: stays docked a little below the edge.
+        assert!(thread_docks(990.0, true));
+        assert!(!thread_docks(980.0, true));
+        assert_eq!(thread_panel_width(1000.0), 320.0);
+        assert!((thread_panel_width(1400.0) - 420.0).abs() < 0.01);
+        assert_eq!(thread_panel_width(2560.0), 460.0);
+        // The chat keeps its minimum next to rail + sidebar + panel.
+        let edge = THREAD_DOCK_MIN_WIDTH - HYSTERESIS;
+        assert!(edge - thread_panel_width(edge) >= RAIL.min + SIDEBAR.min + CHAT_MIN_WIDTH);
+    }
 
     fn discord() -> LayoutV3 {
         LayoutV3::from_preset(Preset::Discord)

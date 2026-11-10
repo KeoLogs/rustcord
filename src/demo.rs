@@ -348,7 +348,6 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             { "id": "251", "type": 11, "name": "theme ideas", "parent_id": "201",
               "owner_id": ALEX, "message_count": 3, "member_count": 2,
               "last_message_id": last_id("201").to_string(),
-              "member": { "id": "251", "flags": 1 },
               "thread_metadata": { "archived": false, "auto_archive_duration": 1440 } },
             { "id": "252", "type": 11, "name": "old bug hunt", "parent_id": "201",
               "owner_id": SAM, "message_count": 12, "member_count": 4,
@@ -733,6 +732,18 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                     forum_id,
                     query,
                     page,
+                });
+            }
+            ToBackend::Threads(crate::threads::ThreadAction::JoinThread { thread_id }) => {
+                send(ToUi::ThreadJoined {
+                    thread_id,
+                    joined: true,
+                });
+            }
+            ToBackend::Threads(crate::threads::ThreadAction::LeaveThread { thread_id }) => {
+                send(ToUi::ThreadJoined {
+                    thread_id,
+                    joined: false,
                 });
             }
             ToBackend::Threads(action) => eprintln!("demo: threads {action:?}"),

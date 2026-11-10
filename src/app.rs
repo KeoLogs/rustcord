@@ -1106,6 +1106,10 @@ fn chat_screen(ui: &mut egui::Ui, state: &mut State, f: ChatFrame<'_>) {
         }
     }
     state.shortcuts(&ctx, f.config);
+    // ---- Opened thread: a side panel at the right when it fits (the tiles
+    // get the rest and the chat absorbs it); otherwise the big panel
+    // (`State::thread_modal`, in the overlays).
+    state.thread_side_panel(ui, f.config, f.theme);
     // ---- Tiles: fit the free layout to the window (pixel sizes, the
     // chat absorbs, low-priority panes fold into drawers when narrow).
     let area = ui.available_rect_before_wrap();
@@ -1427,7 +1431,9 @@ pub enum ComposerAction {
 }
 
 /// What the message box is currently doing.
+#[derive(Default)]
 enum Compose {
+    #[default]
     New,
     Reply {
         message_id: String,
@@ -1438,6 +1444,46 @@ enum Compose {
     Edit {
         message_id: String,
     },
+}
+
+/// One message box's state. The chat's lives in `State`; an opened
+/// thread keeps its own here and swaps it in while its panel draws
+/// (`State::in_thread_panel`), so one composer serves both.
+#[derive(Default)]
+struct ComposerState {
+    draft: String,
+    compose: Compose,
+    pending_files: Vec<PathBuf>,
+    pending_spoilers: HashSet<PathBuf>,
+    ac: Autocomplete,
+    focus: bool,
+    composer_id: Option<egui::Id>,
+    emoji_picker_open: bool,
+    paste_v_down: bool,
+}
+
+/// An opened thread: a side panel next to the chat, or popped out into a
+/// big panel over the window (always when the window is too narrow).
+struct ThreadPanel {
+    thread_id: String,
+    parent_id: String,
+    /// Popped out by the user.
+    popped: bool,
+    /// History asked for, not here yet.
+    asked: bool,
+    /// Join Thread clicked, waiting for Discord.
+    joining: bool,
+    composer: ComposerState,
+}
+
+/// Something clicked in an opened thread's header or Join bar.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelEvent {
+    Close,
+    PopOut,
+    Dock,
+    BackToParent,
+    Join,
 }
 
 /// Something the user clicked on a message; applied after drawing.
@@ -1540,6 +1586,10 @@ struct ThreadsState {
     asked_archived: HashSet<String>,
     /// More archived threads to load, per channel.
     archived_more: HashMap<String, bool>,
+    /// The opened thread (side panel or big panel).
+    panel: Option<ThreadPanel>,
+    /// The window is wide enough for the side panel (last frame).
+    dock_fits: bool,
 }
 
 // --- friends ---
@@ -1647,6 +1697,11 @@ pub struct State {
     pending_files: Vec<PathBuf>,
     /// Pending files to upload as spoilers (`SPOILER_` prefix).
     pending_spoilers: HashSet<PathBuf>,
+    /// Channel whose message box asked for files (file picker, pasted
+    /// image): an opened thread's box gets them, not the chat's.
+    files_target: Option<String>,
+    /// Channel whose message box opened the GIF picker.
+    gif_target: Option<String>,
     /// Ctrl+/ keyboard shortcuts dialog open.
     show_shortcuts: bool,
     /// GIF picker popup (GIF picker module) and its button's rect.
@@ -1809,6 +1864,8 @@ impl State {
             pending_spoilers: HashSet::new(),
             show_shortcuts: false,
             gif_picker: None,
+            files_target: None,
+            gif_target: None,
             demo_gifs: None,
             emoji_picker_open: false,
             demo_picker: false,
@@ -2028,7 +2085,17 @@ impl State {
                 }
                 self.scroll_to = Some((channel_id, message_id));
             }
-            ToUi::FilesPicked(paths) => self.add_files(paths),
+            ToUi::FilesPicked(paths) => {
+                // Files for an opened thread's message box go there.
+                let target = self.files_target.take();
+                let to_thread = target.is_some()
+                    && self.thread_panel().map(|p| &p.thread_id) == target.as_ref();
+                if to_thread {
+                    self.in_thread_panel(|s, _| s.add_files(paths));
+                } else {
+                    self.add_files(paths);
+                }
+            }
             ToUi::Gifs { query, results } => {
                 if let Some((p, _)) = &mut self.gif_picker {
                     p.set_results(query, results);
@@ -2433,9 +2500,17 @@ impl State {
             ToUi::ThreadJoined { thread_id, joined } => {
                 if let Some(ts) = &mut self.threads {
                     ts.store.set_joined(&thread_id, joined);
+                    if let Some(p) = &mut ts.panel
+                        && p.thread_id == thread_id
+                    {
+                        p.joining = false;
+                    }
                 }
             }
             ToUi::ThreadFailed { error } => {
+                if let Some(p) = self.threads.as_mut().and_then(|t| t.panel.as_mut()) {
+                    p.joining = false;
+                }
                 if self.slow_down_secs().is_none() {
                     self.toast = Some((error, Instant::now()));
                 }
@@ -2812,8 +2887,11 @@ impl State {
         }
     }
 
-    /// Make an opened thread selectable like a channel: a (hidden) channel
-    /// entry under its server, then select it.
+    /// Open a thread: next to its channel as a side panel (or the big
+    /// panel when the window is narrow), with its own header, messages and
+    /// message box. The thread gets a (hidden) channel entry under its
+    /// server so names, permissions and history work like a channel's.
+    /// Forum posts still open in place of the post list.
     fn open_thread(&mut self, t: Thread, ctx: &egui::Context, config: &Config) {
         let channel = crate::types::Channel::from_json(&serde_json::json!({
             "id": t.id, "name": t.name, "type": t.kind, "parent_id": t.parent_id,
@@ -2821,6 +2899,7 @@ impl State {
         }));
         let gid = t.guild_id.clone();
         let id = t.id.clone();
+        let parent = t.parent_id.clone();
         if let Some(ts) = &mut self.threads {
             ts.store.apply(threads::ThreadEvent::Upsert(t));
         }
@@ -2830,8 +2909,408 @@ impl State {
         if g.channel(&id).is_none() {
             g.upsert_channel(channel);
         }
-        self.select_guild(gid);
-        self.select_channel(id, ctx, config);
+        let side = g
+            .channel(&parent)
+            .is_some_and(|c| !c.is_forum() && !threads::is_thread_kind(c.kind));
+        if !side || self.threads.is_none() {
+            self.select_guild(gid);
+            self.select_channel(id, ctx, config);
+            return;
+        }
+        if self.selected_channel.as_deref() != Some(parent.as_str()) {
+            self.select_guild(gid);
+            self.select_channel(parent.clone(), ctx, config);
+        }
+        if self.thread_panel().is_some_and(|p| p.thread_id == id) {
+            return;
+        }
+        self.close_thread_panel(ctx);
+        self.load_channel(&id);
+        // Opening it reads it (a click), like opening a channel.
+        self.mark_channel_read(&id);
+        self.recent_channels.retain(|c| c != &id);
+        self.recent_channels.push_front(id.clone());
+        if let Some(ts) = &mut self.threads {
+            ts.panel = Some(ThreadPanel {
+                thread_id: id,
+                parent_id: parent,
+                popped: false,
+                asked: true,
+                joining: false,
+                composer: ComposerState::default(),
+            });
+        }
+    }
+
+    fn thread_panel(&self) -> Option<&ThreadPanel> {
+        self.threads.as_ref()?.panel.as_ref()
+    }
+
+    fn close_thread_panel(&mut self, ctx: &egui::Context) {
+        let Some(p) = self.threads.as_mut().and_then(|t| t.panel.take()) else {
+            return;
+        };
+        if self.gif_target.as_ref() == Some(&p.thread_id)
+            && let Some((picker, _)) = self.gif_picker.take()
+        {
+            picker.free(ctx);
+        }
+    }
+
+    /// Swap the chat's message box state with `other`.
+    fn swap_composer(&mut self, other: &mut ComposerState) {
+        use std::mem::swap;
+        swap(&mut self.draft, &mut other.draft);
+        swap(&mut self.compose, &mut other.compose);
+        swap(&mut self.pending_files, &mut other.pending_files);
+        swap(&mut self.pending_spoilers, &mut other.pending_spoilers);
+        swap(&mut self.ac, &mut other.ac);
+        swap(&mut self.focus_composer, &mut other.focus);
+        swap(&mut self.composer_id, &mut other.composer_id);
+        swap(&mut self.emoji_picker_open, &mut other.emoji_picker_open);
+        swap(&mut self.paste_v_down, &mut other.paste_v_down);
+    }
+
+    /// Run `f` as if the opened thread were the selected channel, with the
+    /// thread's message box state swapped in: the chat's own list and
+    /// composer code draw the thread. `None` when no thread is open.
+    fn in_thread_panel<R>(&mut self, f: impl FnOnce(&mut Self, &str) -> R) -> Option<R> {
+        let mut panel = self.threads.as_mut()?.panel.take()?;
+        let tid = panel.thread_id.clone();
+        let outer = self.selected_channel.replace(tid.clone());
+        self.swap_composer(&mut panel.composer);
+        let r = f(self, &tid);
+        self.swap_composer(&mut panel.composer);
+        let now = std::mem::replace(&mut self.selected_channel, outer);
+        if now.as_deref() != Some(tid.as_str()) {
+            // A link inside the thread went to another channel: go there
+            // with a fresh message box.
+            self.selected_channel = now;
+            self.compose = Compose::New;
+            self.pending_files.clear();
+        }
+        let keep = self.selected_channel.as_deref() == Some(panel.parent_id.as_str());
+        if let Some(ts) = &mut self.threads
+            && ts.panel.is_none()
+            && keep
+        {
+            ts.panel = Some(panel);
+        }
+        Some(r)
+    }
+
+    /// The opened thread's side-panel width this frame, or `None` (no
+    /// thread, popped out, or the window is too narrow: the big panel).
+    fn thread_side_width(&mut self, window_width: f32) -> Option<f32> {
+        let ts = self.threads.as_mut()?;
+        ts.dock_fits = crate::responsive::thread_docks(window_width, ts.dock_fits);
+        let p = ts.panel.as_ref()?;
+        (!p.popped && ts.dock_fits).then(|| crate::responsive::thread_panel_width(window_width))
+    }
+
+    /// The opened thread's insides: the header (back, #parent › thread,
+    /// pop out / dock, close), its messages, and at the bottom the message
+    /// box, a Join bar, or a read-only note. `popped`: in the big panel.
+    fn thread_panel_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        config: &Config,
+        pal: &Palette,
+        popped: bool,
+    ) -> Option<PanelEvent> {
+        let ts = self.threads.as_ref()?;
+        let p = ts.panel.as_ref()?;
+        let (tid, parent_id, joining, can_dock) = (
+            p.thread_id.clone(),
+            p.parent_id.clone(),
+            p.joining,
+            ts.dock_fits,
+        );
+        let thread = ts.store.get(&tid).cloned();
+        let name = thread
+            .as_ref()
+            .map(|t| t.name.clone())
+            .or_else(|| self.find_channel(&tid).map(|(_, c)| c.name.clone()))
+            .unwrap_or_default();
+        let parent_name = self
+            .find_channel(&parent_id)
+            .map(|(_, c)| c.name.clone())
+            .unwrap_or_default();
+        // History: asked once until it's here (again if it was freed).
+        let loaded = self.messages.contains_key(&tid);
+        let ask = !loaded && self.channel_error(&tid).is_none() && !p.asked;
+        if let Some(p) = self.threads.as_mut().and_then(|t| t.panel.as_mut()) {
+            p.asked = !loaded && (p.asked || ask);
+        }
+        if ask {
+            self.load_channel(&tid);
+        }
+
+        let mut event = None;
+        let header = header_bar(ui, pal);
+        let mut row = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(header.shrink2(vec2(12.0, 0.0)))
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        {
+            let ui = &mut row;
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let close_tip = if popped {
+                "Close (Esc)"
+            } else {
+                "Close thread"
+            };
+            if icon_button(ui, icons::X, close_tip, false, true, pal).clicked() {
+                event = Some(PanelEvent::Close);
+            }
+            if !popped {
+                if icon_button(ui, icons::ARROW_SQUARE_OUT, "Pop out", false, true, pal).clicked() {
+                    event = Some(PanelEvent::PopOut);
+                }
+            } else if can_dock
+                && icon_button(
+                    ui,
+                    icons::SIDEBAR,
+                    "Show next to the chat",
+                    false,
+                    true,
+                    pal,
+                )
+                .clicked()
+            {
+                event = Some(PanelEvent::Dock);
+            }
+            ui.add_space(4.0);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let back_tip = format!("Back to #{parent_name}");
+                let back = widgets::icon_button_sized(
+                    ui,
+                    icons::CARET_LEFT,
+                    &back_tip,
+                    false,
+                    true,
+                    28.0,
+                    18.0,
+                    pal,
+                );
+                let link = ui
+                    .add(
+                        egui::Label::new(
+                            RichText::new(format!("#{parent_name}"))
+                                .size(15.0)
+                                .color(pal.muted),
+                        )
+                        .sense(egui::Sense::click())
+                        .selectable(false),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(&back_tip);
+                if link.hovered() {
+                    ui.painter().hline(
+                        link.rect.x_range(),
+                        link.rect.bottom() - 1.0,
+                        egui::Stroke::new(1.0, pal.muted),
+                    );
+                }
+                if back.clicked() || link.clicked() {
+                    event = Some(PanelEvent::BackToParent);
+                }
+                ui.label(
+                    RichText::new(icons::CARET_RIGHT)
+                        .size(14.0)
+                        .color(pal.muted),
+                );
+                ui.add(
+                    egui::Label::new(RichText::new(&name).bold().size(15.0).color(pal.strong))
+                        .truncate()
+                        .selectable(false),
+                );
+            });
+        }
+
+        // Bottom: message box, Join bar or read-only note (built upwards),
+        // then the messages fill what's left above it.
+        let rest = ui.available_rect_before_wrap();
+        let mut bottom = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rest.shrink2(vec2(16.0, 0.0)))
+                .layout(egui::Layout::bottom_up(egui::Align::LEFT)),
+        );
+        let (locked, archived, joined) = thread.as_ref().map_or((false, false, true), |t| {
+            (t.meta.locked, t.meta.archived, t.joined)
+        });
+        if locked || archived {
+            bottom.add_space(16.0);
+            let note = if locked {
+                "This thread is locked. Only moderators can send messages here."
+            } else {
+                "This thread is archived, so it's read-only here."
+            };
+            thread_note_bar(&mut bottom, icons::LOCK, note, None, pal);
+            bottom.add_space(8.0);
+        } else if !joined {
+            bottom.add_space(16.0);
+            let label = if joining { "Joining…" } else { "Join Thread" };
+            let join = thread_note_bar(
+                &mut bottom,
+                icons::CHATS,
+                "You're not in this thread. Join it to send messages.",
+                Some((label, !joining && self.slow_down_secs().is_none())),
+                pal,
+            );
+            if join {
+                event = Some(PanelEvent::Join);
+            }
+            bottom.add_space(8.0);
+        } else {
+            self.in_thread_panel(|s, _| s.composer_pane(&mut bottom, config, pal));
+        }
+        let top = bottom.min_rect().top().clamp(rest.top(), rest.bottom());
+        let list_rect = egui::Rect::from_min_max(rest.min, egui::pos2(rest.right(), top));
+        let mut list = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(list_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        list.set_clip_rect(list_rect.intersect(ui.clip_rect()));
+        self.in_thread_panel(|s, tid| s.message_list(&mut list, tid.to_string(), config, pal));
+        ui.advance_cursor_after_rect(rest);
+        event
+    }
+
+    /// The thread side panel at the right of the chat screen (call before
+    /// the tiles: they get the rest of the width, the chat absorbs it).
+    fn thread_side_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        config: &Config,
+        theme: &crate::themes::ActiveTheme,
+    ) {
+        let full = ui.available_rect_before_wrap();
+        let Some(width) = self.thread_side_width(full.width()) else {
+            return;
+        };
+        let pal = theme.palette;
+        let ev = egui::Panel::right("rc_thread_panel")
+            .resizable(false)
+            .exact_size(width)
+            .show_separator_line(false)
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                let rect = ui.max_rect();
+                ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+                theme.paint_pane_background(ui.painter(), rect, Pane::Messages);
+                let content = theme.pane_content(rect, Pane::Messages);
+                let ev = ui
+                    .scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(content)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                        |ui| {
+                            ui.set_clip_rect(content.intersect(ui.clip_rect()));
+                            egui::Frame::new()
+                                .fill(theme.pane_fill(Pane::Messages))
+                                .show(ui, |ui| {
+                                    ui.set_min_size(ui.available_size());
+                                    self.thread_panel_body(ui, config, &pal, false)
+                                })
+                                .inner
+                        },
+                    )
+                    .inner;
+                if content == rect {
+                    // Unframed look: a divider between chat and thread.
+                    ui.painter().vline(
+                        rect.left(),
+                        rect.y_range(),
+                        egui::Stroke::new(1.0, pal.servers),
+                    );
+                } else {
+                    theme.paint_pane_frame(ui.painter(), rect, Pane::Messages, "Thread");
+                }
+                ev
+            })
+            .inner;
+        if let Some(ev) = ev {
+            let ctx = ui.ctx().clone();
+            self.thread_panel_event(ev, &ctx, config);
+        }
+    }
+
+    /// The popped-out thread: a big panel (about 70% of the window) over the
+    /// dimmed chat, like the Add an account dialog. Esc, a click outside
+    /// or X closes it.
+    fn thread_modal(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let show = self
+            .threads
+            .as_ref()
+            .and_then(|ts| ts.panel.as_ref().map(|p| p.popped || !ts.dock_fits))
+            .unwrap_or(false);
+        if !show {
+            return;
+        }
+        let screen = ctx.content_rect();
+        let side = |total: f32, small: f32| {
+            if total < small {
+                total - 24.0
+            } else {
+                (total * 0.7).max(small - 24.0)
+            }
+        };
+        let size = vec2(side(screen.width(), 760.0), side(screen.height(), 600.0));
+        let modal = egui::Modal::new(egui::Id::unique("rc_thread_modal"))
+            .frame(widgets::menu_frame(pal).fill(pal.chat).inner_margin(0))
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                let mut inner = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                inner.set_clip_rect(rect.intersect(ui.clip_rect()));
+                self.thread_panel_body(&mut inner, config, pal, true)
+            });
+        let mut ev = modal.inner;
+        if ev.is_none() && modal.should_close() {
+            ev = Some(PanelEvent::Close);
+        }
+        if let Some(ev) = ev {
+            self.thread_panel_event(ev, ctx, config);
+        }
+    }
+
+    fn thread_panel_event(&mut self, ev: PanelEvent, ctx: &egui::Context, config: &Config) {
+        let Some((tid, parent)) = self
+            .thread_panel()
+            .map(|p| (p.thread_id.clone(), p.parent_id.clone()))
+        else {
+            return;
+        };
+        match ev {
+            PanelEvent::Close => self.close_thread_panel(ctx),
+            PanelEvent::PopOut | PanelEvent::Dock => {
+                if let Some(p) = self.threads.as_mut().and_then(|t| t.panel.as_mut()) {
+                    p.popped = ev == PanelEvent::PopOut;
+                }
+            }
+            PanelEvent::BackToParent => {
+                self.close_thread_panel(ctx);
+                if self.selected_channel.as_deref() != Some(parent.as_str()) {
+                    self.go_to_channel(&parent, ctx, config);
+                }
+            }
+            PanelEvent::Join => {
+                // Only from the click; one request, nothing while rate limited.
+                if self.slow_down_secs().is_none() {
+                    if let Some(p) = self.threads.as_mut().and_then(|t| t.panel.as_mut()) {
+                        p.joining = true;
+                    }
+                    self.thread_action(ThreadAction::JoinThread { thread_id: tid }, ctx, config);
+                }
+            }
+        }
     }
 
     /// A click in a thread row, the thread browser, a forum or a dialog.
@@ -3822,6 +4301,15 @@ impl State {
             self.inbox.mark_channel_read(&cid);
             self.ack_pending = Some((cid, mid));
         }
+        // The opened thread is on screen too: read it the same way.
+        if self.ack_pending.is_none()
+            && window_focused(ctx)
+            && let Some(tid) = self.thread_panel().map(|p| p.thread_id.clone())
+            && let Some(mid) = self.reads.mark_read(&tid)
+        {
+            self.inbox.mark_channel_read(&tid);
+            self.ack_pending = Some((tid, mid));
+        }
         let Some((cid, mid)) = self.ack_pending.clone() else {
             return;
         };
@@ -4069,6 +4557,7 @@ impl State {
                 i.events
                     .retain(|e| !matches!(e, egui::Event::PasteImage(_)))
             });
+            self.files_target = self.selected_channel.clone();
             let _ = self.tx.send(ToBackend::SavePastedImage(img));
         }
     }
@@ -4224,6 +4713,23 @@ impl State {
         true
     }
 
+    /// Ask for a channel's history unless it's loaded. Never fetches a
+    /// channel I can't view (no VIEW_CHANNEL).
+    fn load_channel(&mut self, channel_id: &str) {
+        if self.messages.contains_key(channel_id) {
+            return;
+        }
+        if self.can_view_channel(channel_id) {
+            self.channel_errors.remove(channel_id);
+            let _ = self.tx.send(ToBackend::LoadHistory {
+                channel_id: channel_id.to_string(),
+            });
+        } else {
+            self.channel_errors
+                .insert(channel_id.to_string(), ChannelError::NoAccess);
+        }
+    }
+
     fn select_guild(&mut self, id: String) {
         if self.selected_guild.as_ref() != Some(&id) {
             self.selected_guild = Some(id);
@@ -4236,17 +4742,16 @@ impl State {
         let forum = self
             .find_channel(&channel_id)
             .is_some_and(|(_, c)| c.is_forum());
-        if !forum && !self.messages.contains_key(&channel_id) {
-            // Never fetch a channel I can't view (no VIEW_CHANNEL).
-            if self.can_view_channel(&channel_id) {
-                self.channel_errors.remove(&channel_id);
-                let _ = self.tx.send(ToBackend::LoadHistory {
-                    channel_id: channel_id.clone(),
-                });
-            } else {
-                self.channel_errors
-                    .insert(channel_id.clone(), ChannelError::NoAccess);
-            }
+        if !forum {
+            self.load_channel(&channel_id);
+        }
+        // Another channel: the opened thread closes (its own channel and
+        // the thread itself keep it).
+        if self
+            .thread_panel()
+            .is_some_and(|p| p.parent_id != channel_id && p.thread_id != channel_id)
+        {
+            self.close_thread_panel(ctx);
         }
         if self.selected_channel.as_ref() != Some(&channel_id) {
             self.compose = Compose::New;
@@ -5437,6 +5942,19 @@ impl State {
             });
             return;
         };
+        self.message_list(ui, channel_id, config, pal);
+        self.chat_toast(ui, pal);
+    }
+
+    /// A channel's (or opened thread's) messages: loading / error / empty
+    /// states, then the rows, with clicked actions applied.
+    fn message_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        channel_id: String,
+        config: &Config,
+        pal: &Palette,
+    ) {
         let Some(count) = self.messages.get(&channel_id).map(Vec::len) else {
             match self.channel_error(&channel_id) {
                 // Doc §4.1: a centred state that fills the column, never a
@@ -5773,6 +6291,67 @@ impl State {
             self.highlight = Some((id, Instant::now()));
         }
 
+        let ctx = ui.ctx().clone();
+        match action {
+            Some(MessageAction::Reply(id, author)) => {
+                self.compose = Compose::Reply {
+                    message_id: id,
+                    author,
+                    ping: config.mention_on_reply,
+                };
+                self.focus_composer = true;
+            }
+            Some(MessageAction::Edit(id, content)) => {
+                self.draft = content;
+                self.compose = Compose::Edit { message_id: id };
+                self.focus_composer = true;
+            }
+            Some(MessageAction::Delete(id)) => self.confirm_delete = Some((channel_id, id)),
+            Some(MessageAction::Copy(text)) => ctx.copy_text(text),
+            Some(MessageAction::MarkUnread(id)) => self.mark_unread(&channel_id, &id),
+            Some(MessageAction::Profile(user, rect)) => {
+                let guild = self
+                    .find_channel(&channel_id)
+                    .filter(|(g, _)| !g.is_dms())
+                    .map(|(g, _)| g.id.clone());
+                self.open_profile(user, guild, rect, &ctx);
+            }
+            Some(MessageAction::OpenLink(url)) => self.open_link(&url, &ctx, config),
+            Some(MessageAction::Mention(user_id, rect)) => {
+                let user = self.known_user(&channel_id, &user_id);
+                let guild = guild_idx.map(|i| self.guilds[i].id.clone());
+                self.open_profile(user, guild, rect, &ctx);
+            }
+            Some(MessageAction::GoToChannel(cid)) => self.go_to_channel(&cid, &ctx, config),
+            Some(MessageAction::Pin(id, pin)) => self.confirm_pin = Some((channel_id, id, pin)),
+            Some(MessageAction::SaveImage(url, filename)) => {
+                let _ = self.tx.send(ToBackend::SaveFile { url, filename });
+            }
+            Some(MessageAction::ShowBlocked(id)) => {
+                self.revealed_blocked.insert(id);
+            }
+            Some(MessageAction::JumpTo(id)) => self.jump_to(channel_id.clone(), id),
+            Some(MessageAction::Invite(a)) => self.invite_action(a, &ctx, config),
+            Some(MessageAction::CreateThread(id, content)) => {
+                if let Some(ts) = &mut self.threads {
+                    ts.dialog = Some(ThreadDialog::from_message(&channel_id, &id, &content));
+                }
+            }
+            Some(MessageAction::React(id, a)) => {
+                let now = ctx.input(|i| i.time);
+                self.react(&channel_id, &id, a, now);
+            }
+            Some(MessageAction::OpenThread(t)) if self.threads.is_some() => {
+                self.open_thread(*t, &ctx, config);
+            }
+            Some(MessageAction::OpenThread(_)) => {}
+            None => {}
+        }
+    }
+
+    /// The toast ("Saved …", rate-limit countdown) over the bottom of the
+    /// chat.
+    fn chat_toast(&mut self, ui: &mut egui::Ui, pal: &Palette) {
         // Toast ("Saved …") over the bottom of the chat.
         // While rate limited the toast counts down instead of fading.
         if let Some(secs) = self.slow_down_secs() {
@@ -5831,63 +6410,6 @@ impl State {
                 );
                 ui.ctx().request_repaint_after(Duration::from_millis(500));
             }
-        }
-
-        let ctx = ui.ctx().clone();
-        match action {
-            Some(MessageAction::Reply(id, author)) => {
-                self.compose = Compose::Reply {
-                    message_id: id,
-                    author,
-                    ping: config.mention_on_reply,
-                };
-                self.focus_composer = true;
-            }
-            Some(MessageAction::Edit(id, content)) => {
-                self.draft = content;
-                self.compose = Compose::Edit { message_id: id };
-                self.focus_composer = true;
-            }
-            Some(MessageAction::Delete(id)) => self.confirm_delete = Some((channel_id, id)),
-            Some(MessageAction::Copy(text)) => ctx.copy_text(text),
-            Some(MessageAction::MarkUnread(id)) => self.mark_unread(&channel_id, &id),
-            Some(MessageAction::Profile(user, rect)) => {
-                let guild = self
-                    .find_channel(&channel_id)
-                    .filter(|(g, _)| !g.is_dms())
-                    .map(|(g, _)| g.id.clone());
-                self.open_profile(user, guild, rect, &ctx);
-            }
-            Some(MessageAction::OpenLink(url)) => self.open_link(&url, &ctx, config),
-            Some(MessageAction::Mention(user_id, rect)) => {
-                let user = self.known_user(&channel_id, &user_id);
-                let guild = guild_idx.map(|i| self.guilds[i].id.clone());
-                self.open_profile(user, guild, rect, &ctx);
-            }
-            Some(MessageAction::GoToChannel(cid)) => self.go_to_channel(&cid, &ctx, config),
-            Some(MessageAction::Pin(id, pin)) => self.confirm_pin = Some((channel_id, id, pin)),
-            Some(MessageAction::SaveImage(url, filename)) => {
-                let _ = self.tx.send(ToBackend::SaveFile { url, filename });
-            }
-            Some(MessageAction::ShowBlocked(id)) => {
-                self.revealed_blocked.insert(id);
-            }
-            Some(MessageAction::JumpTo(id)) => self.jump_to(channel_id.clone(), id),
-            Some(MessageAction::Invite(a)) => self.invite_action(a, &ctx, config),
-            Some(MessageAction::CreateThread(id, content)) => {
-                if let Some(ts) = &mut self.threads {
-                    ts.dialog = Some(ThreadDialog::from_message(&channel_id, &id, &content));
-                }
-            }
-            Some(MessageAction::React(id, a)) => {
-                let now = ctx.input(|i| i.time);
-                self.react(&channel_id, &id, a, now);
-            }
-            Some(MessageAction::OpenThread(t)) if self.threads.is_some() => {
-                self.open_thread(*t, &ctx, config);
-            }
-            Some(MessageAction::OpenThread(_)) => {}
-            None => {}
         }
     }
 
@@ -6232,6 +6754,7 @@ impl State {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
                             if plus_button(ui, pal).clicked() {
+                                self.files_target = Some(channel_id.clone());
                                 let _ = self.tx.send(ToBackend::PickFiles);
                             }
                             ui.add_space(8.0);
@@ -6399,8 +6922,9 @@ impl State {
         if !self.pending_files.is_empty() {
             let w = box_rect.width();
             let limit = self.upload_limit();
-            egui::Area::new(egui::Id::unique("rc_upload_cards"))
-                .order(egui::Order::Middle)
+            let layer = ui.layer_id();
+            let cards = egui::Area::new(egui::Id::unique("rc_upload_cards").with(&channel_id))
+                .order(float_order(layer))
                 .pivot(egui::Align2::LEFT_BOTTOM)
                 .fixed_pos(egui::pos2(box_rect.left(), used.top() - 6.0))
                 .show(ui.ctx(), |ui| {
@@ -6444,6 +6968,7 @@ impl State {
                             });
                         });
                 });
+            float_above(ui, cards.response.layer_id);
         }
 
         if let Some(i) = remove {
@@ -6460,6 +6985,7 @@ impl State {
                 if let Some((picker, _)) = self.gif_picker.take() {
                     picker.free(ui.ctx());
                 } else {
+                    self.gif_target = Some(channel_id.clone());
                     let mut picker = GifPicker::default();
                     if let Some(tab) = self.demo_gifs.take() {
                         picker.tab = tab;
@@ -6516,10 +7042,17 @@ impl State {
 
         // Autocomplete: a clicked row, or Tab / Enter from above.
         if ac_on {
-            if self.ac.active()
-                && let Some(i) = autocomplete::popup(ui.ctx(), box_rect, &self.ac, pal)
-            {
-                accept = Some(i);
+            if self.ac.active() {
+                if let Some(i) = autocomplete::popup(ui.ctx(), box_rect, &self.ac, pal) {
+                    accept = Some(i);
+                }
+                float_above(
+                    ui,
+                    egui::LayerId::new(
+                        egui::Order::Foreground,
+                        egui::Id::unique("rc_autocomplete"),
+                    ),
+                );
             }
             if let (Some(i), Some(q)) = (accept, self.ac.query.clone())
                 && let Some(item) = self.ac.items.get(i)
@@ -7134,6 +7667,7 @@ impl State {
     /// Profile card, pins, dialogs and the "drop files here" overlay.
     fn overlays(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let ctx = ui.ctx().clone();
+        self.thread_modal(&ctx, config, pal);
         self.picker_overlays(&ctx, config, pal);
         self.popout_overlay(&ctx, config, pal);
         self.pins_overlay(&ctx, config, pal);
@@ -7219,7 +7753,8 @@ impl State {
                 }
                 Some(GifAction::Pick(url)) => {
                     // The user clicked this GIF: send its link, like Discord.
-                    if let Some(cid) = self.selected_channel.clone() {
+                    let target = self.gif_target.take();
+                    if let Some(cid) = target.or_else(|| self.selected_channel.clone()) {
                         let _ = self.tx.send(ToBackend::Send {
                             channel_id: cid,
                             content: url,
@@ -7808,6 +8343,63 @@ pub(crate) fn paint_avatar(
 /// A top-row header drags the window, and the one in the window's top-right
 /// corner holds – □ X (`window_frame::header`); the returned rect is then
 /// the part left of the buttons.
+/// Order for an area that floats over a message list or message box (hover
+/// bar, upload cards): `Middle` over the tiles, the parent's own order
+/// inside a modal (the popped-out thread), where [`float_above`] keeps it
+/// on top of that modal.
+fn float_order(parent: egui::LayerId) -> egui::Order {
+    parent.order.max(egui::Order::Middle)
+}
+
+/// Keep `layer` drawn (and clickable) right above `ui`'s layer when both
+/// share an order (areas of a popped-out thread over its modal).
+fn float_above(ui: &egui::Ui, layer: egui::LayerId) {
+    let parent = ui.layer_id();
+    if parent.order == layer.order && parent != layer && parent.order > egui::Order::Middle {
+        ui.ctx().set_sublayer(parent, layer);
+    }
+}
+
+/// A bar at the bottom of an opened thread instead of its message box: an
+/// icon, a note, and optionally a button `(label, enabled)`. Returns true
+/// when the button is clicked.
+fn thread_note_bar(
+    ui: &mut egui::Ui,
+    icon: &str,
+    note: &str,
+    button: Option<(&str, bool)>,
+    pal: &Palette,
+) -> bool {
+    let mut clicked = false;
+    egui::Frame::new()
+        .fill(pal.input)
+        .stroke(egui::Stroke::new(1.0, pal.divider))
+        .corner_radius(crate::theme::corner(8))
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                if let Some((label, enabled)) = button {
+                    clicked = ui
+                        .add_enabled(enabled, pal.primary_button(label))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked();
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.label(RichText::new(icon).size(20.0).color(pal.muted));
+                    ui.add(
+                        egui::Label::new(RichText::new(note).size(13.0).color(pal.text))
+                            .wrap()
+                            .selectable(false),
+                    );
+                });
+            });
+        });
+    clicked
+}
+
 /// The Threads popup's header: icon, "Threads", the local search box and
 /// the Create button. Returns true when Create was clicked.
 fn threads_popup_header(
@@ -9844,8 +10436,9 @@ fn hover_bar(
     if !clip.intersects(egui::Rect::from_min_size(pos, size)) {
         return;
     }
+    let layer = ui.layer_id();
     let area = egui::Area::new(bar_id)
-        .order(egui::Order::Middle)
+        .order(float_order(layer))
         .fade_in(false)
         .fixed_pos(pos)
         .constrain(false)
@@ -9910,6 +10503,7 @@ fn hover_bar(
                     });
                 });
         });
+    float_above(ui, area.response.layer_id);
     let rect = area.response.rect;
     ui.ctx()
         .memory_mut(|mem| mem.data.insert_temp(bar_id, (more_id, rect)));
