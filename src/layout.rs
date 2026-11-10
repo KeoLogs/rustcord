@@ -261,9 +261,9 @@ pub fn end_frame(tree: &Tree<Pane>, ctx: &egui::Context) {
 // `ViewportCommand::StartDrag` is supported by winit on Windows, macOS, X11
 // and Wayland, so it isn't gated by platform.
 
-/// Memory key for the card frames drawn last frame.
-fn frame_rects_id() -> egui::Id {
-    egui::Id::unique("rustcord_frame_rects")
+/// Memory key for the card frames drawn last frame (one list per window).
+fn frame_rects_id(ctx: &egui::Context) -> egui::Id {
+    egui::Id::unique("rustcord_frame_rects").with(ctx.viewport_id())
 }
 
 /// Remember a pane's tile rect and card (only panes whose card is smaller
@@ -273,8 +273,9 @@ fn note_frame(ctx: &egui::Context, tile: egui::Rect, card: egui::Rect) {
     if card == tile || !tile.contains_rect(card) {
         return;
     }
+    let id = frame_rects_id(ctx);
     ctx.data_mut(|d| {
-        d.get_temp_mut_or_default::<Vec<(egui::Rect, egui::Rect)>>(frame_rects_id())
+        d.get_temp_mut_or_default::<Vec<(egui::Rect, egui::Rect)>>(id)
             .push((tile, card))
     });
 }
@@ -305,8 +306,9 @@ pub fn frame_strips_around(tile: egui::Rect, card: egui::Rect) -> [egui::Rect; 4
 /// panels) or while a drawer covers the tiles.
 pub fn frame_drag(ui: &mut egui::Ui, enabled: bool) {
     let ctx = ui.ctx().clone();
+    let id = frame_rects_id(&ctx);
     let frames = ctx.data_mut(|d| {
-        d.get_temp_mut_or_default::<Vec<(egui::Rect, egui::Rect)>>(frame_rects_id())
+        d.get_temp_mut_or_default::<Vec<(egui::Rect, egui::Rect)>>(id)
             .split_off(0)
     });
     if !enabled {

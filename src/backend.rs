@@ -137,6 +137,9 @@ pub struct Options {
     pub identity: crate::config::ClientIdentity,
 }
 
+/// Start a backend thread for one session. `viewport` is the window that
+/// shows it (the main window, or an account window): events repaint only
+/// that window. The thread ends when the UI drops its `ToBackend` sender.
 pub fn spawn(
     raw_token: String,
     demo: bool,
@@ -144,16 +147,33 @@ pub fn spawn(
     tx: Sender<ToUi>,
     rx: UnboundedReceiver<ToBackend>,
     egui_ctx: eframe::egui::Context,
+    viewport: eframe::egui::ViewportId,
 ) {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
+        let ctx = Repaint {
+            ctx: egui_ctx,
+            viewport,
+        };
         if demo {
-            let ctx = egui_ctx.clone();
             rt.block_on(crate::demo::run(tx, rx, move || ctx.request_repaint()));
         } else {
-            rt.block_on(run(raw_token, options, tx, rx, egui_ctx));
+            rt.block_on(run(raw_token, options, tx, rx, ctx));
         }
     });
+}
+
+/// Repaints the window a session belongs to (from any thread).
+#[derive(Clone)]
+struct Repaint {
+    ctx: eframe::egui::Context,
+    viewport: eframe::egui::ViewportId,
+}
+
+impl Repaint {
+    fn request_repaint(&self) {
+        self.ctx.request_repaint_of(self.viewport);
+    }
 }
 
 async fn run(
@@ -161,7 +181,7 @@ async fn run(
     options: Options,
     tx: Sender<ToUi>,
     mut rx: UnboundedReceiver<ToBackend>,
-    egui_ctx: eframe::egui::Context,
+    egui_ctx: Repaint,
 ) {
     // "Bot xxxx" -> bot account; anything else is treated as a user token.
     let (is_bot, token) = match raw_token.strip_prefix("Bot ") {

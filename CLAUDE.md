@@ -44,6 +44,17 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   metadata (max 5), `last_account` and `per_account` (Discord-side data;
   app settings stay shared). A token is an `accounts::Token` (redacted
   Debug, no Display/Serialize): never format it into logs, toasts or errors.
+- Account switcher (`src/account_menu.rs`, user panel menu): left-click
+  switches in place (`log_out(None, false)` → `start_session`), right-click
+  "Open in new window" makes an `AccountWindow` (app.rs): a deferred
+  viewport with its own `State`, layout copy and backend thread
+  (`spawn_session`; the backend repaints only its own `ViewportId`). Both
+  windows draw through `chat_screen` + `session_logic`. The main window
+  syncs config / theme into each window every frame and takes back config
+  updates; Settings always open in the main window. Closing a window drops
+  its State, so the gateway closes with 1000. `window_ui` wraps each
+  account window in `window_frame::begin_pass` / `end_pass` like the main
+  window (frame state is per viewport), so its – □ X act on that window only.
 - `src/config.rs` is the saved `Config` incl. `Modules` (on/off optional
   features). A module that's off must do no work and load nothing. New
   optional features should be modules (add to `Modules` + `MODULES`).

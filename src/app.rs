@@ -3,8 +3,8 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText, vec2};
@@ -91,6 +91,14 @@ pub struct RustCordApp {
     vault: Vault,
     /// "Add an account" dialog (the token login), while open.
     add_account: Option<LoginForm>,
+    /// Accounts opened in their own window (right-click → "Open in new
+    /// window"), each with its own State and backend thread.
+    windows: Vec<Arc<Mutex<AccountWindow>>>,
+    /// Bumped whenever `active_theme` is replaced, so account windows
+    /// pick up the new theme.
+    theme_gen: u64,
+    /// The main window's title as last set.
+    title: String,
     /// Demo mode only (`RUSTCORD_DEMO_OPEN=view`): a view to open once the
     /// demo data is in, for screenshots.
     demo_open: Option<String>,
@@ -176,6 +184,9 @@ impl RustCordApp {
             session: None,
             vault,
             add_account: None,
+            windows: Vec::new(),
+            theme_gen: 0,
+            title: String::new(),
             demo_open: demo
                 .then(|| std::env::var("RUSTCORD_DEMO_OPEN").ok())
                 .flatten(),
@@ -229,27 +240,16 @@ impl RustCordApp {
         if let Some(identity) = data.as_ref().and_then(|d| d.client_identity) {
             self.config.client_identity = identity;
         }
-        let (ui_tx, ui_rx) = mpsc::channel();
-        let (be_tx, be_rx) = tokio::sync::mpsc::unbounded_channel();
-        let options = crate::backend::Options {
-            bot_member_intents: self.config.bot_member_intents,
-            identity: self.config.client_identity,
-        };
-        crate::backend::spawn(
-            token.expose().to_string(),
-            demo,
-            options,
-            ui_tx,
-            be_rx,
-            ctx.clone(),
-        );
-        self.session = Some(Session {
+        let (session, mut state) = spawn_session(
+            &self.config,
+            self.config.client_identity,
+            ctx,
+            egui::ViewportId::ROOT,
             token,
             demo,
             account,
-            saved: false,
-        });
-        let mut state = State::new(ui_rx, be_tx);
+        );
+        self.session = Some(session);
         // Reopen this account's last channel (and its draft) once READY.
         state.restore = data.map(|d| (d, None));
         self.screen = Screen::Main(Box::new(state));
@@ -317,7 +317,11 @@ impl RustCordApp {
     fn account_action(&mut self, ctx: &egui::Context, action: AccountAction) {
         let current = self.session.as_ref().and_then(|s| s.account.clone());
         match action {
+            // Already open in its own window: bring that window up.
+            AccountAction::Switch(id) | AccountAction::OpenWindow(id)
+                if self.focus_window(ctx, &id) => {}
             AccountAction::Switch(id) => self.switch_account(ctx, &id),
+            AccountAction::OpenWindow(id) => self.open_window(ctx, &id),
             AccountAction::Add => {
                 let mut form = LoginForm::new(true, None);
                 form.add_account = true;
@@ -328,13 +332,192 @@ impl RustCordApp {
                 self.log_out(None, true)
             }
             AccountAction::Remove(id) => {
+                self.close_window(&id);
                 let name = account_name(&self.config, &id);
                 match self.vault.forget(&mut self.config, &id) {
                     Ok(()) => self.toast(&format!("Removed {name}.")),
                     Err(e) => self.toast(&format!("Couldn't remove {name}: {e}")),
                 }
             }
-            AccountAction::OpenWindow(_) | AccountAction::CloseWindow => {}
+            AccountAction::CloseWindow => {}
+        }
+    }
+
+    /// Bring an account's window to the front if it has one.
+    fn focus_window(&self, ctx: &egui::Context, user_id: &str) -> bool {
+        for w in &self.windows {
+            let w = lock(w);
+            if w.user_id == user_id && w.live.is_some() {
+                ctx.send_viewport_cmd_to(w.viewport, egui::ViewportCommand::Focus);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Right-click → "Open in new window": a second window with its own
+    /// State, backend thread and gateway. Both windows stay live.
+    fn open_window(&mut self, ctx: &egui::Context, user_id: &str) {
+        if self.session.as_ref().and_then(|s| s.account.as_deref()) == Some(user_id) {
+            return;
+        }
+        let token = match self.vault.token(user_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                self.toast("That account's saved login is gone. Add it again with its token.");
+                return;
+            }
+            Err(e) => {
+                self.toast(&format!("Couldn't read the saved login: {e}"));
+                return;
+            }
+        };
+        let viewport = egui::ViewportId::from_hash_of(("rustcord_account", user_id));
+        let data = self.config.per_account.get(user_id).cloned();
+        let identity = data
+            .as_ref()
+            .and_then(|d| d.client_identity)
+            .unwrap_or(self.config.client_identity);
+        let (session, mut state) = spawn_session(
+            &self.config,
+            identity,
+            ctx,
+            viewport,
+            token,
+            false,
+            Some(user_id.to_string()),
+        );
+        state.in_window = true;
+        state.restore = data.map(|d| (d, None));
+        state.toast = Some((RAM_NOTE.into(), Instant::now()));
+        let window = AccountWindow {
+            viewport,
+            user_id: user_id.to_string(),
+            title: window_title(&account_name(&self.config, user_id)),
+            live: Some(WindowLive {
+                session,
+                state: Box::new(state),
+                tree: self.tree.clone(),
+                ram: RamSampler::default(),
+            }),
+            config: self.config.clone(),
+            theme: self.active_theme.clone(),
+            theme_gen: self.theme_gen,
+            updates: Vec::new(),
+            stash: None,
+            fatal: None,
+            open_settings: false,
+        };
+        self.windows.push(Arc::new(Mutex::new(window)));
+    }
+
+    /// Close an account's window (it disconnects with close code 1000).
+    fn close_window(&mut self, user_id: &str) {
+        for w in &self.windows {
+            let mut w = lock(w);
+            if w.user_id == user_id {
+                w.close();
+            }
+        }
+    }
+
+    /// Each main-window frame: take what account windows sent back (config
+    /// changes, per-account data, a dead login), hand them the current
+    /// config and theme, and keep their viewports alive.
+    fn sync_windows(&mut self, ctx: &egui::Context) {
+        let mut open_settings = false;
+        let mut notes = Vec::new();
+        for w in &self.windows {
+            let mut guard = lock(w);
+            let w = &mut *guard;
+            for u in w.updates.drain(..) {
+                apply_update(&mut self.config, u);
+            }
+            if let Some(d) = w.stash.take()
+                && self.config.accounts.iter().any(|a| a.user_id == w.user_id)
+            {
+                let e = self
+                    .config
+                    .per_account
+                    .entry(w.user_id.clone())
+                    .or_default();
+                e.last_channel = d.last_channel;
+                e.drafts = d.drafts;
+            }
+            if let Some(reason) = w.fatal.take() {
+                // The saved login no longer works: remove only that account.
+                let name = account_name(&self.config, &w.user_id);
+                let _ = self.vault.forget(&mut self.config, &w.user_id);
+                notes.push(format!("{name} was signed out: {reason}"));
+            }
+            open_settings |= std::mem::take(&mut w.open_settings);
+            let Some(live) = &mut w.live else {
+                continue;
+            };
+            // READY: refresh the saved name / avatar (not the start-up
+            // account, which stays the main window's).
+            let last = self.config.last_account.clone();
+            save_account(
+                &self.vault,
+                &mut self.config,
+                &mut live.session,
+                &mut live.state,
+            );
+            self.config.last_account = last;
+            if let Some(me) = &live.state.me {
+                w.title = window_title(&me.name);
+            }
+            if w.config != self.config {
+                w.config = self.config.clone();
+            }
+            if w.theme_gen != self.theme_gen {
+                w.theme = self.active_theme.clone();
+                w.theme_gen = self.theme_gen;
+            }
+        }
+        self.windows.retain(|w| lock(w).live.is_some());
+        for note in notes {
+            self.toast(&note);
+        }
+        if open_settings && let Screen::Main(state) = &mut self.screen {
+            state.open_settings = true;
+        }
+        // Deferred viewports: registered every main frame, drawn on their
+        // own repaints. Never hold a window's lock while registering (an
+        // embedded viewport runs its callback right away).
+        let shown: Vec<_> = self
+            .windows
+            .iter()
+            .map(|w| {
+                let g = lock(w);
+                let builder = egui::ViewportBuilder::default()
+                    .with_title(g.title.clone())
+                    .with_inner_size([1100.0, 720.0])
+                    .with_min_inner_size(crate::responsive::WINDOW_MIN)
+                    // Same frame as the main window (`window_frame`).
+                    .with_decorations(!crate::window_frame::custom_frame(
+                        self.config.system_title_bar,
+                    ));
+                (g.viewport, builder, Arc::clone(w))
+            })
+            .collect();
+        for (id, builder, w) in shown {
+            ctx.show_viewport_deferred(id, builder, move |ui, _class| window_ui(&w, ui));
+        }
+    }
+
+    /// The main window's title shows the account.
+    fn update_title(&mut self, ctx: &egui::Context) {
+        let title = match &self.screen {
+            Screen::Main(state) => state
+                .me
+                .as_ref()
+                .map_or_else(|| "RustCord".to_string(), |me| window_title(&me.name)),
+            Screen::Login(_) => "RustCord".to_string(),
+        };
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
         }
     }
 
@@ -506,8 +689,10 @@ impl RustCordApp {
             if let (Some(e), Screen::Main(state)) = (error, &mut self.screen) {
                 state.toast = Some((format!("Theme not loaded: {e}"), Instant::now()));
             }
-            // Dropping the old theme frees its background texture.
+            // Dropping the old theme frees its background texture (once
+            // account windows have their copy replaced too).
             self.active_theme = active;
+            self.theme_gen += 1;
             self.theme_key = Some(key);
             self.applied = None;
         }
@@ -522,24 +707,28 @@ impl RustCordApp {
     /// Thin bar across the top, only while editing the layout or while not
     /// connected (like Discord's "Connecting…" notice; the Status bar module
     /// shows the connection state instead).
-    fn top_bar(&mut self, ui: &mut egui::Ui, pal: &Palette, status: &str, connected: bool) {
-        let notice = !connected && !self.config.modules.status_bar;
-        if !self.editing_layout && !notice {
+    fn top_bar(
+        ui: &mut egui::Ui,
+        pal: &Palette,
+        status: &str,
+        connected: bool,
+        config: &Config,
+        editing: &mut bool,
+        tree: &mut egui_tiles::Tree<Pane>,
+    ) {
+        let notice = !connected && !config.modules.status_bar;
+        if !*editing && !notice {
             return;
         }
         egui::Panel::top("top_bar")
             .frame(
                 egui::Frame::new()
-                    .fill(if self.editing_layout {
-                        pal.servers
-                    } else {
-                        pal.accent
-                    })
+                    .fill(if *editing { pal.servers } else { pal.accent })
                     .inner_margin(egui::Margin::symmetric(10, 4)),
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if self.editing_layout {
+                    if *editing {
                         ui.label(
                             RichText::new(icons::label(icons::MOVE, "Editing layout"))
                                 .bold()
@@ -553,14 +742,14 @@ impl RustCordApp {
                             .color(pal.muted),
                         );
                         if ui.button(icons::label(icons::RESET, "Reset")).clicked() {
-                            self.tree = layout::default_tree();
+                            *tree = layout::default_tree();
                         }
                         if ui
                             .add(pal.primary_button(&icons::label(icons::CHECK, "Done")))
                             .clicked()
                             || ui.input(|i| i.key_pressed(egui::Key::Escape))
                         {
-                            self.editing_layout = false;
+                            *editing = false;
                         }
                     }
                     if notice {
@@ -585,18 +774,22 @@ impl RustCordApp {
 /// synced compact setting).
 fn apply_config_updates(config: &mut Config, state: &mut State) {
     for u in state.config_updates.drain(..) {
-        match u {
-            ConfigUpdate::TrustDomain(d) => {
-                if !config.trusted_domains.contains(&d) {
-                    config.trusted_domains.push(d);
-                }
+        apply_update(config, u);
+    }
+}
+
+fn apply_update(config: &mut Config, u: ConfigUpdate) {
+    match u {
+        ConfigUpdate::TrustDomain(d) => {
+            if !config.trusted_domains.contains(&d) {
+                config.trusted_domains.push(d);
             }
-            ConfigUpdate::Compact(c) => config.compact_messages = c,
-            ConfigUpdate::RecentEmoji(e) => config.recent_emoji.record(&e),
-            ConfigUpdate::SkinTone(t) => config.skin_tone = t.min(5),
-            ConfigUpdate::FavouriteGif(g) => {
-                crate::gif_picker::toggle_favourite(&mut config.favourite_gifs, &g)
-            }
+        }
+        ConfigUpdate::Compact(c) => config.compact_messages = c,
+        ConfigUpdate::RecentEmoji(e) => config.recent_emoji.record(&e),
+        ConfigUpdate::SkinTone(t) => config.skin_tone = t.min(5),
+        ConfigUpdate::FavouriteGif(g) => {
+            crate::gif_picker::toggle_favourite(&mut config.favourite_gifs, &g)
         }
     }
 }
@@ -625,62 +818,23 @@ impl eframe::App for RustCordApp {
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
-        // Module flags for the gateway task, then module state on / off.
-        crate::config::live::sync(&self.config.modules);
-        state.set_reactions_module(self.config.modules.reactions);
-        state.set_friends_module(self.config.modules.friends);
-        state.set_threads_module(self.config.modules.threads);
-        state.set_invites_module(self.config.modules.invites);
-        if !self.config.modules.search {
-            state.search = None;
-        }
-        if let Some(rs) = &mut state.reactions {
-            rs.pending
-                .prune(ctx.input(|i| i.time), reactions::PENDING_MAX_AGE);
-        }
-        state.drain_events(ctx, &self.config);
-        state.restore_view(ctx, &self.config);
+        session_logic(state, ctx, &self.config, self.settings.is_none());
         apply_config_updates(&mut self.config, state);
-        save_account(&self.vault, &mut self.config, &mut self.session, state);
+        if let Some(session) = &mut self.session {
+            save_account(&self.vault, &mut self.config, session, state);
+        }
         if let Some(path) = state.picked_theme.take() {
             // Small file copies; the picker itself ran in the backend.
             let _ = self.theme_store.import(&path);
         }
-        state.ack_open_channel(ctx, self.settings.is_none());
-        if !self.config.modules.notifications && !state.inbox.items.is_empty() {
-            // Module switched off: free the inbox.
-            state.inbox = Inbox::default();
-        }
-        if !self.config.modules.member_list {
-            // Module switched off: free the member list and presences.
-            state.free_member_list(ctx);
-        }
-
-        // Files dropped onto the window go into the upload list.
-        let dropped: Vec<PathBuf> = ctx.input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
-                .map(|f| f.path().to_path_buf())
-                .filter(|p| !p.as_os_str().is_empty())
-                .collect()
-        });
-        if !dropped.is_empty() {
-            state.add_files(dropped);
-        }
-
-        if self.config.modules.typing_indicators && state.expire_typing() {
-            // Keep ticking so "is typing…" disappears on time.
-            ctx.request_repaint_after(Duration::from_secs(1));
-        }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // Own window frame (– □ X in the top-right header, edge resize)
         // unless the user picked the system title bar.
         crate::window_frame::begin_pass(&ctx, self.config.system_title_bar);
-        self.screen_ui(ui, frame);
+        main_ui(self, ui);
         let pal = self.active_theme.palette;
         crate::window_frame::end_pass(&ctx, &pal);
     }
@@ -690,273 +844,520 @@ impl eframe::App for RustCordApp {
             return;
         }
         self.stash_account_data();
+        for w in &self.windows {
+            let mut w = lock(w);
+            let w = &mut *w;
+            if let Some(live) = &w.live
+                && self.config.accounts.iter().any(|a| a.user_id == w.user_id)
+            {
+                let e = self
+                    .config
+                    .per_account
+                    .entry(w.user_id.clone())
+                    .or_default();
+                stash_view(e, &live.state);
+            }
+        }
         eframe::set_value(storage, CONFIG_KEY, &self.config);
         eframe::set_value(storage, LAYOUT_KEY, &self.tree);
     }
 }
 
-impl RustCordApp {
-    /// One pass of the login or main screen (`ui` wraps it with the window
-    /// frame).
-    fn screen_ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        self.apply_theme(&ctx);
-        timefmt::set_12_hour(self.config.use_12_hour_time);
-        let pal = self.active_theme.palette;
+/// Per-frame work for one session (main window or an account window):
+/// module state on / off, drain backend events, acks, dropped files.
+fn session_logic(state: &mut State, ctx: &egui::Context, config: &Config, chat_visible: bool) {
+    // Module flags for the gateway task, then module state on / off.
+    crate::config::live::sync(&config.modules);
+    state.set_reactions_module(config.modules.reactions);
+    state.set_friends_module(config.modules.friends);
+    state.set_threads_module(config.modules.threads);
+    state.set_invites_module(config.modules.invites);
+    if !config.modules.search {
+        state.search = None;
+    }
+    if let Some(rs) = &mut state.reactions {
+        rs.pending
+            .prune(ctx.input(|i| i.time), reactions::PENDING_MAX_AGE);
+    }
+    state.drain_events(ctx, config);
+    state.restore_view(ctx, config);
+    state.ack_open_channel(ctx, chat_visible);
+    if !config.modules.notifications && !state.inbox.items.is_empty() {
+        // Module switched off: free the inbox.
+        state.inbox = Inbox::default();
+    }
+    if !config.modules.member_list {
+        // Module switched off: free the member list and presences.
+        state.free_member_list(ctx);
+    }
 
-        // ---- Login screen
-        if let Screen::Login(form) = &mut self.screen {
-            match form.ui(ui, &pal) {
-                Some(LoginAction::Login { token, remember }) => {
-                    self.login_with(&ctx, token, remember);
-                }
-                Some(LoginAction::Demo) => {
-                    self.start_session(&ctx, Token::new(""), true, None);
-                }
-                None => {}
+    // Files dropped onto the window go into the upload list.
+    let dropped: Vec<PathBuf> = ctx.input(|i| {
+        i.raw
+            .dropped_files
+            .iter()
+            .map(|f| f.path().to_path_buf())
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect()
+    });
+    if !dropped.is_empty() {
+        state.add_files(dropped);
+    }
+
+    if config.modules.typing_indicators && state.expire_typing() {
+        // Keep ticking so "is typing…" disappears on time.
+        ctx.request_repaint_after(Duration::from_secs(1));
+    }
+}
+
+/// The main window.
+fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    app.apply_theme(&ctx);
+    app.sync_windows(&ctx);
+    app.update_title(&ctx);
+    timefmt::set_12_hour(app.config.use_12_hour_time);
+    let pal = app.active_theme.palette;
+
+    // ---- Login screen
+    if let Screen::Login(form) = &mut app.screen {
+        match form.ui(ui, &pal) {
+            Some(LoginAction::Login { token, remember }) => {
+                app.login_with(&ctx, token, remember);
             }
-            return;
-        }
-
-        // ---- Main screen
-        let (status, connected, fatal, wants_settings) = match &mut self.screen {
-            Screen::Main(state) => (
-                state.status.clone(),
-                state.connected,
-                state.fatal.take(),
-                std::mem::take(&mut state.open_settings),
-            ),
-            Screen::Login(_) => unreachable!(),
-        };
-        if let Some(reason) = fatal {
-            // Bad token etc.: back to login and forget the saved token.
-            self.log_out(Some(reason), true);
-            return;
-        }
-        self.run_demo_open(&ctx);
-        self.run_demo_shot(&ctx);
-        if wants_settings {
-            self.settings = Some(SettingsPage::new(&self.config));
-            self.editing_layout = false;
-        }
-
-        // Settings page replaces the main UI while open.
-        if let Some(page) = &mut self.settings {
-            let Screen::Main(state) = &mut self.screen else {
-                return;
-            };
-            let action = page.ui(
-                ui,
-                &self.config,
-                state.me.as_ref(),
-                state.user_settings(),
-                &pal,
-                &mut self.theme_store,
-            );
-            match action {
-                Some(SettingsAction::Save { config, sync }) => {
-                    let reconnect = config.client_identity != self.config.client_identity;
-                    let forget_logins = self.config.remember_login && !config.remember_login;
-                    let mut config = *config;
-                    // "Show as" is per account.
-                    if let Some(id) = self.session.as_ref().and_then(|s| s.account.as_ref()) {
-                        self.config
-                            .per_account
-                            .entry(id.clone())
-                            .or_default()
-                            .client_identity = Some(config.client_identity);
-                    }
-                    // Saved accounts aren't edited on the settings page; keep
-                    // the live list (READY may have saved one meanwhile).
-                    config.accounts = std::mem::take(&mut self.config.accounts);
-                    config.last_account = self.config.last_account.take();
-                    config.per_account = std::mem::take(&mut self.config.per_account);
-                    self.config = config;
-                    if forget_logins {
-                        // "Remember me" off: no token stays on this PC.
-                        if let Err(e) = self.vault.forget_all(&mut self.config) {
-                            state.toast = Some((
-                                format!("Couldn't remove saved logins: {e}"),
-                                Instant::now(),
-                            ));
-                        }
-                    }
-                    for change in sync {
-                        state.apply_sync_change(change);
-                    }
-                    // "Show as" only changes with a fresh IDENTIFY: start a
-                    // new session (a new backend never RESUMEs the old one).
-                    if reconnect
-                        && !state.is_bot_session()
-                        && let Some(session) = self.session.take_if(|s| !s.demo)
-                    {
-                        let Session {
-                            token,
-                            account,
-                            saved,
-                            ..
-                        } = session;
-                        self.start_session(&ctx, token, false, account);
-                        if let Some(s) = &mut self.session {
-                            s.saved = saved;
-                        }
-                        if let Screen::Main(state) = &mut self.screen {
-                            state.status = "Reconnecting to apply \"Show as\"…".into();
-                        }
-                    }
-                }
-                Some(SettingsAction::Close) => self.settings = None,
-                Some(SettingsAction::EditLayout) => {
-                    self.settings = None;
-                    self.editing_layout = true;
-                }
-                Some(SettingsAction::ResetLayout) => self.tree = layout::default_tree(),
-                Some(SettingsAction::CopyLayout) => {
-                    ctx.copy_text(crate::layout_presets::export(&self.tree));
-                }
-                Some(SettingsAction::ImportLayout(tree)) => self.tree = *tree,
-                Some(SettingsAction::PickTheme { folder }) => {
-                    let _ = state.tx.send(ToBackend::PickTheme { folder });
-                }
-                Some(SettingsAction::LogOut) => self.log_out(None, true),
-                None => {}
+            Some(LoginAction::Demo) => {
+                app.start_session(&ctx, Token::new(""), true, None);
             }
-            return;
+            None => {}
         }
+        return;
+    }
 
-        if !self.config.modules.layout_editor {
-            self.editing_layout = false;
-        }
-        self.top_bar(ui, &pal, &status, connected);
+    // ---- Main screen
+    let (fatal, wants_settings) = match &mut app.screen {
+        Screen::Main(state) => (state.fatal.take(), std::mem::take(&mut state.open_settings)),
+        Screen::Login(_) => unreachable!(),
+    };
+    if let Some(reason) = fatal {
+        // Bad token etc.: back to login and forget the saved token.
+        app.log_out(Some(reason), true);
+        return;
+    }
+    app.run_demo_open(&ctx);
+    app.run_demo_shot(&ctx);
+    if wants_settings {
+        app.settings = Some(SettingsPage::new(&app.config));
+        app.editing_layout = false;
+    }
 
-        let Screen::Main(state) = &mut self.screen else {
+    // Settings page replaces the main UI while open.
+    if let Some(page) = &mut app.settings {
+        let Screen::Main(state) = &mut app.screen else {
             return;
         };
-        if self.config.modules.status_bar {
-            let ram = self.ram.sample();
-            state.status_bar(ui, &self.config, &pal, ram);
-        }
-        // Ctrl+K (Cmd+K on macOS): quick switcher.
-        let quick = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
-        if ctx.input_mut(|i| i.consume_shortcut(&quick)) {
-            state.toggle_switcher();
-        }
-        // Ctrl+F: search this channel; Ctrl+Shift+F: the whole server / DM.
-        if self.config.modules.search {
-            use egui::{Key, KeyboardShortcut as K, Modifiers as M};
-            let (whole, here) = ctx.input_mut(|i| {
-                (
-                    i.consume_shortcut(&K::new(M::COMMAND | M::SHIFT, Key::F)),
-                    i.consume_shortcut(&K::new(M::COMMAND, Key::F)),
-                )
-            });
-            if whole || here {
-                state.open_search(whole);
-            }
-        }
-        state.shortcuts(&ctx, &self.config);
-        // ---- Tiles: fit the free layout to the window (pixel sizes, the
-        // chat absorbs, low-priority panes fold into drawers when narrow).
-        let area = ui.available_rect_before_wrap();
-        let metrics = crate::tile_fit::Metrics {
-            gap: if self.editing_layout { 6.0 } else { 0.0 },
-            tab_bar: 24.0,
-            chrome: self.active_theme.pane_chrome().into(),
-        };
-        let tier = crate::responsive::tier_with_hysteresis(area.width(), state.host.tier);
-        state.host.tier = Some(tier);
-        // No folding while editing: every panel stays reachable to drag.
-        let folds = if self.editing_layout {
-            crate::tile_fit::Folds::default()
-        } else {
-            crate::tile_fit::plan_folds(&self.tree, area.width(), tier, metrics)
-        };
-        // The window can't get smaller than the layout's minimums (frame
-        // borders, labels, the bars around the tiles), so nothing crops.
-        layout::keep_window_min(
-            &ctx,
-            &mut state.host,
-            &self.tree,
-            metrics,
-            ctx.content_rect().size() - area.size(),
+        let action = page.ui(
+            ui,
+            &app.config,
+            state.me.as_ref(),
+            state.user_settings(),
+            &pal,
+            &mut app.theme_store,
         );
-        let folded = crate::tile_fit::apply_folds(&mut self.tree, &folds);
-        crate::tile_fit::fit(&mut self.tree, area, metrics);
-        state.host.lists_in_drawer = !folded.in_drawer(crate::tile_fit::Drawer::Left).is_empty();
-        state.host.aside_in_drawer = folds.members;
-        if std::mem::take(&mut state.host.toggle_left) {
-            state.host.left_open = state.host.lists_in_drawer && !state.host.left_open;
+        match action {
+            Some(SettingsAction::Save { config, sync }) => {
+                let reconnect = config.client_identity != app.config.client_identity;
+                let forget_logins = app.config.remember_login && !config.remember_login;
+                let mut config = *config;
+                // "Show as" is per account.
+                if let Some(id) = app.session.as_ref().and_then(|s| s.account.as_ref()) {
+                    app.config
+                        .per_account
+                        .entry(id.clone())
+                        .or_default()
+                        .client_identity = Some(config.client_identity);
+                }
+                // Saved accounts aren't edited on the settings page; keep
+                // the live list (READY may have saved one meanwhile).
+                config.accounts = std::mem::take(&mut app.config.accounts);
+                config.last_account = app.config.last_account.take();
+                config.per_account = std::mem::take(&mut app.config.per_account);
+                app.config = config;
+                if forget_logins {
+                    // "Remember me" off: no token stays on this PC.
+                    if let Err(e) = app.vault.forget_all(&mut app.config) {
+                        state.toast =
+                            Some((format!("Couldn't remove saved logins: {e}"), Instant::now()));
+                    }
+                }
+                for change in sync {
+                    state.apply_sync_change(change);
+                }
+                // "Show as" only changes with a fresh IDENTIFY: start a
+                // new session (a new backend never RESUMEs the old one).
+                if reconnect
+                    && !state.is_bot_session()
+                    && let Some(session) = app.session.take_if(|s| !s.demo)
+                {
+                    let Session {
+                        token,
+                        account,
+                        saved,
+                        ..
+                    } = session;
+                    app.start_session(&ctx, token, false, account);
+                    if let Some(s) = &mut app.session {
+                        s.saved = saved;
+                    }
+                    if let Screen::Main(state) = &mut app.screen {
+                        state.status = "Reconnecting to apply \"Show as\"…".into();
+                    }
+                }
+            }
+            Some(SettingsAction::Close) => app.settings = None,
+            Some(SettingsAction::EditLayout) => {
+                app.settings = None;
+                app.editing_layout = true;
+            }
+            Some(SettingsAction::ResetLayout) => app.tree = layout::default_tree(),
+            Some(SettingsAction::CopyLayout) => {
+                ctx.copy_text(crate::layout_presets::export(&app.tree));
+            }
+            Some(SettingsAction::ImportLayout(tree)) => app.tree = *tree,
+            Some(SettingsAction::PickTheme { folder }) => {
+                let _ = state.tx.send(ToBackend::PickTheme { folder });
+            }
+            Some(SettingsAction::LogOut) => app.log_out(None, true),
+            None => {}
         }
-        state.members_visible = if folds.members {
-            state.host.aside_open
-        } else {
-            layout::pane_visible(&self.tree, Pane::Members)
-        };
-        state.channels_visible = folds.lists || layout::pane_visible(&self.tree, Pane::Channels);
-        let picked_before = state.selected_channel.clone();
-        egui::CentralPanel::no_frame().show(ui, |ui| {
-            let mut behavior = LayoutBehavior {
-                state: &mut *state,
-                config: &self.config,
-                pal,
-                theme: &self.active_theme,
-                editing: self.editing_layout,
-            };
-            // Theme backdrop behind inset / glass panes and the gaps.
-            self.active_theme
-                .paint_backdrop(ui.painter(), ui.max_rect());
-            // Empty frame space around inset cards drags the window.
-            let host = &behavior.state.host;
-            let drawer_open = (host.lists_in_drawer && host.left_open)
-                || (host.aside_in_drawer && host.aside_open);
-            layout::frame_drag(ui, !self.editing_layout && !drawer_open);
-            self.tree.ui(&mut behavior, ui);
+        return;
+    }
+
+    let Screen::Main(state) = &mut app.screen else {
+        return;
+    };
+    chat_screen(
+        ui,
+        state,
+        ChatFrame {
+            tree: &mut app.tree,
+            config: &app.config,
+            theme: &app.active_theme,
+            editing: &mut app.editing_layout,
+            ram: &mut app.ram,
+        },
+    );
+    apply_config_updates(&mut app.config, state);
+    let picked = state.account_action.take();
+    if let Some(action) = picked {
+        app.account_action(&ctx, action);
+    }
+    app.add_account_dialog(&ctx, &pal);
+}
+
+/// What a chat window draws with: the main window's own layout and
+/// settings, or an account window's copies.
+struct ChatFrame<'a> {
+    tree: &'a mut egui_tiles::Tree<Pane>,
+    config: &'a Config,
+    theme: &'a crate::themes::ActiveTheme,
+    /// Layout editing (main window only; always false in account windows).
+    editing: &'a mut bool,
+    ram: &'a mut RamSampler,
+}
+
+/// The chat screen of one session: tiles fitted to the window, drawers,
+/// overlays. Shared by the main window and account windows.
+fn chat_screen(ui: &mut egui::Ui, state: &mut State, f: ChatFrame<'_>) {
+    let ctx = ui.ctx().clone();
+    let pal = f.theme.palette;
+    if !f.config.modules.layout_editor {
+        *f.editing = false;
+    }
+    let status = state.status.clone();
+    RustCordApp::top_bar(
+        ui,
+        &pal,
+        &status,
+        state.connected,
+        f.config,
+        f.editing,
+        f.tree,
+    );
+    if f.config.modules.status_bar {
+        let ram = f.ram.sample();
+        state.status_bar(ui, f.config, &pal, ram);
+    }
+    // Ctrl+K (Cmd+K on macOS): quick switcher.
+    let quick = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K);
+    if ctx.input_mut(|i| i.consume_shortcut(&quick)) {
+        state.toggle_switcher();
+    }
+    // Ctrl+F: search this channel; Ctrl+Shift+F: the whole server / DM.
+    if f.config.modules.search {
+        use egui::{Key, KeyboardShortcut as K, Modifiers as M};
+        let (whole, here) = ctx.input_mut(|i| {
+            (
+                i.consume_shortcut(&K::new(M::COMMAND | M::SHIFT, Key::F)),
+                i.consume_shortcut(&K::new(M::COMMAND, Key::F)),
+            )
         });
-        crate::tile_fit::restore(&mut self.tree, &folded);
-        layout::end_frame(&self.tree, &ctx);
-        layout::draw_drawers(
-            &ctx,
-            area,
-            &folded,
-            &mut layout::PaneCtx {
-                state: &mut *state,
-                config: &self.config,
-                pal: &pal,
-                theme: &self.active_theme,
+        if whole || here {
+            state.open_search(whole);
+        }
+    }
+    state.shortcuts(&ctx, f.config);
+    // ---- Tiles: fit the free layout to the window (pixel sizes, the
+    // chat absorbs, low-priority panes fold into drawers when narrow).
+    let area = ui.available_rect_before_wrap();
+    let metrics = crate::tile_fit::Metrics {
+        gap: if *f.editing { 6.0 } else { 0.0 },
+        tab_bar: 24.0,
+        chrome: f.theme.pane_chrome().into(),
+    };
+    let tier = crate::responsive::tier_with_hysteresis(area.width(), state.host.tier);
+    state.host.tier = Some(tier);
+    // No folding while editing: every panel stays reachable to drag.
+    let folds = if *f.editing {
+        crate::tile_fit::Folds::default()
+    } else {
+        crate::tile_fit::plan_folds(&*f.tree, area.width(), tier, metrics)
+    };
+    // The window can't get smaller than the layout's minimums (frame
+    // borders, labels, the bars around the tiles), so nothing crops. Each
+    // window (main or account) keeps its own minimum for its own layout.
+    layout::keep_window_min(
+        &ctx,
+        &mut state.host,
+        &*f.tree,
+        metrics,
+        ctx.content_rect().size() - area.size(),
+    );
+    let folded = crate::tile_fit::apply_folds(&mut *f.tree, &folds);
+    crate::tile_fit::fit(&mut *f.tree, area, metrics);
+    state.host.lists_in_drawer = !folded.in_drawer(crate::tile_fit::Drawer::Left).is_empty();
+    state.host.aside_in_drawer = folds.members;
+    if std::mem::take(&mut state.host.toggle_left) {
+        state.host.left_open = state.host.lists_in_drawer && !state.host.left_open;
+    }
+    state.members_visible = if folds.members {
+        state.host.aside_open
+    } else {
+        layout::pane_visible(&*f.tree, Pane::Members)
+    };
+    state.channels_visible = folds.lists || layout::pane_visible(&*f.tree, Pane::Channels);
+    let picked_before = state.selected_channel.clone();
+    egui::CentralPanel::no_frame().show(ui, |ui| {
+        let mut behavior = LayoutBehavior {
+            state: &mut *state,
+            config: f.config,
+            pal,
+            theme: f.theme,
+            editing: *f.editing,
+        };
+        // Theme backdrop behind inset / glass panes and the gaps.
+        f.theme.paint_backdrop(ui.painter(), ui.max_rect());
+        // Empty frame space around inset cards drags the window.
+        let host = &behavior.state.host;
+        let drawer_open =
+            (host.lists_in_drawer && host.left_open) || (host.aside_in_drawer && host.aside_open);
+        layout::frame_drag(ui, !*f.editing && !drawer_open);
+        f.tree.ui(&mut behavior, ui);
+    });
+    crate::tile_fit::restore(&mut *f.tree, &folded);
+    layout::end_frame(&*f.tree, &ctx);
+    layout::draw_drawers(
+        &ctx,
+        area,
+        &folded,
+        &mut layout::PaneCtx {
+            state: &mut *state,
+            config: f.config,
+            pal: &pal,
+            theme: f.theme,
+        },
+    );
+    // Picking a channel in the left drawer closes it.
+    if state.selected_channel != picked_before {
+        state.host.left_open = false;
+    }
+    if std::mem::take(&mut state.toggle_members) {
+        if folds.members {
+            // Members lives in the drawer: open / close it (showing the
+            // panel again if the user had hidden it).
+            state.host.aside_open = !state.host.aside_open;
+            if state.host.aside_open && !layout::pane_visible(&*f.tree, Pane::Members) {
+                layout::toggle_pane(&mut *f.tree, Pane::Members);
+            }
+        } else {
+            layout::toggle_pane(&mut *f.tree, Pane::Members);
+        }
+    }
+    if std::mem::take(&mut state.toggle_channels) {
+        if folds.lists {
+            // « inside the drawer closes it.
+            state.host.left_open = false;
+        } else {
+            layout::toggle_pane(&mut *f.tree, Pane::Channels);
+        }
+    }
+
+    state.overlays(ui, f.config, &pal);
+}
+
+/// Each open account is one more gateway connection plus its caches.
+const RAM_NOTE: &str = "Each open account is one more connection + caches (~15 MB + caches)";
+
+fn window_title(name: &str) -> String {
+    format!("RustCord \u{2014} {name}")
+}
+
+/// Lock an account window (a poisoned lock still holds valid data).
+fn lock(w: &Mutex<AccountWindow>) -> std::sync::MutexGuard<'_, AccountWindow> {
+    w.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Start one session: its backend thread (repainting `viewport`) and its
+/// State. The token only goes to the backend and the returned `Session`.
+fn spawn_session(
+    config: &Config,
+    identity: crate::config::ClientIdentity,
+    ctx: &egui::Context,
+    viewport: egui::ViewportId,
+    token: Token,
+    demo: bool,
+    account: Option<String>,
+) -> (Session, State) {
+    let (ui_tx, ui_rx) = mpsc::channel();
+    let (be_tx, be_rx) = tokio::sync::mpsc::unbounded_channel();
+    let options = crate::backend::Options {
+        bot_member_intents: config.bot_member_intents,
+        identity,
+    };
+    crate::backend::spawn(
+        token.expose().to_string(),
+        demo,
+        options,
+        ui_tx,
+        be_rx,
+        ctx.clone(),
+        viewport,
+    );
+    let session = Session {
+        token,
+        demo,
+        account,
+        saved: false,
+    };
+    (session, State::new(ui_rx, be_tx))
+}
+
+/// An account opened in its own window (a deferred egui viewport). Shared
+/// between the main window (which syncs config and theme into it) and the
+/// viewport callback (which runs its session). Holds a token, so no `Debug`.
+struct AccountWindow {
+    viewport: egui::ViewportId,
+    user_id: String,
+    title: String,
+    /// The running session; `None` once the window closed (dropping it
+    /// ends the backend thread and closes the gateway with 1000).
+    live: Option<WindowLive>,
+    /// The main window's config and theme, as of its last frame.
+    config: Config,
+    theme: crate::themes::ActiveTheme,
+    theme_gen: u64,
+    /// Back to the main window: config changes (recent emoji, trusted
+    /// domains, …), the closed window's last channel / draft, a dead login,
+    /// "open Settings".
+    updates: Vec<ConfigUpdate>,
+    stash: Option<AccountData>,
+    fatal: Option<String>,
+    open_settings: bool,
+}
+
+struct WindowLive {
+    session: Session,
+    state: Box<State>,
+    /// A copy of the main layout (the window has its own size).
+    tree: egui_tiles::Tree<Pane>,
+    ram: RamSampler,
+}
+
+impl AccountWindow {
+    /// Disconnect and free this window's session, keeping its view for
+    /// the main window to save.
+    fn close(&mut self) {
+        if let Some(live) = self.live.take() {
+            let mut data = AccountData::default();
+            stash_view(&mut data, &live.state);
+            self.stash = Some(data);
+        }
+    }
+}
+
+/// An account window's frame (runs in its viewport, on the UI thread).
+/// Same window frame as the main window (undecorated with – □ X and edge
+/// resize, unless "Use system title bar" is on); its X closes only this
+/// window.
+fn window_ui(w: &Mutex<AccountWindow>, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    let mut guard = lock(w);
+    let w = &mut *guard;
+    if w.live.is_none() {
+        return;
+    }
+    crate::window_frame::begin_pass(&ctx, w.config.system_title_bar);
+    window_screen(w, ui);
+    let pal = w.theme.palette;
+    crate::window_frame::end_pass(&ctx, &pal);
+}
+
+/// One pass of an account window's session and chat screen.
+fn window_screen(w: &mut AccountWindow, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    let Some(live) = &mut w.live else {
+        return;
+    };
+    let state = &mut live.state;
+    session_logic(state, &ctx, &w.config, true);
+    let mut close = ctx.input(|i| i.viewport().close_requested());
+    if let Some(reason) = state.fatal.take() {
+        w.fatal = Some(reason);
+        close = true;
+    }
+    if !close {
+        if std::mem::take(&mut state.open_settings) {
+            // Settings live in the main window.
+            w.open_settings = true;
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+        }
+        let mut editing = false;
+        chat_screen(
+            ui,
+            state,
+            ChatFrame {
+                tree: &mut live.tree,
+                config: &w.config,
+                theme: &w.theme,
+                editing: &mut editing,
+                ram: &mut live.ram,
             },
         );
-        // Picking a channel in the left drawer closes it.
-        if state.selected_channel != picked_before {
-            state.host.left_open = false;
-        }
-        if std::mem::take(&mut state.toggle_members) {
-            if folds.members {
-                // Members lives in the drawer: open / close it (showing the
-                // panel again if the user had hidden it).
-                state.host.aside_open = !state.host.aside_open;
-                if state.host.aside_open && !layout::pane_visible(&self.tree, Pane::Members) {
-                    layout::toggle_pane(&mut self.tree, Pane::Members);
-                }
-            } else {
-                layout::toggle_pane(&mut self.tree, Pane::Members);
-            }
-        }
-        if std::mem::take(&mut state.toggle_channels) {
-            if folds.lists {
-                // « inside the drawer closes it.
-                state.host.left_open = false;
-            } else {
-                layout::toggle_pane(&mut self.tree, Pane::Channels);
-            }
-        }
-
-        state.overlays(ui, &self.config, &pal);
-        apply_config_updates(&mut self.config, state);
-        let picked = state.account_action.take();
-        if let Some(action) = picked {
-            self.account_action(&ctx, action);
-        }
-        self.add_account_dialog(&ctx, &pal);
+        close = matches!(
+            state.account_action.take(),
+            Some(AccountAction::CloseWindow)
+        );
+    }
+    let mut to_main = w.open_settings || !state.config_updates.is_empty();
+    for u in state.config_updates.drain(..) {
+        apply_update(&mut w.config, u.clone());
+        w.updates.push(u);
+    }
+    if close {
+        w.close();
+        to_main = true;
+    }
+    if to_main {
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
     }
 }
 
@@ -998,15 +1399,7 @@ struct Session {
 /// After READY: store a remembered login under its user id (re-keying a
 /// migrated pending token) and refresh its name / avatar. Runs once per
 /// session; a failure only shows a toast.
-fn save_account(
-    vault: &Vault,
-    config: &mut Config,
-    session: &mut Option<Session>,
-    state: &mut State,
-) {
-    let Some(session) = session.as_mut() else {
-        return;
-    };
+fn save_account(vault: &Vault, config: &mut Config, session: &mut Session, state: &mut State) {
     if session.saved || session.demo {
         return;
     }
@@ -1080,6 +1473,7 @@ enum MessageAction {
 
 /// Changes to the saved config that come from the chat UI; the app applies
 /// them (State only gets `&Config`).
+#[derive(Clone)]
 pub enum ConfigUpdate {
     TrustDomain(String),
     /// Synced compact/cozy setting arrived from Discord.

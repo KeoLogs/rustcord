@@ -13,6 +13,10 @@
 //!
 //! Settings → Appearance → "Use system title bar" brings the native frame
 //! back (`Config::system_title_bar`); everything here is then skipped.
+//!
+//! Every window (the main one and each account window) runs its own
+//! `begin_pass` / `end_pass`; the frame's state is kept per viewport, and
+//! the buttons act on the window they are drawn in.
 
 use eframe::egui::{self, Color32, CursorIcon, Pos2, Rect, ResizeDirection, Sense, vec2};
 
@@ -46,31 +50,39 @@ const CONTENT_GAP: f32 = 8.0;
 /// Total width the buttons take from a header.
 pub const RESERVED: f32 = CONTENT_GAP + 3.0 * BUTTON + 2.0 * BUTTON_GAP + RIGHT_PAD;
 
-fn active_id() -> egui::Id {
-    egui::Id::unique("rc_window_frame_active")
+// Per-viewport memory keys (each window has its own frame state).
+fn active_id(ctx: &egui::Context) -> egui::Id {
+    egui::Id::unique("rc_window_frame_active").with(ctx.viewport_id())
 }
-fn decorations_id() -> egui::Id {
-    egui::Id::unique("rc_window_frame_decorations")
+fn decorations_id(ctx: &egui::Context) -> egui::Id {
+    egui::Id::unique("rc_window_frame_decorations").with(ctx.viewport_id())
 }
-fn claimed_id() -> egui::Id {
-    egui::Id::unique("rc_window_frame_claimed")
+fn claimed_id(ctx: &egui::Context) -> egui::Id {
+    egui::Id::unique("rc_window_frame_claimed").with(ctx.viewport_id())
+}
+
+/// RustCord draws its own frame (no OS decorations) for this setting.
+pub fn custom_frame(system_title_bar: bool) -> bool {
+    SUPPORTED && !system_title_bar
 }
 
 /// Call at the start of every pass. `custom` is false when the user picked
 /// the system title bar. Switches the OS decorations when that changes.
 pub fn begin_pass(ctx: &egui::Context, system_title_bar: bool) {
-    let custom = SUPPORTED && !system_title_bar;
-    let last = ctx.data_mut(|d| d.get_temp::<bool>(decorations_id()));
+    let custom = custom_frame(system_title_bar);
+    let (decorations, active) = (decorations_id(ctx), active_id(ctx));
+    let last = ctx.data_mut(|d| d.get_temp::<bool>(decorations));
     if last != Some(custom) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!custom));
-        ctx.data_mut(|d| d.insert_temp(decorations_id(), custom));
+        ctx.data_mut(|d| d.insert_temp(decorations, custom));
     }
-    ctx.data_mut(|d| d.insert_temp(active_id(), custom));
+    ctx.data_mut(|d| d.insert_temp(active, custom));
 }
 
 /// RustCord draws the window frame this pass.
 fn active(ctx: &egui::Context) -> bool {
-    ctx.data(|d| d.get_temp::<bool>(active_id()).unwrap_or(false))
+    let id = active_id(ctx);
+    ctx.data(|d| d.get_temp::<bool>(id).unwrap_or(false))
 }
 
 fn maximized(ctx: &egui::Context) -> bool {
@@ -189,7 +201,8 @@ pub fn header(ui: &mut egui::Ui, rect: Rect, pal: &Palette) -> Rect {
     }
     // Read the pass number first: no `ctx` calls inside `data_mut`.
     let pass = ctx.cumulative_pass_nr();
-    ctx.data_mut(|d| d.insert_temp(claimed_id(), pass));
+    let claimed = claimed_id(&ctx);
+    ctx.data_mut(|d| d.insert_temp(claimed, pass));
     let strip = Rect::from_min_max(
         egui::pos2(rect.right() - RESERVED + CONTENT_GAP, rect.top()),
         rect.right_bottom(),
@@ -282,7 +295,8 @@ pub fn end_pass(ctx: &egui::Context, pal: &Palette) {
         return;
     }
     let window = ctx.content_rect();
-    let claimed = ctx.data(|d| d.get_temp::<u64>(claimed_id()));
+    let id = claimed_id(ctx);
+    let claimed = ctx.data(|d| d.get_temp::<u64>(id));
     if claimed != Some(ctx.cumulative_pass_nr()) {
         fallback_controls(ctx, window, pal);
     }

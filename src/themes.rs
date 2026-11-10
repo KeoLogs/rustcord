@@ -597,6 +597,7 @@ pub async fn pick_import_source(folder: bool) -> Option<PathBuf> {
 
 /// The theme the app draws with: colours, style and (maybe) a background
 /// image texture. Replace it to switch themes; the old texture is freed.
+#[derive(Clone)]
 pub struct ActiveTheme {
     pub palette: Palette,
     pub style: ThemeStyle,
