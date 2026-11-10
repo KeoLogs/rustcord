@@ -132,6 +132,29 @@ pub fn corner(r: u8) -> u8 {
     (f32::from(r) * scale).round().clamp(0.0, 255.0) as u8
 }
 
+/// The active theme's pane border colour (premultiplied RGBA; 0 = the
+/// palette's `divider`), set by `themes::apply_style`, so cards in the chat
+/// (thread cards) use the same border as the blocky panes.
+static FRAME_BORDER: AtomicU32 = AtomicU32::new(0);
+
+/// Called when a theme is applied: its `[style.frame] border`, if the
+/// frame is on and sets one.
+pub fn set_frame_border(color: Option<Color32>) {
+    let v = color.map_or(0, |c| u32::from_be_bytes(c.to_array()));
+    FRAME_BORDER.store(v, Ordering::Relaxed);
+}
+
+/// Border colour for bordered cards: the theme's frame border, or `divider`.
+pub fn frame_border(pal: &Palette) -> Color32 {
+    match FRAME_BORDER.load(Ordering::Relaxed) {
+        0 => pal.divider,
+        v => {
+            let [r, g, b, a] = v.to_be_bytes();
+            Color32::from_rgba_premultiplied(r, g, b, a)
+        }
+    }
+}
+
 /// Name of the SemiBold font family.
 pub const BOLD: &str = "bold";
 

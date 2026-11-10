@@ -36,6 +36,10 @@
 //!   CJK, kaomoji, flags, ZWJ emoji), stickers, system messages (joins,
 //!   pin, thread, boost, call), a forwarded message, a poll and messages
 //!   with nothing RustCord can draw (shown as "unsupported", never blank).
+//! - #general has a thread card (type 18) for "release plans" with three
+//!   messages; it shows the count until the thread is opened once, then
+//!   Sam's last message. #showcase's thread start names no thread we know
+//!   ("This thread isn't loaded", not clickable).
 //! - The GIF button shows fake results (offline, so the pictures fail).
 
 use std::collections::HashMap;
@@ -218,6 +222,7 @@ fn last_id(channel_id: &str) -> u64 {
         "202" => 40,
         "203" => 60,
         "204" => 70,
+        "250" => 263,
         "210" => 80,
         "211" => 85,
         "220" => 90,
@@ -336,8 +341,8 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
         "id": TEST_GUILD,
         "threads": [
             { "id": "250", "type": 11, "name": "release plans", "parent_id": "201",
-              "owner_id": SAM, "message_count": 7, "member_count": 3,
-              "last_message_id": last_id("201").to_string(),
+              "owner_id": SAM, "message_count": 3, "member_count": 3,
+              "last_message_id": last_id("250").to_string(),
               "member": { "id": "250", "flags": 1 },
               "thread_metadata": { "archived": false, "auto_archive_duration": 4320 } },
             { "id": "251", "type": 11, "name": "theme ideas", "parent_id": "201",
@@ -899,14 +904,23 @@ fn sample_values(channel_id: &str) -> Vec<Value> {
     if channel_id == "204" {
         return showcase_values();
     }
+    if channel_id == "250" {
+        return thread_values();
+    }
     let sam = user(SAM, "Sam", None);
     let alex = user(ALEX, "Alex", None);
     let me = user(ME, "You", None);
     // Ids count up to the channel's last message so read state lines up.
     let last = last_id(channel_id);
+    // #general has one more: the thread card (inserted below).
+    let first = if channel_id == "201" {
+        last - 8
+    } else {
+        last - 7
+    };
     let mut n = 0u64;
     let mut msg = |author: &Value, content: &str, extra: Value| {
-        let id = last - 7 + n;
+        let id = first + n;
         n += 1;
         let mut v = json!({
             "id": id.to_string(), "channel_id": channel_id, "author": author, "content": content,
@@ -917,7 +931,7 @@ fn sample_values(channel_id: &str) -> Vec<Value> {
         }
         v
     };
-    vec![
+    let mut out = vec![
         msg(
             &sam,
             "hey, is the new client working? the test lounge: https://discord.gg/rustcord",
@@ -932,7 +946,7 @@ fn sample_values(channel_id: &str) -> Vec<Value> {
         msg(
             &alex,
             "nice, does it do replies?",
-            json!({ "referenced_message": { "id": (last - 5).to_string(), "author": me,
+            json!({ "referenced_message": { "id": (first + 2).to_string(), "author": me,
                     "content": "yeah! you can drag the panels around now" } }),
         ),
         msg(
@@ -968,7 +982,57 @@ fn sample_values(channel_id: &str) -> Vec<Value> {
                 json!({ "attachments": [{ "url": "https://example.com/build.log", "filename": "build.log", "size": 20480, "content_type": "text/plain" }] }),
             )
         },
+    ];
+    if channel_id == "201" {
+        // A thread start (type 18) for "release plans" (thread 250), after
+        // the sixth message; the two after it move up one id.
+        for v in &mut out[6..] {
+            let id = v["id"]
+                .as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            v["id"] = json!((id + 1).to_string());
+        }
+        out.insert(
+            6,
+            json!({
+                "id": (first + 6).to_string(), "channel_id": channel_id, "type": 18,
+                "author": sam, "content": "release plans",
+                "timestamp": iso_minutes_ago(minutes_ago(6) - 1),
+                "message_reference": { "channel_id": "250", "guild_id": TEST_GUILD },
+            }),
+        );
+    }
+    out
+}
+
+/// Thread "release plans" (250) under #general: what its card previews
+/// once it has been opened.
+fn thread_values() -> Vec<Value> {
+    let last = last_id("250");
+    [
+        (
+            user(SAM, "Sam", None),
+            30,
+            "ok so: themes first, then the thread cards",
+        ),
+        (
+            user(ALEX, "Alex", None),
+            20,
+            "sounds good, I'll take the **theme files**",
+        ),
+        (user(SAM, "Sam", None), 10, "ship it friday? 🚀"),
     ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (author, ago, content))| {
+        json!({
+            "id": (last - 2 + i as u64).to_string(), "channel_id": "250",
+            "author": author, "content": content,
+            "timestamp": iso_minutes_ago(ago),
+        })
+    })
+    .collect()
 }
 
 /// #showcase: Unicode coverage, stickers, system messages, a forward, a

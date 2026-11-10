@@ -865,6 +865,7 @@ pub fn apply_style(ctx: &egui::Context, s: &ThemeStyle) {
     let r = CornerRadius::same(s.radius(s.widget_radius));
     let (wr, mr) = (s.radius(s.window_radius), s.radius(s.menu_radius));
     crate::theme::set_corner_scale(s.corner_scale);
+    crate::theme::set_frame_border(s.frame.border.filter(|_| s.frame.enabled));
     let (ws, ps, link, border) = (s.window_shadow, s.popup_shadow, s.link, s.widget_border);
     let scale = s.font_scale;
     ctx.global_style_mut(|st| {

@@ -1469,6 +1469,8 @@ enum MessageAction {
     Invite(InviteAction),
     /// Reaction bar / add-reaction picker on message (id).
     React(String, ReactionAction),
+    /// Clicked a thread card (type 18 message): open that thread.
+    OpenThread(Box<Thread>),
 }
 
 /// Changes to the saved config that come from the chat UI; the app applies
@@ -5522,6 +5524,39 @@ impl State {
                 })
                 .collect()
         };
+        // Thread cards (type 18, Threads module): the thread and its
+        // preview line from the store and cached messages, no requests.
+        let cards: Vec<(usize, ThreadCardView)> = match &self.threads {
+            Some(ts) => {
+                let lookup = ChatLookup {
+                    guild: guild_idx.map(|i| &self.guilds[i]),
+                    guilds: &self.guilds,
+                    dms: &self.dms,
+                    members: &self.member_cache,
+                    names: &self.user_names,
+                };
+                let guild_id = guild_idx.map(|i| self.guilds[i].id.as_str());
+                let cache = &mut self.md_cache;
+                let mut plain = |tm: &Message| {
+                    let b = cache.get(&tm.id, &tm.content, formatting);
+                    markdown::to_plain_text(&b, &lookup)
+                };
+                self.messages[&channel_id]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| m.kind == 18)
+                    .map(|(i, m)| {
+                        let thread = threads::card_thread(m, &ts.store, guild_id);
+                        let preview = thread.as_deref().map_or_else(Default::default, |t| {
+                            let cached = self.messages.get(&t.id).map(Vec::as_slice);
+                            threads::card_preview(t, cached, &mut plain)
+                        });
+                        (i, ThreadCardView { thread, preview })
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        };
 
         let guild = guild_idx.map(|i| &self.guilds[i]);
         let lookup = ChatLookup {
@@ -5649,6 +5684,23 @@ impl State {
                     }
 
                     let author = self.author_style(guild, &m.author);
+                    // A thread start: one bordered card that opens it.
+                    if let Some((_, card)) = cards.iter().find(|(ci, _)| *ci == i) {
+                        let last_name = card
+                            .preview
+                            .last
+                            .as_ref()
+                            .map(|l| self.author_style(guild, &l.author).name);
+                        if thread_card(ui, m, author.name, card, last_name, config, pal)
+                            && let Some(t) = &card.thread
+                        {
+                            action =
+                                Some(MessageAction::OpenThread(Box::new(t.clone().into_owned())));
+                        }
+                        prev = Some(m);
+                        i += 1;
+                        continue;
+                    }
                     // Joins, pins, calls, boosts…: one muted line.
                     if !sysmsg::is_normal(m.kind) {
                         let target = m.mention_names.first().map(|(_, n)| n.as_str());
@@ -5819,6 +5871,10 @@ impl State {
                 let now = ctx.input(|i| i.time);
                 self.react(&channel_id, &id, a, now);
             }
+            Some(MessageAction::OpenThread(t)) if self.threads.is_some() => {
+                self.open_thread(*t, &ctx, config);
+            }
+            Some(MessageAction::OpenThread(_)) => {}
             None => {}
         }
     }
@@ -9149,6 +9205,185 @@ fn system_row(
     resp.on_hover_text(timefmt::long(m.time));
     ui.add_space(2.0);
     None
+}
+
+/// A thread card's data (see `threads::card_thread` / `card_preview`).
+struct ThreadCardView<'a> {
+    /// None: the message names no thread we know (can't be opened).
+    thread: Option<std::borrow::Cow<'a, Thread>>,
+    preview: threads::CardPreview,
+}
+
+/// Height of a thread card (two lines).
+const THREAD_CARD_H: f32 = 58.0;
+/// Width of the card's "›" button.
+const THREAD_CARD_BTN: f32 = 44.0;
+
+/// A thread-created message (type 18) as one bordered card, no line above
+/// it: thread icon in the avatar column, "X started a thread: NAME", the
+/// muted preview line and a tall "›" button. Spans the chat's width.
+/// Returns true on a click on the card or the button.
+fn thread_card(
+    ui: &mut egui::Ui,
+    m: &Message,
+    starter: &str,
+    card: &ThreadCardView,
+    last_name: Option<&str>,
+    config: &Config,
+    pal: &Palette,
+) -> bool {
+    ui.add_space(GROUP_GAP - 7.0);
+    let (row, _) = ui.allocate_exact_size(
+        vec2(ui.available_width(), THREAD_CARD_H + 4.0),
+        egui::Sense::hover(),
+    );
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(row.left() + MSG_PAD, row.top() + 2.0),
+        egui::pos2(
+            (row.right() - MSG_PAD).max(row.left() + MSG_PAD + 120.0),
+            row.bottom() - 2.0,
+        ),
+    );
+    let can_open = card.thread.is_some();
+    let sense = if can_open {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let resp = ui.interact(rect, ui.scope_id().with(("thread_card", &m.id)), sense);
+    let btn = egui::Rect::from_min_max(
+        egui::pos2(rect.right() - THREAD_CARD_BTN, rect.top()),
+        rect.max,
+    );
+    let hovered = can_open && resp.hovered();
+    let over_btn = hovered && resp.hover_pos().is_some_and(|p| btn.contains(p));
+    let painter = ui.painter_at(rect);
+    let radius = theme::corner(8);
+    let border = theme::frame_border(pal);
+    if hovered {
+        painter.rect_filled(rect, radius, pal.msg_hover);
+    }
+    if over_btn {
+        painter.rect_filled(btn.shrink(1.0), 0, pal.hover);
+    }
+    painter.rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(1.0, border),
+        egui::StrokeKind::Inside,
+    );
+    // Thread icon, centred in the avatar column like system lines.
+    painter.text(
+        egui::pos2(rect.left() + MSG_AVATAR / 2.0, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        icons::CHATS,
+        icons::font(22.0),
+        pal.muted,
+    );
+    let x0 = row.left() + MSG_GUTTER;
+    let right = if can_open {
+        btn.left() - 10.0
+    } else {
+        rect.right() - 12.0
+    };
+    let width = (right - x0).max(20.0);
+
+    // Line 1: "X started a thread: NAME" and the time.
+    let name = card
+        .thread
+        .as_ref()
+        .map_or(m.content.as_str(), |t| t.name.as_str());
+    let mut job = egui::text::LayoutJob::default();
+    let bold = egui::TextFormat::simple(theme::bold_font(15.0), pal.strong);
+    let muted = egui::TextFormat::simple(egui::FontId::proportional(15.0), pal.muted);
+    job.append(starter, 0.0, bold.clone());
+    job.append(" started a thread: ", 0.0, muted);
+    job.append(if name.is_empty() { "a thread" } else { name }, 0.0, bold);
+    job.append(
+        &timefmt::full(m.time),
+        8.0,
+        egui::TextFormat::simple(egui::FontId::proportional(12.0), pal.muted),
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width);
+    let line1 = ui.painter().layout_job(job);
+    painter.galley(egui::pos2(x0, rect.top() + 9.0), line1, pal.muted);
+
+    // Line 2: the newest message (avatar, name, snippet) and the count, or
+    // the count and "Open to see messages".
+    let y = rect.bottom() - 17.0;
+    let small = egui::FontId::proportional(13.0);
+    match (&card.preview.last, &card.thread) {
+        (Some(last), _) => {
+            let count = card
+                .preview
+                .count_text()
+                .map(|c| truncated(ui, &c, egui::FontId::proportional(12.0), pal.muted, 120.0));
+            let count_w = count.as_ref().map_or(0.0, |g| g.size().x + 12.0);
+            let who_name = last_name.unwrap_or(&last.author.name);
+            let mut x = x0;
+            let av = egui::Rect::from_center_size(egui::pos2(x + 8.0, y), vec2(16.0, 16.0));
+            if av.right() < right {
+                paint_avatar(
+                    ui,
+                    av,
+                    &last.author.id,
+                    who_name,
+                    &last.author.avatar_url,
+                    config,
+                    pal,
+                );
+            }
+            x += 22.0;
+            let name_w = 160f32.min(((right - count_w - x) * 0.5).max(10.0));
+            let who = truncated(ui, who_name, theme::bold_font(13.0), pal.text, name_w);
+            let w = who.size().x;
+            painter.galley(egui::pos2(x, y - who.size().y / 2.0), who, pal.text);
+            x += w + 6.0;
+            let snippet = truncated(ui, &last.snippet, small, pal.muted, right - count_w - x);
+            painter.galley(
+                egui::pos2(x, y - snippet.size().y / 2.0),
+                snippet,
+                pal.muted,
+            );
+            if let Some(c) = count {
+                let pos = egui::pos2(right - c.size().x, y - c.size().y / 2.0);
+                painter.galley(pos, c, pal.muted);
+            }
+        }
+        (None, thread) => {
+            let text = if thread.is_some() {
+                card.preview.summary()
+            } else {
+                "This thread isn't loaded".to_string()
+            };
+            let g = truncated(ui, &text, small, pal.muted, width);
+            painter.galley(egui::pos2(x0, y - g.size().y / 2.0), g, pal.muted);
+        }
+    }
+
+    // The tall "›" button at the right end.
+    if can_open {
+        painter.vline(
+            btn.left(),
+            egui::Rangef::new(rect.top() + 1.0, rect.bottom() - 1.0),
+            egui::Stroke::new(1.0, border),
+        );
+        painter.text(
+            btn.center(),
+            egui::Align2::CENTER_CENTER,
+            icons::CARET_RIGHT,
+            icons::font(22.0),
+            if over_btn { pal.strong } else { pal.text },
+        );
+        let resp = resp
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Open thread");
+        ui.add_space(2.0);
+        return resp.clicked();
+    }
+    resp.on_hover_text(timefmt::long(m.time));
+    ui.add_space(2.0);
+    false
 }
 
 /// A sticker: its picture (PNG/APNG/GIF, 160 px) or, for Lottie stickers
