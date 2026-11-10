@@ -766,6 +766,8 @@ impl MessagePatch {
 /// Events the backend sends to the UI.
 #[derive(Debug)]
 pub enum ToUi {
+    /// QR code login progress (`remote_auth.rs`, before any session).
+    QrLogin(crate::remote_auth::QrEvent),
     /// GIF picker results for `query` (None = trending).
     Gifs {
         query: Option<String>,
@@ -1051,6 +1053,11 @@ pub enum ToUi {
 /// Requests the UI sends to the backend.
 #[derive(Debug)]
 pub enum ToBackend {
+    /// QR code login: open the remote auth socket (again, for a new code).
+    /// Only the login screen's QR panel sends these, to `remote_auth`.
+    StartQrLogin,
+    /// QR code login: close the remote auth socket.
+    CancelQrLogin,
     LoadHistory {
         channel_id: String,
     },

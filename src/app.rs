@@ -1882,6 +1882,8 @@ impl State {
 
     fn handle_event(&mut self, ev: ToUi, ctx: &egui::Context, config: &Config, focused: bool) {
         match ev {
+            // Only the login screen's QR panel listens for these.
+            ToUi::QrLogin(_) => {}
             ToUi::Status(s) => {
                 if !s.starts_with("Error") {
                     self.connected = false;

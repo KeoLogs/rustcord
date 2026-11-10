@@ -663,6 +663,8 @@ async fn run(
                     .await;
                     Ok(None)
                 }
+                // QR login runs before any session, in remote_auth.rs.
+                ToBackend::StartQrLogin | ToBackend::CancelQrLogin => Ok(None),
             };
             match result {
                 Ok(Some(ev)) => {

@@ -627,6 +627,12 @@ mod tests {
             "tracing::",
             "toast",
             "Status(",
+            // Error text ends up on screen (toasts, the QR panel's
+            // `QrEvent::Failed`).
+            "anyhow!",
+            "bail!",
+            "Failed(",
+            ".context(",
         ];
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
         let mut problems = Vec::new();
@@ -653,9 +659,21 @@ mod tests {
                     pending_derive.clear();
                 }
                 let lower = t.to_ascii_lowercase();
-                let mentions_token = ["{token", "token:?", "token)", ", token", "token.expose"]
-                    .iter()
-                    .any(|p| lower.contains(p));
+                // QR login: the remote-auth ticket and the token's
+                // ciphertext are secrets too.
+                let mentions_token = [
+                    "{token",
+                    "token:?",
+                    "token)",
+                    ", token",
+                    "token.expose",
+                    "{ticket",
+                    "ticket:?",
+                    "{encrypted",
+                    "encrypted:?",
+                ]
+                .iter()
+                .any(|p| lower.contains(p));
                 if mentions_token && SINKS.iter().any(|s| t.contains(s)) {
                     problems.push(format!("{name}:{}: {t}", n + 1));
                 }

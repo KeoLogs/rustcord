@@ -55,6 +55,12 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   its State, so the gateway closes with 1000. `window_ui` wraps each
   account window in `window_frame::begin_pass` / `end_pass` like the main
   window (frame state is per viewport), so its – □ X act on that window only.
+- QR login: `src/remote_auth.rs` (Discord remote auth gateway v2, RSA-OAEP
+  via aws-lc-rs; pure parse/crypto helpers are tested) runs on its own small
+  thread while `src/qr_login.rs` (the login screen's "Scan QR code" panel)
+  is open; dropping the panel closes the socket and frees the QR texture.
+  The token arrives as `ToUi::QrLogin(QrEvent::Token)` and takes the same
+  path as a pasted one. The user always approves on their phone.
 - `src/config.rs` is the saved `Config` incl. `Modules` (on/off optional
   features). A module that's off must do no work and load nothing. New
   optional features should be modules (add to `Modules` + `MODULES`).

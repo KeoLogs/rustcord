@@ -598,6 +598,8 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                 message_id,
             }),
             ToBackend::Typing { .. } => {}
+            // QR login is the login screen's own task (remote_auth.rs).
+            ToBackend::StartQrLogin | ToBackend::CancelQrLogin => {}
             // Nothing to tell Discord offline; log so the flow can be checked.
             ToBackend::Ack {
                 channel_id,

@@ -15,6 +15,8 @@ pub struct LoginForm {
     pub error: Option<String>,
     /// Shown in the "Add an account" dialog: no welcome title, no demo link.
     pub add_account: bool,
+    /// "Scan QR code" panel while it's open (`qr_login.rs`).
+    pub qr: Option<crate::qr_login::QrPanel>,
 }
 
 pub enum LoginAction {
@@ -68,6 +70,29 @@ impl LoginForm {
                 );
             });
             ui.add_space(20.0);
+        }
+
+        // Token paste or QR code (user accounts; see qr_login.rs).
+        ui.horizontal(|ui| {
+            if ui.selectable_label(self.qr.is_none(), "Token").clicked() {
+                self.qr = None;
+            }
+            let qr_tab = format!("{} Scan QR code", crate::icons::QR_CODE);
+            if ui.selectable_label(self.qr.is_some(), qr_tab).clicked() && self.qr.is_none() {
+                self.qr = Some(crate::qr_login::QrPanel::open(ui.ctx()));
+            }
+        });
+        ui.add_space(10.0);
+        if let Some(qr) = &mut self.qr {
+            if let Some(token) = qr.ui(ui, pal) {
+                action = Some(LoginAction::Login {
+                    token,
+                    remember: self.remember,
+                });
+            }
+            ui.add_space(10.0);
+            ui.checkbox(&mut self.remember, "Remember me on this PC");
+            return action;
         }
 
         ui.horizontal(|ui| {
