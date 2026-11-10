@@ -19,7 +19,7 @@ use crate::friends::{
     FriendsAction, FriendsCtx, FriendsPage, MessageRequestsPage, Outcome, RelationshipStore,
     RequestAction, RequestStore, RequestsCtx,
 };
-use crate::gif_picker::{GifAction, GifPicker};
+use crate::gif_picker::{Gif, GifAction, GifPicker};
 use crate::home::{self, HomeAction, HomeCtx, HomeSelected, HomeState};
 use crate::invites::{self, AddServerAction, AddServerDialog, CardCtx, InviteAction, InviteCache};
 use crate::layout::{self, HostState, LAYOUT_KEY, LayoutBehavior, Pane};
@@ -405,6 +405,9 @@ fn apply_config_updates(config: &mut Config, state: &mut State) {
             ConfigUpdate::Compact(c) => config.compact_messages = c,
             ConfigUpdate::RecentEmoji(e) => config.recent_emoji.record(&e),
             ConfigUpdate::SkinTone(t) => config.skin_tone = t.min(5),
+            ConfigUpdate::FavouriteGif(g) => {
+                crate::gif_picker::toggle_favourite(&mut config.favourite_gifs, &g)
+            }
         }
     }
 }
@@ -788,6 +791,8 @@ pub enum ConfigUpdate {
     RecentEmoji(EmojiRef),
     /// Changed the emoji picker's skin tone.
     SkinTone(u8),
+    /// Clicked a GIF's star: add to / remove from Favourites.
+    FavouriteGif(Gif),
 }
 
 // --- reactions ---
@@ -951,6 +956,9 @@ pub struct State {
     show_shortcuts: bool,
     /// GIF picker popup (GIF picker module) and its button's rect.
     gif_picker: Option<(GifPicker, egui::Rect)>,
+    /// Demo mode only (`RUSTCORD_DEMO_OPEN=gifs…`): open the GIF picker on
+    /// this tab.
+    demo_gifs: Option<crate::gif_picker::Tab>,
     /// Emoji button's rect while the emoji picker is open (placeholder until
     /// the real picker lands).
     /// The composer's emoji picker popup was open last frame.
@@ -1097,6 +1105,7 @@ impl State {
             pending_spoilers: HashSet::new(),
             show_shortcuts: false,
             gif_picker: None,
+            demo_gifs: None,
             emoji_picker_open: false,
             demo_picker: false,
             emoji_groups: None,
@@ -3438,6 +3447,22 @@ impl State {
                 global: false,
             }),
             "picker" => self.demo_picker = true,
+            // GIF picker: results with two starred, the Favourites tab, or
+            // its empty state.
+            "gifs" | "gifs-fav" | "gifs-fav-empty" => {
+                use crate::gif_picker::Tab;
+                if view != "gifs-fav-empty" && config.favourite_gifs.is_empty() {
+                    let demo = crate::gif_picker::demo_results(None).gifs;
+                    for g in demo.into_iter().take(3).rev() {
+                        self.config_updates.push(ConfigUpdate::FavouriteGif(g));
+                    }
+                }
+                self.demo_gifs = Some(if view == "gifs" {
+                    Tab::Gifs
+                } else {
+                    Tab::Favourites
+                });
+            }
             // Ctrl+V with an image (a generated one, saved like a real paste).
             "paste" => {
                 let (w, h) = (480, 270);
@@ -5439,7 +5464,8 @@ impl State {
                                     24.0,
                                     pal,
                                 );
-                                if gif.clicked() {
+                                let demo = !open && self.demo_gifs.is_some();
+                                if gif.clicked() || demo {
                                     composer_action =
                                         Some(ComposerAction::ToggleGifPicker(gif.rect));
                                 }
@@ -5616,7 +5642,11 @@ impl State {
                 if let Some((picker, _)) = self.gif_picker.take() {
                     picker.free(ui.ctx());
                 } else {
-                    self.gif_picker = Some((GifPicker::default(), anchor));
+                    let mut picker = GifPicker::default();
+                    if let Some(tab) = self.demo_gifs.take() {
+                        picker.tab = tab;
+                    }
+                    self.gif_picker = Some((picker, anchor));
                 }
             }
             None => {}
@@ -6342,7 +6372,13 @@ impl State {
             p.free(ctx);
         }
         if let Some((picker, anchor)) = &mut self.gif_picker {
-            match picker.show(ctx, *anchor, config.modules.images, pal) {
+            match picker.show(
+                ctx,
+                *anchor,
+                config.modules.images,
+                &config.favourite_gifs,
+                pal,
+            ) {
                 Some(GifAction::Load(query)) => {
                     let _ = self.tx.send(ToBackend::LoadGifs { query });
                 }
@@ -6361,6 +6397,10 @@ impl State {
                     if let Some((p, _)) = self.gif_picker.take() {
                         p.free(ctx);
                     }
+                }
+                Some(GifAction::ToggleFavourite(gif)) => {
+                    // Saved locally, and only because the star was clicked.
+                    self.config_updates.push(ConfigUpdate::FavouriteGif(gif));
                 }
                 Some(GifAction::Close) => {
                     if let Some((p, _)) = self.gif_picker.take() {

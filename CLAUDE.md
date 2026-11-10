@@ -87,6 +87,9 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   `api.gifs` (Discord's `/gifs/trending` and `/gifs/search`, Tenor) →
   `ToUi::Gifs`. Textures are freed when the popup closes. The emoji button
   is a hook (`ComposerAction::OpenEmojiPicker`) for `src/emoji_picker.rs`.
+  Favourites: the star on each GIF (`GifAction::ToggleFavourite` →
+  `ConfigUpdate::FavouriteGif`) edits `Config::favourite_gifs` (local only,
+  no settings-proto sync); the Favourites tab lists them.
   Careful: never call `ui`/`ctx` methods inside a `ctx.memory(|m| …)`
   closure — it deadlocks the UI thread.
 - Paste media: `src/paste.rs`. Ctrl+V in the focused message box with an

@@ -17,17 +17,23 @@
 //! hovered GIF is animated; every texture is freed when the popup closes
 //! (`GifPicker::free`). Picking a GIF sends its link like Discord does
 //! (an explicit click by the user).
+//!
+//! Favourites: the star on each GIF adds it to (or removes it from)
+//! `Config::favourite_gifs`, shown in the Favourites tab. They are only
+//! saved locally, and only when the star is clicked (no settings sync).
 
 use std::collections::HashSet;
 
-use eframe::egui::{self, RichText, vec2};
+use eframe::egui::{self, Color32, RichText, vec2};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::icons;
 use crate::theme::{Bold, Palette};
 
-/// One GIF.
-#[derive(Debug, Clone, PartialEq)]
+/// One GIF (also what a favourite saves).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Gif {
     /// Link that goes into the message (Tenor page; Discord embeds it).
     pub url: String,
@@ -109,7 +115,27 @@ pub enum GifAction {
     Load(Option<String>),
     /// Send this GIF link.
     Pick(String),
+    /// Star clicked: add to / remove from Favourites.
+    ToggleFavourite(Gif),
     Close,
+}
+
+/// The picker's tabs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Tab {
+    /// Trending / search results.
+    #[default]
+    Gifs,
+    Favourites,
+}
+
+/// Star / unstar `gif` (matched by its link); new favourites go first.
+pub fn toggle_favourite(list: &mut Vec<Gif>, gif: &Gif) {
+    if let Some(i) = list.iter().position(|g| g.url == gif.url) {
+        list.remove(i);
+    } else {
+        list.insert(0, gif.clone());
+    }
 }
 
 /// Popup state. Dropped (after `free`) when closed.
@@ -121,6 +147,7 @@ pub struct GifPicker {
     pub results: GifResults,
     pub loading: bool,
     pub error: Option<String>,
+    pub tab: Tab,
     /// Image URIs drawn so far, freed on close.
     uris: HashSet<String>,
     /// Query typed but not sent yet (sent after a short pause).
@@ -157,10 +184,11 @@ impl GifPicker {
         ctx: &egui::Context,
         anchor: egui::Rect,
         images: bool,
+        favourites: &[Gif],
         pal: &Palette,
     ) -> Option<GifAction> {
         let mut action = None;
-        if self.shown.is_none() && !self.loading {
+        if self.tab == Tab::Gifs && self.shown.is_none() && !self.loading {
             self.loading = true;
             action = Some(GifAction::Load(None));
         }
@@ -190,6 +218,8 @@ impl GifPicker {
                     let now = ui.input(|i| i.time);
                     if edit.changed() {
                         self.typed_at = Some(now);
+                        // Searching shows results, not favourites.
+                        self.tab = Tab::Gifs;
                     }
                     // Search after a short pause (or Enter), not every key.
                     let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -208,8 +238,42 @@ impl GifPicker {
                         }
                     }
                     ui.add_space(6.0);
-                    if let Some(a) = self.grid(ui, images, pal) {
-                        action = Some(a);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for (tab, icon, label) in [
+                            (Tab::Gifs, icons::GIF, "GIFs"),
+                            (Tab::Favourites, icons::STAR, "Favourites"),
+                        ] {
+                            if tab_button(ui, icon, label, self.tab == tab, pal).clicked() {
+                                self.tab = tab;
+                            }
+                        }
+                    });
+                    ui.add_space(6.0);
+                    let a = match self.tab {
+                        Tab::Gifs => self.grid(ui, images, favourites, pal),
+                        Tab::Favourites if favourites.is_empty() => {
+                            empty_favourites(ui, pal);
+                            None
+                        }
+                        Tab::Favourites => {
+                            egui::ScrollArea::vertical()
+                                .auto_shrink(false)
+                                .show(ui, |ui| {
+                                    gif_grid(
+                                        ui,
+                                        favourites,
+                                        favourites,
+                                        &mut self.uris,
+                                        images,
+                                        pal,
+                                    )
+                                })
+                                .inner
+                        }
+                    };
+                    if a.is_some() {
+                        action = a;
                     }
                 });
             });
@@ -226,7 +290,13 @@ impl GifPicker {
         action
     }
 
-    fn grid(&mut self, ui: &mut egui::Ui, images: bool, pal: &Palette) -> Option<GifAction> {
+    fn grid(
+        &mut self,
+        ui: &mut egui::Ui,
+        images: bool,
+        favourites: &[Gif],
+        pal: &Palette,
+    ) -> Option<GifAction> {
         let mut action = None;
         if let Some(e) = &self.error {
             ui.label(RichText::new(format!("Couldn't load GIFs: {e}")).color(pal.danger));
@@ -268,70 +338,179 @@ impl GifPicker {
                     ui.label(RichText::new("No GIFs found").color(pal.muted));
                     return;
                 }
-                // Two columns, each GIF keeps its aspect ratio.
-                let col_w = (ui.available_width() - 8.0) / 2.0;
-                let mut cols = [Vec::new(), Vec::new()];
-                let mut heights = [0.0f32, 0.0];
-                for g in &self.results.gifs {
-                    let h = if g.width > 0.0 && g.height > 0.0 {
-                        (col_w * g.height / g.width).clamp(60.0, 260.0)
-                    } else {
-                        col_w * 0.75
-                    };
-                    let c = if heights[0] <= heights[1] { 0 } else { 1 };
-                    heights[c] += h + 8.0;
-                    cols[c].push((g, h));
+                if let Some(a) = gif_grid(
+                    ui,
+                    &self.results.gifs,
+                    favourites,
+                    &mut self.uris,
+                    images,
+                    pal,
+                ) {
+                    action = Some(a);
                 }
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                    for col in &cols {
-                        ui.vertical(|ui| {
-                            ui.set_width(col_w);
-                            for (g, h) in col {
-                                let (rect, resp) =
-                                    ui.allocate_exact_size(vec2(col_w, *h), egui::Sense::click());
-                                if !ui.is_rect_visible(rect) {
-                                    continue;
-                                }
-                                ui.painter().rect_filled(rect, 6, pal.input);
-                                let hovered = resp.hovered();
-                                if images {
-                                    let uri = if hovered { &g.gif } else { &g.preview };
-                                    self.uris.insert(uri.clone());
-                                    egui::Image::from_uri(uri.as_str())
-                                        .corner_radius(6)
-                                        .show_loading_spinner(false)
-                                        .paint_at(ui, rect);
-                                } else {
-                                    ui.painter().text(
-                                        rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        icons::GIF,
-                                        icons::font(28.0),
-                                        pal.muted,
-                                    );
-                                }
-                                if hovered {
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        6,
-                                        egui::Stroke::new(2.0, pal.accent),
-                                        egui::StrokeKind::Inside,
-                                    );
-                                }
-                                let resp = resp
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    .on_hover_text("Click to send");
-                                if resp.clicked() {
-                                    action = Some(GifAction::Pick(g.url.clone()));
-                                }
-                            }
-                        });
-                    }
-                });
             });
         action
     }
+}
+
+/// A tab in the picker header (icon + label, filled when selected).
+fn tab_button(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    selected: bool,
+    pal: &Palette,
+) -> egui::Response {
+    let col = if selected { pal.strong } else { pal.muted };
+    let button = egui::Button::new(
+        RichText::new(format!("{icon}  {label}"))
+            .size(13.0)
+            .color(col),
+    )
+    .corner_radius(4)
+    .min_size(vec2(0.0, 26.0));
+    let button = if selected {
+        button.fill(pal.selected)
+    } else {
+        button.frame(false)
+    };
+    ui.add(button)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Favourites tab with nothing starred yet.
+fn empty_favourites(ui: &mut egui::Ui, pal: &Palette) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(ui.available_height() * 0.25);
+        ui.label(RichText::new(icons::STAR).size(40.0).color(pal.muted));
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("No favourite GIFs yet")
+                .bold()
+                .size(15.0)
+                .color(pal.strong),
+        );
+        ui.add_space(2.0);
+        ui.label(
+            RichText::new("Click the star on any GIF to keep it here.")
+                .size(13.0)
+                .color(pal.muted),
+        );
+    });
+}
+
+/// Two columns of GIFs (each keeps its aspect ratio), with a star in the
+/// corner of each: shown on hover, always shown (filled) for favourites.
+fn gif_grid(
+    ui: &mut egui::Ui,
+    gifs: &[Gif],
+    favourites: &[Gif],
+    uris: &mut HashSet<String>,
+    images: bool,
+    pal: &Palette,
+) -> Option<GifAction> {
+    let mut action = None;
+    let col_w = ((ui.available_width() - 8.0) / 2.0).max(40.0);
+    let mut cols = [Vec::new(), Vec::new()];
+    let mut heights = [0.0f32, 0.0];
+    for g in gifs {
+        let h = if g.width > 0.0 && g.height > 0.0 {
+            (col_w * g.height / g.width).clamp(60.0, 260.0)
+        } else {
+            col_w * 0.75
+        };
+        let c = if heights[0] <= heights[1] { 0 } else { 1 };
+        heights[c] += h + 8.0;
+        cols[c].push((g, h));
+    }
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+        for col in &cols {
+            ui.vertical(|ui| {
+                ui.set_width(col_w);
+                for (g, h) in col {
+                    let (rect, resp) =
+                        ui.allocate_exact_size(vec2(col_w, *h), egui::Sense::click());
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
+                    ui.painter().rect_filled(rect, 6, pal.input);
+                    // The star sits on top, so ask the pointer, not `resp`.
+                    let hovered = ui.rect_contains_pointer(rect);
+                    if images {
+                        let uri = if hovered { &g.gif } else { &g.preview };
+                        uris.insert(uri.clone());
+                        egui::Image::from_uri(uri.as_str())
+                            .corner_radius(6)
+                            .show_loading_spinner(false)
+                            .paint_at(ui, rect);
+                    } else {
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            icons::GIF,
+                            icons::font(28.0),
+                            pal.muted,
+                        );
+                    }
+                    if hovered {
+                        ui.painter().rect_stroke(
+                            rect,
+                            6,
+                            egui::Stroke::new(2.0, pal.accent),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    let resp = resp
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Click to send");
+                    if resp.clicked() {
+                        action = Some(GifAction::Pick(g.url.clone()));
+                    }
+                    let fav = favourites.iter().any(|f| f.url == g.url);
+                    if (hovered || fav) && star(ui, rect, &g.url, fav, pal) {
+                        action = Some(GifAction::ToggleFavourite((*g).clone()));
+                    }
+                }
+            });
+        }
+    });
+    action
+}
+
+/// The favourite star in a GIF's top-right corner. Returns clicked.
+fn star(ui: &mut egui::Ui, tile: egui::Rect, url: &str, fav: bool, pal: &Palette) -> bool {
+    let size = 26.0;
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(tile.right() - size - 6.0, tile.top() + 6.0),
+        vec2(size, size),
+    );
+    let resp = ui.interact(
+        rect,
+        ui.scope_id().with(("rc_gif_star", url)),
+        egui::Sense::click(),
+    );
+    // A dark disc so the star reads on any GIF (it sits on the picture,
+    // not on a theme surface).
+    let alpha = if resp.hovered() { 200 } else { 150 };
+    ui.painter()
+        .circle_filled(rect.center(), size / 2.0, Color32::from_black_alpha(alpha));
+    let (font, col) = if fav {
+        (icons::fill_font(16.0), pal.idle)
+    } else if resp.hovered() {
+        (icons::font(16.0), pal.idle)
+    } else {
+        (icons::font(16.0), Color32::WHITE)
+    };
+    icons::paint(ui, rect, icons::STAR, font, col);
+    let tip = if fav {
+        "Remove from Favourites"
+    } else {
+        "Add to Favourites"
+    };
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tip)
+        .clicked()
 }
 
 /// Percent-encode a search query for a URL.
@@ -427,6 +606,26 @@ mod tests {
     fn encodes_queries() {
         assert_eq!(url_encode("thumbs up"), "thumbs%20up");
         assert_eq!(url_encode("a&b=ç"), "a%26b%3D%C3%A7");
+    }
+
+    #[test]
+    fn toggles_favourites() {
+        let gifs = demo_results(None).gifs;
+        let mut favs = Vec::new();
+        toggle_favourite(&mut favs, &gifs[0]);
+        toggle_favourite(&mut favs, &gifs[1]);
+        // Newest first.
+        assert_eq!(favs, vec![gifs[1].clone(), gifs[0].clone()]);
+        toggle_favourite(&mut favs, &gifs[1]);
+        assert_eq!(favs, vec![gifs[0].clone()]);
+    }
+
+    #[test]
+    fn partial_favourites_load() {
+        // A favourite saved without some fields still loads.
+        let g: Gif = serde_json::from_str(r#"{"url":"u","gif":"g"}"#).unwrap();
+        assert_eq!(g.url, "u");
+        assert_eq!(g.preview, "");
     }
 
     #[test]

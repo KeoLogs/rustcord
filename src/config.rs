@@ -71,6 +71,10 @@ pub struct Config {
     /// Emoji picker skin tone (0 = default, 1-5 light to dark).
     #[serde(default)]
     pub skin_tone: u8,
+    /// GIF picker favourites (newest first). Local only, changed only by
+    /// clicking a GIF's star.
+    #[serde(default)]
+    pub favourite_gifs: Vec<crate::gif_picker::Gif>,
 }
 
 impl Default for Config {
@@ -99,6 +103,7 @@ impl Default for Config {
             bot_member_intents: false,
             recent_emoji: Default::default(),
             skin_tone: 0,
+            favourite_gifs: Vec::new(),
         }
     }
 }
@@ -462,6 +467,8 @@ mod tests {
         assert!(c.modules.reactions);
         assert_eq!(c.custom_theme, None);
         assert!(c.modules.custom_themes);
+        // Favourite GIFs came later: none yet.
+        assert!(c.favourite_gifs.is_empty());
     }
 
     #[test]
