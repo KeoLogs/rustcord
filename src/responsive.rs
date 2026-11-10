@@ -13,10 +13,6 @@
 //! Nothing here touches egui state; the panel host (side panels today, a
 //! frame or viewport later) only reads the [`Responsive`] it returns.
 
-// The panel host (rustcord-ui, next on this branch) calls most of this; until
-// then only the tests do. Remove this allow once it's wired.
-#![allow(dead_code)]
-
 use crate::layout_v3::{Column, LayoutV3, RailStyle, UserPanelDock};
 
 /// Min / default / max of one pane dimension, in logical points.
@@ -55,8 +51,6 @@ pub const ASIDE: PaneSize = PaneSize::new(240.0, 200.0, 320.0);
 pub const USER_PANEL_HEIGHT: f32 = 52.0;
 /// Chat column header height.
 pub const CHAT_HEADER_HEIGHT: f32 = 48.0;
-/// Typing line height (always reserved).
-pub const TYPING_LINE_HEIGHT: f32 = 20.0;
 /// Composer: 44 high with one line, grows up to 40% of the chat column.
 pub const COMPOSER_MIN_HEIGHT: f32 = 44.0;
 pub const COMPOSER_MAX_FRACTION: f32 = 0.4;

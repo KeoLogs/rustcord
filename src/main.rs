@@ -18,6 +18,7 @@ mod http_error;
 mod icons;
 mod invites;
 mod layout;
+mod layout_editor;
 mod layout_presets;
 mod layout_v3;
 mod links;

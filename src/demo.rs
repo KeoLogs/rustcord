@@ -945,11 +945,19 @@ fn sample_values(channel_id: &str) -> Vec<Value> {
             "@You did you see the unread badges?",
             json!({ "mentions": [me] }),
         ),
-        msg(
-            &sam,
-            "here's the build log",
-            json!({ "attachments": [{ "url": "https://example.com/build.log", "filename": "build.log", "size": 20480, "content_type": "text/plain" }] }),
-        ),
+        if channel_id == "401" {
+            msg(
+                &alex,
+                "look at this",
+                json!({ "attachments": [{ "url": "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg", "proxy_url": "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg", "filename": "big.jpg", "content_type": "image/jpeg", "width": 1280, "height": 720, "size": 120000 }] }),
+            )
+        } else {
+            msg(
+                &sam,
+                "here's the build log",
+                json!({ "attachments": [{ "url": "https://example.com/build.log", "filename": "build.log", "size": 20480, "content_type": "text/plain" }] }),
+            )
+        },
     ]
 }
 

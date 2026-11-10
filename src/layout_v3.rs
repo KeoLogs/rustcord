@@ -22,10 +22,6 @@
 //! - [`export`] / [`import`]: shareable JSON; old v1 (tree) exports still
 //!   import and are migrated. Everything goes through [`LayoutV3::sanitize`].
 
-// The panel host (rustcord-ui, next on this branch) calls most of this; until
-// then only the tests do. Remove this allow once it's wired.
-#![allow(dead_code)]
-
 use anyhow::{Context as _, Result, bail};
 use eframe::egui::{Rect, pos2};
 use egui_tiles::{Container, LinearDir, Tile, TileId, Tree};

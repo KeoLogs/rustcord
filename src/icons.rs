@@ -113,6 +113,8 @@ pub const WIFI_SLASH: &str = "\u{E4F2}";
 pub const LOCK: &str = "\u{E308}";
 pub const ENVELOPE: &str = "\u{E218}";
 pub const SQUARES_FOUR: &str = "\u{E464}";
+/// Hamburger: opens the left drawer on narrow windows.
+pub const LIST: &str = "\u{E2F0}";
 
 /// Paint `icon` centred in `rect`.
 pub fn paint(ui: &egui::Ui, rect: egui::Rect, icon: &str, font: FontId, color: egui::Color32) {

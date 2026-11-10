@@ -6,8 +6,9 @@
 //!   `layout::default_tree()` uses (every pane wrapped in a `Tabs`
 //!   container, shares on the linear containers).
 //! - [`preset_picker`]: a row of cards with a small vector schematic of each
-//!   preset. Returns the preset the user clicked; the caller replaces the
-//!   tree. [`paint_preview`] draws the same schematic for any tree (e.g. an
+//!   preset (as a `layout_v3::LayoutV3`). Returns the preset the user
+//!   clicked; the caller swaps in `LayoutV3::from_preset`. [`paint_preview`]
+//!   draws the same schematic for any v3 layout (the current one, an
 //!   imported one).
 //! - [`detect`]: which preset (if any) a tree still is, so the picker can
 //!   highlight it. Hidden panels are ignored (the Members button only hides
@@ -24,11 +25,13 @@
 use std::collections::HashSet;
 
 use anyhow::{Context as _, Result, bail};
-use eframe::egui::{self, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use eframe::egui::{self, Color32, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 use egui_tiles::{Container, LinearDir, Tile, TileId, Tiles, Tree};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::Pane;
+use crate::layout_v3::{Column, LayoutV3, UserPanelDock};
+use crate::responsive::{self, UserPanelSpot};
 use crate::theme::{Palette, bold_font};
 
 /// The tree id `layout::default_tree()` uses. Every tree built or imported
@@ -335,6 +338,7 @@ pub const MAX_IMPORT_BYTES: usize = 64 * 1024;
 /// More tiles than this can't come from a real layout of six panels.
 const MAX_TILES: usize = 64;
 
+#[cfg(test)]
 #[derive(Serialize)]
 struct ExportDoc<'a> {
     format: &'a str,
@@ -350,6 +354,7 @@ struct ImportDoc {
 }
 
 /// The layout as pretty JSON, for copying to the clipboard / a file.
+#[cfg(test)]
 pub fn export(tree: &Tree<Pane>) -> String {
     let doc = ExportDoc {
         format: EXPORT_FORMAT,
@@ -485,108 +490,95 @@ pub enum PreviewPart {
     },
 }
 
-/// Lay out `tree` inside `rect` like egui_tiles would (shares, visibility,
-/// active tabs), without any UI. Hidden panels get no space.
-pub fn schematic(tree: &Tree<Pane>, rect: Rect) -> Vec<(PreviewPart, Rect)> {
+/// Window size the schematic is laid out at (then scaled into the rect):
+/// wide enough that every column is docked and the rail may show names.
+const PREVIEW_WINDOW: Vec2 = vec2(1280.0, 800.0);
+
+/// Lay out `layout` inside `rect` like the column host would at a 1280×800
+/// window (docked columns, user panel, stacked tabs, composer), without any
+/// UI. Hidden columns get no space; the parts tile `rect` exactly.
+pub fn schematic(layout: &LayoutV3, rect: Rect) -> Vec<(PreviewPart, Rect)> {
+    let r = responsive::compute(layout, PREVIEW_WINDOW.x, None);
+    let sx = rect.width() / PREVIEW_WINDOW.x;
+    let sy = rect.height() / PREVIEW_WINDOW.y;
+    // The 52 px user panel and composer would be slivers at preview size.
+    let user_h = (responsive::USER_PANEL_HEIGHT * sy).max(rect.height() * 0.1);
+    let composer_h = (64.0 * sy).max(rect.height() * 0.12);
+    let tabs_h = (40.0 * sy).max(rect.height() * 0.08);
+
     let mut out = Vec::new();
-    if let Some(root) = tree.root
-        && tree.tiles.is_visible_in_layout(root)
-    {
-        schematic_tile(tree, root, rect, 0, &mut out);
+    let mut x = rect.left();
+    let mut cols: Vec<(Column, Rect)> = Vec::new();
+    for (i, &(c, w)) in r.row.iter().enumerate() {
+        // The last column takes the rest (no rounding gap).
+        let right = if i + 1 == r.row.len() {
+            rect.right()
+        } else {
+            x + w * sx
+        };
+        cols.push((c, Rect::from_x_y_ranges(x..=right, rect.y_range())));
+        x = right;
+    }
+    // The user panel's x range: under its dock column(s).
+    let dock_cols: &[Column] = match r.user_panel {
+        UserPanelSpot::Docked(UserPanelDock::RailAndSidebar) => &[Column::Rail, Column::Sidebar],
+        UserPanelSpot::Docked(UserPanelDock::Sidebar) => &[Column::Sidebar],
+        UserPanelSpot::Docked(UserPanelDock::Rail) => &[Column::Rail],
+        UserPanelSpot::Docked(UserPanelDock::Aside) => &[Column::Aside],
+        UserPanelSpot::LeftDrawer => &[],
+    };
+    let mut user_x: Option<(f32, f32)> = None;
+    for &(c, cr) in &cols {
+        if dock_cols.contains(&c) {
+            user_x = Some(match user_x {
+                Some((a, b)) => (a.min(cr.left()), b.max(cr.right())),
+                None => (cr.left(), cr.right()),
+            });
+        }
+    }
+    let user_top = rect.bottom() - user_h;
+    for (c, cr) in cols {
+        let mut body = cr;
+        if dock_cols.contains(&c) && user_x.is_some() {
+            body.max.y = user_top;
+        }
+        match c {
+            Column::Rail => out.push((PreviewPart::Pane(Pane::Servers), body)),
+            Column::Sidebar if r.stacked => {
+                let (bar, rest) = body.split_top_bottom_at_y(body.top() + tabs_h);
+                out.push((
+                    PreviewPart::TabBar {
+                        count: 2,
+                        active: 1,
+                    },
+                    bar,
+                ));
+                out.push((PreviewPart::Pane(Pane::Channels), rest));
+            }
+            Column::Sidebar => out.push((PreviewPart::Pane(Pane::Channels), body)),
+            Column::Aside => out.push((PreviewPart::Pane(Pane::Members), body)),
+            Column::Chat => {
+                let (msgs, comp) = body.split_top_bottom_at_y(body.bottom() - composer_h);
+                out.push((PreviewPart::Pane(Pane::Messages), msgs));
+                out.push((PreviewPart::Pane(Pane::Composer), comp));
+            }
+        }
+    }
+    if let Some((a, b)) = user_x {
+        out.push((
+            PreviewPart::Pane(Pane::Profile),
+            Rect::from_x_y_ranges(a..=b, user_top..=rect.bottom()),
+        ));
     }
     out
 }
 
-fn schematic_tile(
-    tree: &Tree<Pane>,
-    id: TileId,
-    rect: Rect,
-    depth: usize,
-    out: &mut Vec<(PreviewPart, Rect)>,
-) {
-    if depth > MAX_DEPTH {
-        return;
-    }
-    let tiles = &tree.tiles;
-    match tiles.get(id) {
-        Some(Tile::Pane(p)) => out.push((PreviewPart::Pane(*p), rect)),
-        Some(Tile::Container(Container::Tabs(tabs))) => {
-            let visible: Vec<TileId> = tabs
-                .children
-                .iter()
-                .copied()
-                .filter(|&c| tiles.is_visible_in_layout(c))
-                .collect();
-            let Some(&first) = visible.first() else {
-                return;
-            };
-            let shown = tabs.active.filter(|a| visible.contains(a)).unwrap_or(first);
-            let mut body = rect;
-            if visible.len() > 1 {
-                let bar_h = (rect.height() * 0.08).clamp(4.0, 24.0);
-                let (bar, rest) = rect.split_top_bottom_at_y(rect.top() + bar_h);
-                let active = visible.iter().position(|&c| c == shown).unwrap_or(0);
-                out.push((
-                    PreviewPart::TabBar {
-                        count: visible.len(),
-                        active,
-                    },
-                    bar,
-                ));
-                body = rest;
-            }
-            schematic_tile(tree, shown, body, depth + 1, out);
-        }
-        Some(Tile::Container(Container::Linear(linear))) => {
-            let visible: Vec<TileId> = linear
-                .children
-                .iter()
-                .copied()
-                .filter(|&c| tiles.is_visible_in_layout(c))
-                .collect();
-            let horizontal = linear.dir == LinearDir::Horizontal;
-            let total = if horizontal {
-                rect.width()
-            } else {
-                rect.height()
-            };
-            let sizes = linear.shares.split(&visible, total);
-            let mut pos = if horizontal { rect.left() } else { rect.top() };
-            for (child, size) in visible.into_iter().zip(sizes) {
-                let r = if horizontal {
-                    Rect::from_x_y_ranges(pos..=pos + size, rect.y_range())
-                } else {
-                    Rect::from_x_y_ranges(rect.x_range(), pos..=pos + size)
-                };
-                pos += size;
-                schematic_tile(tree, child, r, depth + 1, out);
-            }
-        }
-        // Grids never come out of `build` or `sanitize`; draw them as a row.
-        Some(Tile::Container(Container::Grid(grid))) => {
-            let visible: Vec<TileId> = grid
-                .children()
-                .copied()
-                .filter(|&c| tiles.is_visible_in_layout(c))
-                .collect();
-            let n = visible.len().max(1) as f32;
-            let w = rect.width() / n;
-            for (i, child) in visible.into_iter().enumerate() {
-                let x = rect.left() + w * i as f32;
-                let r = Rect::from_x_y_ranges(x..=x + w, rect.y_range());
-                schematic_tile(tree, child, r, depth + 1, out);
-            }
-        }
-        None => {}
-    }
-}
-
-/// Draw a small vector schematic of `tree` into `rect`: each panel in its
+/// Draw a small vector schematic of `layout` into `rect`: each column in its
 /// real background colour with a few shapes hinting at its content.
-pub fn paint_preview(painter: &egui::Painter, pal: &Palette, tree: &Tree<Pane>, rect: Rect) {
+pub fn paint_preview(painter: &egui::Painter, pal: &Palette, layout: &LayoutV3, rect: Rect) {
     let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
     painter.rect_filled(rect, 4, pal.servers);
-    for (part, r) in schematic(tree, rect) {
+    for (part, r) in schematic(layout, rect) {
         match part {
             PreviewPart::Pane(pane) => paint_pane(&painter, pal, pane, r),
             PreviewPart::TabBar { count, active } => paint_tab_bar(&painter, pal, r, count, active),
@@ -826,8 +818,8 @@ const PREVIEW_H: f32 = 104.0;
 const CARD_H: f32 = 208.0;
 
 /// A wrapping row of preset cards with schematic previews. `current` is
-/// highlighted (use [`detect`] on the live tree). Returns the preset the
-/// user clicked; the caller swaps in [`build`]`(preset)` and saves it.
+/// highlighted (`LayoutV3::detect` on the live layout). Returns the preset
+/// the user clicked; the caller swaps in `LayoutV3::from_preset` and saves it.
 pub fn preset_picker(ui: &mut egui::Ui, pal: &Palette, current: Option<Preset>) -> Option<Preset> {
     let mut picked = None;
     ui.horizontal_wrapped(|ui| {
@@ -880,7 +872,7 @@ fn preset_card(
         rect.min + vec2(CARD_PAD, CARD_PAD),
         vec2(CARD_W - 2.0 * CARD_PAD, PREVIEW_H),
     );
-    paint_preview(&painter, pal, &build(info.preset), preview);
+    paint_preview(&painter, pal, &LayoutV3::from_preset(info.preset), preview);
 
     let text_w = CARD_W - 2.0 * CARD_PAD;
     let mut y = preview.bottom() + 8.0;
@@ -998,9 +990,14 @@ mod tests {
     #[test]
     fn compact_hides_members_and_wide_chat_stacks_tabs() {
         let compact = build(Preset::Compact);
-        assert!(!crate::layout::pane_visible(&compact, Pane::Members));
+        assert!(
+            compact
+                .tiles
+                .find_pane(&Pane::Members)
+                .is_some_and(|id| !compact.tiles.is_visible(id))
+        );
         let parts = schematic(
-            &compact,
+            &LayoutV3::from_preset(Preset::Compact),
             Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 600.0)),
         );
         assert!(!parts.contains(&(PreviewPart::Pane(Pane::Members), Rect::NOTHING)));
@@ -1010,16 +1007,15 @@ mod tests {
                 .all(|(p, _)| *p != PreviewPart::Pane(Pane::Members))
         );
 
-        let wide = build(Preset::WideChat);
         let parts = schematic(
-            &wide,
+            &LayoutV3::from_preset(Preset::WideChat),
             Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 600.0)),
         );
         assert!(parts.iter().any(|(p, _)| matches!(
             p,
             PreviewPart::TabBar {
                 count: 2,
-                active: 0
+                active: 1
             }
         )));
         // Servers is the inactive tab, so it isn't drawn.
@@ -1034,7 +1030,7 @@ mod tests {
     fn schematic_tiles_the_whole_rect_without_overlap() {
         let rect = Rect::from_min_size(pos2(10.0, 20.0), vec2(800.0, 500.0));
         for p in Preset::ALL {
-            let parts = schematic(&build(p), rect);
+            let parts = schematic(&LayoutV3::from_preset(p), rect);
             let area: f32 = parts.iter().map(|(_, r)| r.area()).sum();
             assert!(
                 (area - rect.area()).abs() < 1.0,
@@ -1057,7 +1053,7 @@ mod tests {
     #[test]
     fn messenger_matches_the_classic_arrangement() {
         let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 600.0));
-        let parts = schematic(&build(Preset::Messenger), rect);
+        let parts = schematic(&LayoutV3::from_preset(Preset::Messenger), rect);
         let at = |pane| {
             parts
                 .iter()
