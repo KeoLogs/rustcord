@@ -89,6 +89,13 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   is a hook (`ComposerAction::OpenEmojiPicker`) for `src/emoji_picker.rs`.
   Careful: never call `ui`/`ctx` methods inside a `ctx.memory(|m| …)`
   closure — it deadlocks the UI thread.
+- Paste media: `src/paste.rs`. Ctrl+V in the focused message box with an
+  image (`Event::PasteImage`) or copied files (`arboard` file list; on
+  Windows a V-key edge check, since a file-only clipboard gives egui no
+  event) adds them to the upload cards; it never sends. Images are encoded
+  to PNG by the backend (`ToBackend::SavePastedImage` → `ToUi::FilesPicked`).
+  `State::add_files` refuses files over `paste::upload_limit` (Nitro from
+  READY `premium_type`, server boosts from `Guild::premium_tier`) with a toast.
 - `src/read_state.rs`: per-channel unread/mention counts (`ReadState`).
   `src/notify.rs`: mutes (`Mutes`), `mentions_me`, `should_notify`, the
   mentions `Inbox`, and `show_desktop` (notify-rust; called from the backend

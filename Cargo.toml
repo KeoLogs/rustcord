@@ -9,6 +9,8 @@ exclude = ["examples/themes"]
 
 [dependencies]
 anyhow = "1.0.104"
+# Copied files for paste-to-upload (egui already pulls it in; no extra features).
+arboard = { version = "3.6", default-features = false }
 base64 = "0.22"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "persistence", "default_fonts", "system_fonts", "accesskit", "clipboard", "links", "wayland", "x11"] }
@@ -31,6 +33,10 @@ tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"]
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 unicode-segmentation = "1.13.3"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+
+# Ctrl+V with a file-only clipboard (paste.rs); already in the tree via arboard.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 
 # Smaller, faster release builds.
 [profile.release]

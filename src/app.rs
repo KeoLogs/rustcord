@@ -51,8 +51,6 @@ use crate::{icons, sysmsg};
 const TYPING_TIMEOUT: Duration = Duration::from_secs(10);
 const TYPING_RESEND: Duration = Duration::from_secs(8);
 const IMAGE_MAX: (f32, f32) = (400.0, 350.0);
-/// Discord's default upload limit for accounts without Nitro.
-const UPLOAD_LIMIT: u64 = 10 * 1024 * 1024;
 /// Acks for messages arriving in the open channel are sent at most this often.
 const ACK_INTERVAL: Duration = Duration::from_secs(3);
 /// Shown when a form is submitted while a rate-limit wait is running.
@@ -1025,6 +1023,14 @@ pub struct State {
     toggle_channels: bool,
     /// Reply / Edit was picked: focus the message box next frame.
     focus_composer: bool,
+    /// The message box's widget id (for Ctrl+V media paste focus checks).
+    composer_id: Option<egui::Id>,
+    /// V was down last frame while pasting (Windows file-only clipboard).
+    paste_v_down: bool,
+    /// Last media paste: a held Ctrl+V (key repeat) adds it only once.
+    last_media_paste: Option<Instant>,
+    /// My Nitro type from READY (upload limit).
+    premium_type: u8,
 
     /// Parsed markdown per message (Batch C).
     md_cache: ParseCache,
@@ -1125,6 +1131,10 @@ impl State {
             channels_visible: true,
             toggle_channels: false,
             focus_composer: false,
+            composer_id: None,
+            paste_v_down: false,
+            last_media_paste: None,
+            premium_type: 0,
             md_cache: ParseCache::default(),
             user_names: HashMap::new(),
             link_warning: None,
@@ -1168,6 +1178,7 @@ impl State {
             ToUi::Fatal(reason) => self.fatal = Some(reason),
             ToUi::Ready {
                 me,
+                premium_type,
                 guilds,
                 dms,
                 read_state,
@@ -1177,6 +1188,7 @@ impl State {
             } => {
                 self.status = "Connected".into();
                 self.connected = true;
+                self.premium_type = premium_type;
                 if let Some(ts) = &mut self.threads {
                     ts.store.set_me(&me.id);
                 }
@@ -3236,7 +3248,25 @@ impl State {
             self.status = "Open a channel before adding files".into();
             return;
         }
+        let limit = self.upload_limit();
         for p in paths {
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            if size > limit {
+                // Discord would reject it: say so now instead of on Send.
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.toast = Some((
+                    format!(
+                        "{name} is {}. Discord's upload limit here is {}.",
+                        human_size(size),
+                        crate::paste::limit_label(limit)
+                    ),
+                    Instant::now(),
+                ));
+                continue;
+            }
             if p.is_file() && !self.pending_files.contains(&p) {
                 self.pending_files.push(p);
             } else if !p.exists() {
@@ -3245,6 +3275,73 @@ impl State {
                     self.pending_files.push(p);
                 }
             }
+        }
+    }
+
+    /// Discord's per-file upload limit in the open channel (my Nitro or
+    /// the server's boosts, whichever is higher).
+    fn upload_limit(&self) -> u64 {
+        let tier = self.current_guild().map_or(0, |g| g.premium_tier);
+        crate::paste::upload_limit(self.premium_type, tier)
+    }
+
+    /// Ctrl+V in the focused message box with an image or copied files on
+    /// the clipboard: add them to the upload cards (never sends). A text
+    /// paste is left alone for the text box. Runs before the text box.
+    fn paste_media(&mut self, ui: &egui::Ui) {
+        let focused = self
+            .composer_id
+            .is_some_and(|id| ui.ctx().memory(|m| m.has_focus(id)));
+        if !focused {
+            self.paste_v_down = false;
+            return;
+        }
+        let (image, text, ctrl) = ui.input(|i| {
+            let image = i.events.iter().find_map(|e| match e {
+                egui::Event::PasteImage(img) => Some(img.clone()),
+                _ => None,
+            });
+            let text = i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)));
+            (image, text, i.modifiers.command)
+        });
+        // Windows: a file-only clipboard gives egui no event, so watch the
+        // V key while Ctrl is held (edge only, once per press).
+        let v_down = ctrl && crate::paste::v_key_down();
+        let v_pressed = v_down && !self.paste_v_down;
+        self.paste_v_down = v_down;
+        if image.is_none() && !text && !v_pressed {
+            return;
+        }
+        // Copied files win (they keep their names and formats).
+        let files = crate::paste::clipboard_files();
+        let media = !files.is_empty() || image.is_some();
+        // Key repeat from a held Ctrl+V: swallow it instead of adding the
+        // same media again.
+        let repeat = media
+            && self
+                .last_media_paste
+                .is_some_and(|at| at.elapsed() < Duration::from_millis(400));
+        if media {
+            self.last_media_paste = Some(Instant::now());
+        }
+        if repeat {
+            ui.ctx().input_mut(|i| {
+                i.events
+                    .retain(|e| !matches!(e, egui::Event::Paste(_) | egui::Event::PasteImage(_)))
+            });
+        } else if !files.is_empty() {
+            // Don't also paste the files' text (paths) into the box.
+            ui.ctx().input_mut(|i| {
+                i.events
+                    .retain(|e| !matches!(e, egui::Event::Paste(_) | egui::Event::PasteImage(_)))
+            });
+            self.add_files(files);
+        } else if let Some(img) = image {
+            ui.ctx().input_mut(|i| {
+                i.events
+                    .retain(|e| !matches!(e, egui::Event::PasteImage(_)))
+            });
+            let _ = self.tx.send(ToBackend::SavePastedImage(img));
         }
     }
 
@@ -3341,6 +3438,32 @@ impl State {
                 global: false,
             }),
             "picker" => self.demo_picker = true,
+            // Ctrl+V with an image (a generated one, saved like a real paste).
+            "paste" => {
+                let (w, h) = (480, 270);
+                let pixels = (0..w * h)
+                    .map(|i| {
+                        let (x, y) = (i % w, i / w);
+                        egui::Color32::from_rgb((x * 255 / w) as u8, (y * 255 / h) as u8, 200)
+                    })
+                    .collect();
+                let img = egui::ColorImage::new([w, h], pixels);
+                let _ = self
+                    .tx
+                    .send(ToBackend::SavePastedImage(std::sync::Arc::new(img)));
+                self.focus_composer = true;
+            }
+            // A pasted file over the upload limit (an empty sparse file).
+            "paste-big" => {
+                let dir = crate::paste::paste_dir().join("demo-big");
+                let path = dir.join("screen-recording.mp4");
+                let made = std::fs::create_dir_all(&dir)
+                    .and_then(|_| std::fs::File::create(&path))
+                    .and_then(|f| f.set_len(14 * 1024 * 1024 + 300_000));
+                if made.is_ok() {
+                    self.add_files(vec![path]);
+                }
+            }
             "invite" => {
                 let invite = self.messages.get("201").and_then(|ms| {
                     ms.iter()
@@ -5196,6 +5319,7 @@ impl State {
         let mut emoji_btn: Option<egui::Response> = None;
         let mut toggle_spoiler = None;
         self.refresh_emoji_groups();
+        self.paste_media(ui);
 
         // Autocomplete keys go first so the text box doesn't see them.
         let ac_on = config.modules.autocomplete;
@@ -5291,6 +5415,7 @@ impl State {
                                 .show(ui);
                             let resp = out.response;
                             edit_id = Some(resp.id);
+                            self.composer_id = Some(resp.id);
                             cursor = out.cursor_range.map(|r| r.primary.index.0);
                             has_focus = resp.has_focus();
                             if std::mem::take(&mut self.focus_composer) {
@@ -5429,6 +5554,7 @@ impl State {
         // the comment.
         if !self.pending_files.is_empty() {
             let w = box_rect.width();
+            let limit = self.upload_limit();
             egui::Area::new(egui::Id::unique("rc_upload_cards"))
                 .order(egui::Order::Middle)
                 .pivot(egui::Align2::LEFT_BOTTOM)
@@ -5461,11 +5587,14 @@ impl State {
                                         remove = Some(i);
                                     }
                                 }
-                                if total > UPLOAD_LIMIT {
+                                if total > limit {
                                     ui.label(
-                                        RichText::new("Over 10 MB, Discord may reject this")
-                                            .small()
-                                            .color(pal.danger),
+                                        RichText::new(format!(
+                                            "Over {} in total, Discord may reject this",
+                                            crate::paste::limit_label(limit)
+                                        ))
+                                        .small()
+                                        .color(pal.danger),
                                     );
                                 }
                             });

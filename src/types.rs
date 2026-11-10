@@ -117,6 +117,8 @@ pub struct Guild {
     pub my_pending: bool,
     /// My member `flags` (onboarding started / completed bits).
     pub my_member_flags: u64,
+    /// Boost level (0-3); raises the upload limit (`paste::upload_limit`).
+    pub premium_tier: u8,
 }
 
 /// A server's custom emoji.
@@ -245,6 +247,12 @@ impl Guild {
                 .unwrap_or_default(),
             my_pending: false,
             my_member_flags: 0,
+            premium_tier: v
+                .get("premium_tier")
+                .or_else(|| v.pointer("/properties/premium_tier"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(3) as u8,
         };
         guild.sort_channels();
         guild
@@ -265,6 +273,7 @@ impl Guild {
             features: Vec::new(),
             my_pending: false,
             my_member_flags: 0,
+            premium_tier: 0,
         };
         guild.sort_channels();
         guild
@@ -770,6 +779,9 @@ pub enum ToUi {
     Fatal(String),
     Ready {
         me: User,
+        /// My Nitro (`user.premium_type`: 0 none, 1 Classic, 2 Nitro,
+        /// 3 Basic), for the upload limit.
+        premium_type: u8,
         guilds: Vec<Guild>,
         dms: Vec<Channel>,
         /// User accounts only (bots get an empty list).
@@ -1065,6 +1077,9 @@ pub enum ToBackend {
     },
     /// Open the system file picker (runs off the UI thread).
     PickFiles,
+    /// Ctrl+V with an image: save it as a PNG upload (blocking thread),
+    /// answered with `ToUi::FilesPicked`.
+    SavePastedImage(std::sync::Arc<eframe::egui::ColorImage>),
     Edit {
         channel_id: String,
         message_id: String,

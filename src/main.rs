@@ -26,6 +26,7 @@ mod markdown;
 mod members;
 mod notify;
 mod onboarding;
+mod paste;
 mod perms;
 mod pins;
 mod presence;

@@ -279,6 +279,7 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
     test_guild.my_roles = vec!["503".into()];
     send(ToUi::Ready {
         me: User::from_json(&me),
+        premium_type: 0,
         guilds: vec![
             test_guild,
             Guild::from_json(&json!({
@@ -572,6 +573,13 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                 "holiday-photo.png".into(),
                 "notes.txt".into(),
             ])),
+            // A real PNG in the temp folder (never the user's config).
+            ToBackend::SavePastedImage(img) => {
+                match crate::paste::save_png(&img, &crate::paste::paste_dir()) {
+                    Ok(path) => send(ToUi::FilesPicked(vec![path])),
+                    Err(e) => send(ToUi::Notice(format!("Couldn't paste the image: {e}"))),
+                }
+            }
             ToBackend::Edit {
                 channel_id,
                 message_id,

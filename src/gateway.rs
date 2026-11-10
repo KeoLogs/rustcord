@@ -398,6 +398,7 @@ fn handle_dispatch(event: &str, d: &Value, my_id: &str) -> Option<ToUi> {
                 .unwrap_or_default();
             Some(ToUi::Ready {
                 me: User::from_json(&d["user"]),
+                premium_type: d["user"]["premium_type"].as_u64().unwrap_or(0).min(3) as u8,
                 guilds,
                 dms,
                 read_state: ReadStateEntry::parse_ready(&d["read_state"]),

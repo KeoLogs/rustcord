@@ -315,6 +315,17 @@ async fn run(
                     let paths = picked.iter().map(|f| f.path().to_path_buf()).collect();
                     Ok(Some(ToUi::FilesPicked(paths)))
                 }
+                ToBackend::SavePastedImage(img) => {
+                    let saved = tokio::task::spawn_blocking(move || {
+                        crate::paste::save_png(&img, &crate::paste::paste_dir())
+                    })
+                    .await;
+                    Ok(Some(match saved {
+                        Ok(Ok(path)) => ToUi::FilesPicked(vec![path]),
+                        Ok(Err(e)) => ToUi::Notice(format!("Couldn't paste the image: {e}")),
+                        Err(e) => ToUi::Notice(format!("Couldn't paste the image: {e}")),
+                    }))
+                }
                 ToBackend::Edit {
                     channel_id,
                     message_id,
