@@ -12,7 +12,7 @@
 
 Cascadia Mono © Microsoft Corporation (https://github.com/microsoft/cascadia-code),
 Reserved Font Name "Cascadia Code". It is the unmodified variable font
-(version 2102.025, 371 KB, `wght` axis 200–700, default 400 = Regular).
+(release v2407.24 from the official GitHub release, 714 KB, `wght` axis 200–700, default 400 = Regular).
 egui reads variable fonts through skrifa: the default instance is the
 Regular weight, and `theme::font_definitions` registers the same bytes a
 second time with `wght = 600` (`FontTweak::coords`) as the SemiBold `bold`

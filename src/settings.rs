@@ -767,7 +767,7 @@ impl SettingsPage {
                     pal,
                     "Licensed under GPL-3.0. Feature ideas from Discord Messenger by \
                      iProgramInCpp (MIT). Emoji graphics by Twemoji (CC-BY 4.0). Fonts: \
-                     Noto Sans, Noto Sans Symbols / Symbols 2 / Math / Mono by the Noto \
+                     Cascadia Mono by Microsoft (SIL Open Font License 1.1), Noto Sans, Noto Sans Symbols / Symbols 2 / Math / Mono by the Noto \
                      Project Authors (SIL Open Font License 1.1). Icons: Phosphor Icons \
                      (MIT).",
                 );
