@@ -6,7 +6,6 @@ use eframe::egui::{self, RichText, vec2};
 
 use crate::config::{ClientIdentity, Config, MODULES, ModuleCategory, ModuleInfo, Modules};
 use crate::icons;
-use crate::layout_v3::LayoutV3;
 use crate::settings_proto::{ExplicitFilter, UserSettings};
 use crate::theme::{Bold, Palette, ThemeChoice};
 use crate::types::User;
@@ -56,13 +55,14 @@ const SECTIONS: &[(&str, &[NavItem])] = &[
 
 pub enum SettingsAction {
     Close,
+    EditLayout,
     ResetLayout,
     /// Settings → Layout: replace the layout with a preset.
     ApplyPreset(crate::layout_presets::Preset),
     /// Copy the current layout to the clipboard as text.
     CopyLayout,
-    /// Use a pasted layout (already checked by `layout_v3::import`).
-    ImportLayout(LayoutV3),
+    /// Use a pasted layout (already checked by `layout_presets::import`).
+    ImportLayout(Box<egui_tiles::Tree<crate::layout::Pane>>),
     /// Settings → Themes → Import: open the file / folder picker (backend).
     PickTheme {
         folder: bool,
@@ -110,10 +110,11 @@ pub struct SettingsPage {
     synced: SyncedDraft,
     /// When the unsaved-changes bar started shaking (tried to leave).
     shake_at: Option<f64>,
-    /// The current layout (set by the app each frame).
-    pub layout: LayoutV3,
-    /// Settings → Layout: the column editor's own state (import box…).
-    layout_editor: crate::layout_editor::LayoutEditor,
+    /// Which preset the current layout still is (set by the app each frame).
+    pub layout_preset: Option<crate::layout_presets::Preset>,
+    /// Settings → Layout → Import: pasted text, its checked tree or error.
+    import_text: String,
+    import: Option<Result<egui_tiles::Tree<crate::layout::Pane>, String>>,
     /// The themes folder was re-read since this page opened.
     themes_read: bool,
 }
@@ -126,8 +127,9 @@ impl SettingsPage {
             base: config.clone(),
             synced: SyncedDraft::default(),
             shake_at: None,
-            layout: LayoutV3::default(),
-            layout_editor: Default::default(),
+            layout_preset: None,
+            import_text: String::new(),
+            import: None,
             themes_read: false,
         }
     }
@@ -305,6 +307,9 @@ impl SettingsPage {
                     });
             });
 
+        if matches!(action, Some(SettingsAction::EditLayout)) && self.block_leave(ui) {
+            action = None;
+        }
         if let Some(a) = self.unsaved_bar(ui, central.response.rect, synced, pal) {
             action = Some(a);
         }
@@ -556,8 +561,97 @@ impl SettingsPage {
                 modules_grid(ui, &mut config.modules, pal);
             }
             Section::Layout => {
-                if let Some(a) = self.layout_editor.ui(ui, &self.layout, config, pal) {
-                    action = Some(a);
+                hint(
+                    ui,
+                    pal,
+                    "Rearrange RustCord's panels. In edit mode, hover a panel to highlight \
+                     it, then hold and drag it to a new spot: drop on the edge of another \
+                     panel to dock next to it, or in the middle to stack them as tabs. \
+                     Drag the gaps between panels to resize.",
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let edit = ui.add_enabled(
+                        config.modules.layout_editor,
+                        pal.primary_button(&icons::label(icons::MOVE, "Edit layout")),
+                    );
+                    if edit.clicked() {
+                        action = Some(SettingsAction::EditLayout);
+                    }
+                    if ui
+                        .button(icons::label(icons::RESET, "Reset to default"))
+                        .clicked()
+                    {
+                        action = Some(SettingsAction::ResetLayout);
+                    }
+                });
+                if !config.modules.layout_editor {
+                    hint(
+                        ui,
+                        pal,
+                        "Turn on the Layout editor module to edit the layout.",
+                    );
+                }
+                if config.modules.layout_presets {
+                    ui.add_space(16.0);
+                    ui.label(pal.section_label("Presets"));
+                    ui.add_space(6.0);
+                    if let Some(p) =
+                        crate::layout_presets::preset_picker(ui, pal, self.layout_preset)
+                    {
+                        action = Some(SettingsAction::ApplyPreset(p));
+                    }
+                    ui.add_space(16.0);
+                    ui.label(pal.section_label("Share a layout"));
+                    ui.add_space(6.0);
+                    if ui
+                        .button(icons::label(icons::COPY, "Copy layout"))
+                        .on_hover_text("Copy the current layout as text to share it")
+                        .clicked()
+                    {
+                        action = Some(SettingsAction::CopyLayout);
+                    }
+                    ui.add_space(6.0);
+                    let edit = ui.add(
+                        egui::TextEdit::multiline(&mut self.import_text)
+                            .hint_text("Paste a layout here to import it")
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if edit.changed() {
+                        self.import = (!self.import_text.trim().is_empty()).then(|| {
+                            crate::layout_presets::import(&self.import_text)
+                                .map_err(|e| format!("{e:#}"))
+                        });
+                    }
+                    match &self.import {
+                        Some(Ok(tree)) => {
+                            ui.add_space(6.0);
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(240.0, 150.0),
+                                egui::Sense::hover(),
+                            );
+                            crate::layout_presets::paint_preview(ui.painter(), pal, tree, rect);
+                            ui.add_space(6.0);
+                            if ui
+                                .add(
+                                    pal.primary_button(&icons::label(
+                                        icons::CHECK,
+                                        "Use this layout",
+                                    )),
+                                )
+                                .clicked()
+                            {
+                                action = Some(SettingsAction::ImportLayout(Box::new(tree.clone())));
+                                self.import_text.clear();
+                                self.import = None;
+                            }
+                        }
+                        Some(Err(e)) => {
+                            ui.label(RichText::new(e).color(pal.danger));
+                        }
+                        None => {}
+                    }
                 }
             }
             Section::Themes => {

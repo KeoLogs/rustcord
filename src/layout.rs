@@ -1,26 +1,29 @@
-//! The main window: its panes, and the column host that lays them out.
+//! The movable / resizable panel layout, built on egui_tiles.
 //!
-//! The window is a row of columns (`layout_v3`): rail, sidebar, chat and
-//! aside. [`host_columns`] draws the docked ones as pixel-width egui side
-//! panels around a central chat panel (only the chat flexes), docks the
-//! user panel, and lets the user drag the sidebar / aside dividers (pixel
-//! widths, clamped per tier) and the rail edge (snaps between icons and
-//! names). [`host_drawers`] draws the columns that `responsive::compute`
-//! moved into overlay drawers on narrow windows.
-//!
-//! Panes draw through [`draw_pane`] / [`draw_column`], which only need a
-//! `Ui` sized to the pane, so a framed or detached host (layout_v3 `Mode`)
-//! can reuse them.
+//! - Normal mode: panels are fixed (the dividers can still be dragged to
+//!   resize, if the layout editor module is on).
+//! - Edit mode (Settings → RustCord → Layout → Edit layout): hovering a panel
+//!   makes it glow; press and hold to pick it up (it grows while you drag),
+//!   then drop it on an edge of another panel to dock it there, or on its
+//!   middle to stack them as tabs.
+//! - The layout is saved between runs; "Reset layout" restores the default.
+//! - Every frame `tile_fit` makes the tree fit the window: panes get pixel
+//!   sizes within their min / max (only the chat absorbs window changes),
+//!   and on narrow windows Members, then the lists and user panel, fold
+//!   into overlay drawers ([`draw_drawers`]) instead of being squashed.
+//!   Every pane clips to its tile ([`draw_pane`]).
 
-use eframe::egui::{self, Color32, Rect, Sense, Stroke, pos2, vec2};
-use egui_tiles::{Container, Tile, TileId, Tiles, Tree};
+use eframe::egui::{self, Color32, Sense, Stroke, StrokeKind, vec2};
+use egui_tiles::{
+    Behavior, Container, SimplificationOptions, Tabs, Tile, TileId, Tiles, Tree, UiResponse,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::app::State;
 use crate::config::Config;
-use crate::layout_v3::{Column, LayoutV3, UserPanelDock};
-use crate::responsive::{self, ASIDE, Responsive, SIDEBAR, Slot, Tier, UserPanelSpot};
 use crate::theme::Palette;
+
+pub const LAYOUT_KEY: &str = "layout_v2";
 
 /// One movable part of the UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,41 +82,11 @@ impl Pane {
 /// │ Profile           │                         │         │
 /// └───────────────────┴─────────────────────────┴─────────┘
 /// ```
-#[cfg(test)]
 pub fn default_tree() -> Tree<Pane> {
-    let mut tiles = Tiles::default();
-
-    // Wrap every pane in its own tab container (required by egui_tiles for
-    // dragging; the tab bar itself is hidden unless panels are stacked).
-    let tab = |tiles: &mut Tiles<Pane>, pane| {
-        let id = tiles.insert_pane(pane);
-        tiles.insert_tab_tile(vec![id])
-    };
-    let servers = tab(&mut tiles, Pane::Servers);
-    let profile = tab(&mut tiles, Pane::Profile);
-    let channels = tab(&mut tiles, Pane::Channels);
-    let messages = tab(&mut tiles, Pane::Messages);
-    let composer = tab(&mut tiles, Pane::Composer);
-    let members = tab(&mut tiles, Pane::Members);
-
-    // The server rail is icon-only like Discord's (~72 px at the default
-    // window size); drag its edge wider to show server names.
-    let lists = tiles.insert_horizontal_tile(vec![servers, channels]);
-    set_shares(&mut tiles, lists, &[(servers, 0.72), (channels, 2.1)]);
-    let left = tiles.insert_vertical_tile(vec![lists, profile]);
-    set_shares(&mut tiles, left, &[(lists, 12.5), (profile, 1.0)]);
-
-    let chat = tiles.insert_vertical_tile(vec![messages, composer]);
-    set_shares(&mut tiles, chat, &[(messages, 9.0), (composer, 1.5)]);
-
-    let root = tiles.insert_horizontal_tile(vec![left, chat, members]);
-    set_shares(
-        &mut tiles,
-        root,
-        &[(left, 2.82), (chat, 7.0), (members, 2.0)],
-    );
-
-    Tree::new(egui::Id::unique("rustcord_layout"), root, tiles)
+    // The Discord preset, in pixel shares (rail 72, channels 240, members
+    // 240, user panel 52); `tile_fit` keeps them and the chat absorbs the
+    // window.
+    crate::layout_presets::build(crate::layout_presets::Preset::Discord)
 }
 
 /// Demo mode only (`RUSTCORD_DEMO_LAYOUT=alt`): a custom arrangement like
@@ -143,9 +116,41 @@ pub fn alt_tree() -> Tree<Pane> {
     Tree::new(egui::Id::unique("rustcord_layout"), root, tiles)
 }
 
+/// Demo mode (`RUSTCORD_DEMO_LAYOUT=leo5`) and tests: Leo's leo-5 layout,
+/// the server rail as a strip across the top, a wide DM list, the chat,
+/// Members over the user panel on the right, and the message box as a
+/// full-width row along the bottom (shares as Leo's window had them).
+pub fn leo5_tree() -> Tree<Pane> {
+    let mut tiles = Tiles::default();
+    let tab = |tiles: &mut Tiles<Pane>, pane| {
+        let id = tiles.insert_pane(pane);
+        tiles.insert_tab_tile(vec![id])
+    };
+    let servers = tab(&mut tiles, Pane::Servers);
+    let channels = tab(&mut tiles, Pane::Channels);
+    let messages = tab(&mut tiles, Pane::Messages);
+    let members = tab(&mut tiles, Pane::Members);
+    let profile = tab(&mut tiles, Pane::Profile);
+    let composer = tab(&mut tiles, Pane::Composer);
+    let right = tiles.insert_vertical_tile(vec![members, profile]);
+    set_shares(&mut tiles, right, &[(members, 7.0), (profile, 1.0)]);
+    let middle = tiles.insert_horizontal_tile(vec![channels, messages, right]);
+    set_shares(
+        &mut tiles,
+        middle,
+        &[(channels, 590.0), (messages, 300.0), (right, 300.0)],
+    );
+    let root = tiles.insert_vertical_tile(vec![servers, middle, composer]);
+    set_shares(
+        &mut tiles,
+        root,
+        &[(servers, 95.0), (middle, 580.0), (composer, 44.0)],
+    );
+    Tree::new(egui::Id::unique("rustcord_layout"), root, tiles)
+}
+
 /// A saved layout is only usable if it still has every panel (new versions
 /// may add panels).
-#[cfg(test)]
 pub fn is_complete(tree: &Tree<Pane>) -> bool {
     let present: Vec<Pane> = tree
         .tiles
@@ -160,7 +165,6 @@ pub fn is_complete(tree: &Tree<Pane>) -> bool {
 
 /// Is this panel shown? (The members button in the chat header hides the
 /// Members panel, « / » the Channels panel.)
-#[cfg(test)]
 pub fn pane_visible(tree: &Tree<Pane>, pane: Pane) -> bool {
     tree.tiles
         .find_pane(&pane)
@@ -170,7 +174,6 @@ pub fn pane_visible(tree: &Tree<Pane>, pane: Pane) -> bool {
 /// Show / hide a panel (Members, Channels). Hidden tiles keep their place in
 /// the tree, so showing it again puts it back where it was (and the choice
 /// is saved with the layout).
-#[cfg(test)]
 pub fn toggle_pane(tree: &mut Tree<Pane>, pane: Pane) {
     let Some(id) = tree.tiles.find_pane(&pane) else {
         return;
@@ -220,6 +223,19 @@ fn set_shares(tiles: &mut Tiles<Pane>, container: TileId, shares: &[(TileId, f32
     }
 }
 
+/// Memory key for the drag "pick up" animation start time.
+fn drag_anim_id() -> egui::Id {
+    egui::Id::unique("rustcord_drag_started_at")
+}
+
+/// Call once per frame after drawing the tree, so the pick-up animation
+/// restarts on the next drag.
+pub fn end_frame(tree: &Tree<Pane>, ctx: &egui::Context) {
+    if tree.dragged_id(ctx).is_none() {
+        ctx.memory_mut(|m| m.data.remove::<f64>(drag_anim_id()));
+    }
+}
+
 /// Everything a pane needs to draw itself, whatever hosts it.
 pub struct PaneCtx<'a> {
     pub state: &'a mut State,
@@ -253,24 +269,21 @@ pub fn draw_pane(ui: &mut egui::Ui, pane: Pane, ctx: &mut PaneCtx<'_>) {
 
 /// Draw a whole layout_v3 column into `ui` (container-agnostic, like
 /// [`draw_pane`]). The chat column is one thing: the composer sits at its
-/// bottom and grows upward with its content (44 px up to 40% of the
-/// column, then it scrolls inside), the messages take the rest. The user
-/// panel is docked by the host, not here.
-pub fn draw_column(ui: &mut egui::Ui, column: Column, ctx: &mut PaneCtx<'_>) {
+/// bottom and grows upward (44 px up to 40% of the column), the messages
+/// take the rest. The user panel is docked by the host, not here.
+#[allow(dead_code)] // Called by the panel host (rustcord-ui, next on this branch).
+pub fn draw_column(ui: &mut egui::Ui, column: crate::layout_v3::Column, ctx: &mut PaneCtx<'_>) {
+    use crate::layout_v3::Column;
     match column {
         Column::Chat => {
             let rect = ui.max_rect();
             ui.set_clip_rect(rect.intersect(ui.clip_rect()));
-            if ctx.state.composer_shown() {
-                let h =
-                    responsive::composer_height(ctx.state.composer_content_height(), rect.height());
-                egui::Panel::bottom(ui.scope_id().with("chat_composer"))
-                    .resizable(false)
-                    .show_separator_line(false)
-                    .frame(egui::Frame::NONE)
-                    .exact_size(h)
-                    .show(ui, |ui| draw_pane(ui, Pane::Composer, ctx));
-            }
+            let max = crate::responsive::composer_height(rect.height(), rect.height());
+            egui::Panel::bottom(ui.scope_id().with("chat_composer"))
+                .resizable(false)
+                .frame(egui::Frame::NONE)
+                .size_range(crate::responsive::COMPOSER_MIN_HEIGHT..=max)
+                .show(ui, |ui| draw_pane(ui, Pane::Composer, ctx));
             egui::CentralPanel::no_frame().show(ui, |ui| draw_pane(ui, Pane::Messages, ctx));
         }
         other => {
@@ -281,386 +294,232 @@ pub fn draw_column(ui: &mut egui::Ui, column: Column, ctx: &mut PaneCtx<'_>) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Column host (layout_v3 `Mode::Columns`)
-
-/// Which tab a stacked rail + sidebar column shows (Wide chat).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum StackTab {
-    Servers,
-    #[default]
-    Channels,
+/// Connects the tile tree to the app state.
+pub struct LayoutBehavior<'a> {
+    pub state: &'a mut State,
+    pub config: &'a Config,
+    pub pal: Palette,
+    /// The active theme (gradients, glass, chat background).
+    pub theme: &'a crate::themes::ActiveTheme,
+    pub editing: bool,
 }
 
-/// The host's per-session state, kept in `State` so the chat and channel
-/// headers can open / close drawers.
+impl Behavior<Pane> for LayoutBehavior<'_> {
+    fn pane_ui(&mut self, ui: &mut egui::Ui, tile_id: TileId, pane: &mut Pane) -> UiResponse {
+        let rect = ui.max_rect();
+        draw_pane(
+            ui,
+            *pane,
+            &mut PaneCtx {
+                state: self.state,
+                config: self.config,
+                pal: &self.pal,
+                theme: self.theme,
+            },
+        );
+
+        if !self.editing {
+            return UiResponse::None;
+        }
+
+        // ---- Edit mode: the whole panel becomes a drag handle that glows.
+        let resp = ui.interact(
+            rect,
+            ui.scope_id().with(("edit_pane", tile_id)),
+            Sense::click_and_drag(),
+        );
+        let hot = ui
+            .ctx()
+            .animate_bool_with_time(resp.id, resp.hovered() || resp.dragged(), 0.12);
+        let painter = ui.painter_at(rect);
+        let accent = self.pal.accent;
+
+        // Dim every panel a little so it's obvious we're editing.
+        painter.rect_filled(rect, 0, Color32::from_black_alpha(110));
+        // Glow: a few inner rings fading inwards, plus a light tint.
+        if hot > 0.0 {
+            painter.rect_filled(rect, 0, accent.gamma_multiply(0.10 * hot));
+            for i in 0..6 {
+                let alpha = hot * (0.9 - i as f32 * 0.15);
+                painter.rect_stroke(
+                    rect.shrink(i as f32 * 2.0),
+                    6,
+                    Stroke::new(2.0, accent.gamma_multiply(alpha.max(0.0))),
+                    StrokeKind::Inside,
+                );
+            }
+        } else {
+            painter.rect_stroke(
+                rect.shrink(1.0),
+                6,
+                Stroke::new(1.0, accent.gamma_multiply(0.35)),
+                StrokeKind::Inside,
+            );
+        }
+        // Label in the middle.
+        painter.text(
+            rect.center() - vec2(0.0, 10.0),
+            egui::Align2::CENTER_CENTER,
+            format!("{}  {}", pane.icon(), pane.title()),
+            egui::FontId::proportional(16.0 + 2.0 * hot),
+            Color32::WHITE.gamma_multiply(0.7 + 0.3 * hot),
+        );
+        if hot > 0.5 {
+            painter.text(
+                rect.center() + vec2(0.0, 12.0),
+                egui::Align2::CENTER_CENTER,
+                "Hold and drag to move",
+                egui::FontId::proportional(12.0),
+                Color32::WHITE.gamma_multiply(0.6),
+            );
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+
+        if resp.drag_started() {
+            UiResponse::DragStarted
+        } else {
+            UiResponse::None
+        }
+    }
+
+    /// The card under the cursor while dragging: it "picks up" by growing
+    /// from 70% to 115% size over ~0.2s.
+    fn drag_ui(&mut self, tiles: &Tiles<Pane>, ui: &mut egui::Ui, tile_id: TileId) {
+        let (icon, title) = match tiles.get(tile_id) {
+            Some(Tile::Pane(p)) => (p.icon(), p.title()),
+            _ => (crate::icons::SQUARES_FOUR, "Panels"),
+        };
+        let now = ui.input(|i| i.time);
+        let started = ui
+            .ctx()
+            .memory_mut(|m| *m.data.get_temp_mut_or_insert_with(drag_anim_id(), || now));
+        let t = ((now - started) / 0.2).clamp(0.0, 1.0) as f32;
+        let ease = 1.0 - (1.0 - t).powi(3);
+        let scale = 0.7 + 0.45 * ease;
+        if t < 1.0 {
+            ui.ctx().request_repaint();
+        }
+
+        egui::Frame::new()
+            .fill(self.pal.sidebar.gamma_multiply(0.95))
+            .stroke(Stroke::new(2.0, self.pal.accent))
+            .corner_radius(10)
+            .shadow(egui::Shadow {
+                offset: [0, 8],
+                blur: 24,
+                spread: 2,
+                color: Color32::from_black_alpha(120),
+            })
+            .show(ui, |ui| {
+                let size = vec2(220.0, 120.0) * scale;
+                ui.set_min_size(size);
+                ui.set_max_size(size);
+                ui.centered_and_justified(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{icon}  {title}"))
+                            .size(18.0 * scale)
+                            .strong(),
+                    );
+                });
+            });
+    }
+
+    fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
+        format!("{} {}", pane.icon(), pane.title()).into()
+    }
+
+    /// Tab bars only show when panels are stacked (otherwise the hidden tabs
+    /// would be unreachable).
+    fn is_tab_bar_visible(&self, _tile_id: TileId, tabs: &Tabs) -> bool {
+        tabs.children.len() > 1
+    }
+
+    fn is_tile_draggable(&self, _tiles: &Tiles<Pane>, _tile_id: TileId) -> bool {
+        self.editing
+    }
+
+    fn is_container_resizable(&self, _tiles: &Tiles<Pane>, _tile_id: TileId) -> bool {
+        self.config.modules.layout_editor
+    }
+
+    fn gap_width(&self, _style: &egui::Style) -> f32 {
+        // No lines between panels (like Discord); they're still resizable
+        // by dragging the edge.
+        if self.editing { 6.0 } else { 0.0 }
+    }
+
+    fn resize_stroke(&self, _style: &egui::Style, resize_state: egui_tiles::ResizeState) -> Stroke {
+        match resize_state {
+            egui_tiles::ResizeState::Idle => Stroke::NONE,
+            egui_tiles::ResizeState::Hovering => {
+                Stroke::new(2.0, self.pal.accent.gamma_multiply(0.6))
+            }
+            egui_tiles::ResizeState::Dragging => Stroke::new(2.0, self.pal.accent),
+        }
+    }
+
+    fn min_size(&self) -> f32 {
+        44.0
+    }
+
+    fn tab_bar_color(&self, _visuals: &egui::Visuals) -> Color32 {
+        self.pal.servers
+    }
+
+    fn simplification_options(&self) -> SimplificationOptions {
+        SimplificationOptions {
+            all_panes_must_have_tabs: true,
+            ..Default::default()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drawers (narrow windows; `tile_fit` decides what folds)
+
+/// The tile host's per-session state, kept in `State` so the chat and
+/// channel headers can open / close drawers.
 #[derive(Debug, Default)]
 pub struct HostState {
     /// Last frame's width tier (breakpoint hysteresis).
-    pub tier: Option<Tier>,
-    /// Rail + sidebar live in the left drawer this frame (narrow window).
+    pub tier: Option<crate::responsive::Tier>,
+    /// Some panes are in the left drawer this frame (LIST button shows).
     pub lists_in_drawer: bool,
-    /// The aside is a drawer this frame (below the docking width).
+    /// Members is folded into the aside drawer this frame.
     pub aside_in_drawer: bool,
     /// The left drawer is open.
     pub left_open: bool,
     /// The aside drawer is open.
     pub aside_open: bool,
-    /// Stacked rail + sidebar: the tab shown.
-    pub stack_tab: StackTab,
     /// The chat header's LIST button was clicked (the app toggles the left
     /// drawer).
     pub toggle_left: bool,
 }
 
-/// Height of the stacked column's tab strip.
-const STACK_TABS_HEIGHT: f32 = 40.0;
-/// Width of a divider's grab area.
-const DIVIDER_GRAB: f32 = 6.0;
 /// Drawer slide time (doc §3.3 / §7: 120 ms ease-out).
 const DRAWER_SECONDS: f32 = 0.12;
 
-/// Side columns that are drawn as one panel: a single column, or the rail
-/// and sidebar together when the user panel spans both (Discord).
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Block {
-    One(Column, f32),
-    Pair([(Column, f32); 2]),
-}
-
-impl Block {
-    fn width(self) -> f32 {
-        match self {
-            Block::One(_, w) => w,
-            Block::Pair([(_, a), (_, b)]) => a + b,
-        }
-    }
-
-    fn has(self, c: Column) -> bool {
-        match self {
-            Block::One(x, _) => x == c,
-            Block::Pair([(a, _), (b, _)]) => a == c || b == c,
-        }
-    }
-}
-
-/// Group `r.row` into blocks: the rail and sidebar become one block when the
-/// user panel docks under both.
-fn blocks(r: &Responsive) -> Vec<Block> {
-    let span = r.user_panel == UserPanelSpot::Docked(UserPanelDock::RailAndSidebar);
-    let lists = |x: Column| matches!(x, Column::Rail | Column::Sidebar);
-    let mut out: Vec<Block> = Vec::with_capacity(r.row.len());
-    for &(c, w) in &r.row {
-        if span
-            && lists(c)
-            && let Some(Block::One(prev, pw)) = out.last().copied()
-            && lists(prev)
-            && prev != c
-        {
-            out.pop();
-            out.push(Block::Pair([(prev, pw), (c, w)]));
-            continue;
-        }
-        out.push(Block::One(c, w));
-    }
-    out
-}
-
-/// Does `block` carry the user panel (52 px at its bottom)?
-fn hosts_user_panel(block: Block, r: &Responsive) -> bool {
-    let UserPanelSpot::Docked(dock) = r.user_panel else {
-        return false;
-    };
-    match (dock, block) {
-        (UserPanelDock::RailAndSidebar, Block::Pair(_)) => true,
-        (UserPanelDock::Sidebar, Block::One(c, _)) => c == Column::Sidebar,
-        (UserPanelDock::Rail, Block::One(c, _)) => c == Column::Rail,
-        (UserPanelDock::Aside, Block::One(c, _)) => c == Column::Aside,
-        _ => false,
-    }
-}
-
-/// Lay out the docked columns of `r` in `ui` (the area between the top bar
-/// and the status bar): side columns are pixel-width egui side panels, the
-/// chat is the central panel. With `resizable` (the Layout editor module),
-/// the sidebar / aside dividers drag (pixel widths, clamped to the tier) and
-/// the rail edge snaps between icons and names. Every column clips to its
-/// own rect, so nothing overlaps.
-pub fn host_columns(
-    ui: &mut egui::Ui,
-    layout: &mut LayoutV3,
-    r: &Responsive,
-    resizable: bool,
+/// Draw the overlay drawers holding the panes `tile_fit::apply_folds`
+/// folded this frame: servers + channels + user panel from the left,
+/// members (+ user panel) from the right. A 40% scrim covers the rest; a
+/// click on it or Esc closes the drawer; they slide in over 120 ms.
+/// `area` is the region the tiles use.
+pub fn draw_drawers(
+    egui_ctx: &egui::Context,
+    area: egui::Rect,
+    folded: &crate::tile_fit::Folded,
     ctx: &mut PaneCtx<'_>,
 ) {
-    let blocks = blocks(r);
-    let chat_at = blocks
-        .iter()
-        .position(|b| b.has(Column::Chat))
-        .unwrap_or(blocks.len());
-    let user_docked = blocks.iter().any(|&b| hosts_user_panel(b, r));
-    // (column, its rect, is the chat to its right?) for the dividers.
-    let mut edges: Vec<(Column, Rect, bool)> = Vec::new();
-    for (i, &b) in blocks.iter().enumerate().take(chat_at) {
-        let user = hosts_user_panel(b, r);
-        let inner = side_panel(egui::Panel::left(("rc_column", i)), b)
-            .show(ui, |ui| draw_block(ui, b, user, r.stacked, ctx))
-            .inner;
-        edges.extend(inner.into_iter().map(|(c, rect)| (c, rect, true)));
-    }
-    // Right of the chat: the outermost panel goes first.
-    for (i, &b) in blocks.iter().enumerate().skip(chat_at + 1).rev() {
-        let user = hosts_user_panel(b, r);
-        let inner = side_panel(egui::Panel::right(("rc_column", i)), b)
-            .show(ui, |ui| draw_block(ui, b, user, r.stacked, ctx))
-            .inner;
-        edges.extend(inner.into_iter().map(|(c, rect)| (c, rect, false)));
-    }
-    egui::CentralPanel::no_frame().show(ui, |ui| {
-        if !user_docked && r.user_panel != UserPanelSpot::LeftDrawer {
-            // Both lists hidden and the aside a drawer: the user panel
-            // still never floats; it sits under the chat.
-            egui::Panel::bottom("rc_user_panel_chat")
-                .resizable(false)
-                .show_separator_line(false)
-                .frame(egui::Frame::NONE)
-                .exact_size(responsive::USER_PANEL_HEIGHT)
-                .show(ui, |ui| draw_pane(ui, Pane::Profile, ctx));
-        }
-        draw_column(ui, Column::Chat, ctx);
-    });
-    if resizable {
-        for (column, rect, chat_right) in edges {
-            divider(ui, layout, r, column, rect, chat_right, ctx.pal);
-        }
-    }
-}
-
-fn side_panel(panel: egui::Panel, b: Block) -> egui::Panel {
-    panel
-        .resizable(false)
-        .show_separator_line(false)
-        .frame(egui::Frame::NONE)
-        .exact_size(b.width())
-}
-
-/// Draw one block into its panel; returns each column's rect.
-fn draw_block(
-    ui: &mut egui::Ui,
-    block: Block,
-    user_panel: bool,
-    stacked: bool,
-    ctx: &mut PaneCtx<'_>,
-) -> Vec<(Column, Rect)> {
-    let full = ui.max_rect();
-    let body = if user_panel {
-        let (body, user) =
-            full.split_top_bottom_at_y(full.bottom() - responsive::USER_PANEL_HEIGHT);
-        let mut child = ui.new_child(
-            egui::UiBuilder::new()
-                .id_salt("rc_user_panel")
-                .max_rect(user),
-        );
-        draw_pane(&mut child, Pane::Profile, ctx);
-        body
-    } else {
-        full
-    };
-    match block {
-        Block::One(c, _) => {
-            place_column(ui, body, c, stacked, ctx);
-            vec![(c, full)]
-        }
-        Block::Pair([(a, wa), (b, _)]) => {
-            let (ra, rb) = body.split_left_right_at_x(body.left() + wa);
-            place_column(ui, ra, a, stacked, ctx);
-            place_column(ui, rb, b, stacked, ctx);
-            let (fa, fb) = full.split_left_right_at_x(full.left() + wa);
-            vec![(a, fa), (b, fb)]
-        }
-    }
-}
-
-/// Draw `column` into `rect` of `ui`.
-fn place_column(
-    ui: &mut egui::Ui,
-    rect: Rect,
-    column: Column,
-    stacked: bool,
-    ctx: &mut PaneCtx<'_>,
-) {
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .id_salt(("rc_place", column))
-            .max_rect(rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    child.set_clip_rect(rect.intersect(ui.clip_rect()));
-    if column == Column::Sidebar && stacked {
-        stacked_column(&mut child, ctx);
-    } else {
-        draw_column(&mut child, column, ctx);
-    }
-}
-
-/// The stacked rail + sidebar column (Wide chat): a two-tab strip
-/// (servers / channels) over the pane of the chosen tab.
-fn stacked_column(ui: &mut egui::Ui, ctx: &mut PaneCtx<'_>) {
-    let full = ui.max_rect();
-    let (bar, body) = full.split_top_bottom_at_y(full.top() + STACK_TABS_HEIGHT);
-    let pal = *ctx.pal;
-    ctx.theme
-        .paint_pane_background(ui.painter(), bar, Pane::Servers);
-    ui.painter()
-        .rect_filled(bar, 0, ctx.theme.pane_fill(Pane::Servers));
-    let tabs = [
-        (
-            StackTab::Servers,
-            Pane::Servers.icon(),
-            Column::Rail.title(),
-        ),
-        (
-            StackTab::Channels,
-            Pane::Channels.icon(),
-            Column::Sidebar.title(),
-        ),
-    ];
-    let inner = bar.shrink2(vec2(8.0, 6.0));
-    let w = inner.width() / tabs.len() as f32;
-    for (i, (tab, icon, label)) in tabs.into_iter().enumerate() {
-        let r = Rect::from_min_size(
-            pos2(inner.left() + w * i as f32, inner.top()),
-            vec2(w, inner.height()),
-        )
-        .shrink2(vec2(2.0, 0.0));
-        let resp = ui
-            .interact(r, ui.scope_id().with(("rc_stack_tab", i)), Sense::click())
-            .on_hover_text(label);
-        let on = ctx.state.host.stack_tab == tab;
-        let fill = if on {
-            pal.selected
-        } else if resp.hovered() {
-            pal.hover
-        } else {
-            Color32::TRANSPARENT
-        };
-        ui.painter().rect_filled(r, 4, fill);
-        let color = if on { pal.strong } else { pal.muted };
-        let text = crate::icons::label(icon, label);
-        let galley = crate::app::truncated(
-            ui,
-            &text,
-            egui::FontId::proportional(14.0),
-            color,
-            r.width() - 12.0,
-        );
-        ui.painter()
-            .galley(r.center() - galley.size() / 2.0, galley, color);
-        if resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        if resp.clicked() {
-            ctx.state.host.stack_tab = tab;
-        }
-    }
-    let pane = match ctx.state.host.stack_tab {
-        StackTab::Servers => Pane::Servers,
-        StackTab::Channels => Pane::Channels,
-    };
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .id_salt("rc_stack_body")
-            .max_rect(body)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    draw_pane(&mut child, pane, ctx);
-}
-
-/// The drag handle on `column`'s chat-facing edge.
-fn divider(
-    ui: &mut egui::Ui,
-    layout: &mut LayoutV3,
-    r: &Responsive,
-    column: Column,
-    rect: Rect,
-    chat_right: bool,
-    pal: &Palette,
-) {
-    if column == Column::Chat || (column == Column::Rail && !r.tier.rail_names_allowed()) {
-        return;
-    }
-    let x = if chat_right {
-        rect.right()
-    } else {
-        rect.left()
-    };
-    let hit = Rect::from_x_y_ranges(
-        x - DIVIDER_GRAB / 2.0..=x + DIVIDER_GRAB / 2.0,
-        rect.y_range(),
-    );
-    let id = ui.scope_id().with(("rc_divider", column));
-    let resp = ui.interact(hit, id, Sense::drag());
-    let sign = if chat_right { 1.0 } else { -1.0 };
-    let dx = resp.drag_delta().x * sign;
-    let mut line_x = x;
-    match column {
-        Column::Sidebar | Column::Aside if resp.dragged() => {
-            // Never past the tier's max, nor so far the chat drops below
-            // its min width.
-            let (size, tier_max) = if column == Column::Sidebar {
-                (SIDEBAR, r.tier.sidebar_max())
-            } else {
-                (ASIDE, r.tier.aside_max())
-            };
-            let current = r.slot(column).width();
-            let room = current + (r.chat_width - responsive::CHAT_MIN_WIDTH).max(0.0);
-            let max = tier_max.min(room).max(size.min);
-            let w = (current + dx).clamp(size.min, max);
-            if column == Column::Sidebar {
-                layout.sidebar_width = w;
-            } else {
-                layout.aside_width = w;
-            }
-        }
-        Column::Rail => {
-            // A ghost line follows the drag; on release the rail snaps to
-            // icons or names (its only two widths).
-            let start = r.rail.width();
-            if resp.dragged() || resp.drag_stopped() {
-                let w = ui.ctx().memory_mut(|m| {
-                    let w = m.data.get_temp_mut_or_insert_with(id, || start);
-                    *w = (*w + dx).clamp(responsive::RAIL.min, responsive::RAIL_NAMES.max);
-                    *w
-                });
-                line_x = x + (w - start) * sign;
-                if resp.drag_stopped() {
-                    layout.rail = responsive::snap_rail(w);
-                    ui.ctx().memory_mut(|m| m.data.remove::<f32>(id));
-                }
-            }
-        }
-        _ => {}
-    }
-    if resp.hovered() || resp.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        let alpha = if resp.dragged() { 1.0 } else { 0.6 };
-        ui.painter().vline(
-            line_x,
-            rect.y_range(),
-            Stroke::new(2.0, pal.accent.gamma_multiply(alpha)),
-        );
-    }
-}
-
-/// The overlay drawers (narrow windows): rail + sidebar + user panel from
-/// the left, the aside from the right. A 40% scrim covers the rest; a click
-/// on it or Esc closes the drawer. They slide in over 120 ms (ease-out).
-/// `area` is the region between the top bar and the status bar.
-pub fn host_drawers(egui_ctx: &egui::Context, area: Rect, r: &Responsive, ctx: &mut PaneCtx<'_>) {
-    if r.left_drawer.is_none() {
+    use crate::responsive::{ASIDE_DRAWER_WIDTH, RAIL, SIDEBAR, USER_PANEL_HEIGHT};
+    use crate::tile_fit::Drawer;
+    let left = folded.in_drawer(Drawer::Left);
+    let aside = folded.in_drawer(Drawer::Aside);
+    if left.is_empty() {
         ctx.state.host.left_open = false;
     }
-    if r.aside_drawer.is_none() {
+    if aside.is_empty() {
         ctx.state.host.aside_open = false;
     }
     let any_open = ctx.state.host.left_open || ctx.state.host.aside_open;
@@ -677,9 +536,15 @@ pub fn host_drawers(egui_ctx: &egui::Context, area: Rect, r: &Responsive, ctx: &
         DRAWER_SECONDS,
         ease,
     );
+    let has = |v: &[Pane], p| v.contains(&p);
+    let rail_w = if has(&left, Pane::Servers) {
+        RAIL.default
+    } else {
+        0.0
+    };
+    let left_w = rail_w + SIDEBAR.default;
     if t > 0.0
-        && let Some(w) = r.left_drawer
-        && let Some(rect) = drawer(egui_ctx, left_id, area, w, t, true)
+        && let Some(rect) = drawer(egui_ctx, left_id, area, left_w, t, true)
     {
         drawer_body(
             egui_ctx,
@@ -687,25 +552,22 @@ pub fn host_drawers(egui_ctx: &egui::Context, area: Rect, r: &Responsive, ctx: &
             rect,
             area,
             |ui, ctx| {
-                let (body, user) =
-                    rect.split_top_bottom_at_y(rect.bottom() - responsive::USER_PANEL_HEIGHT);
-                let mut child = ui.new_child(
-                    egui::UiBuilder::new()
-                        .id_salt("rc_drawer_user")
-                        .max_rect(user),
-                );
-                draw_pane(&mut child, Pane::Profile, ctx);
-                if r.stacked {
-                    place_column(ui, body, Column::Sidebar, true, ctx);
-                } else {
-                    let rail_w = r.rail.width().min(body.width());
-                    let (ra, rb) = body.split_left_right_at_x(body.left() + rail_w);
-                    if rail_w > 0.0 {
-                        place_column(ui, ra, Column::Rail, false, ctx);
-                    }
-                    if r.sidebar != Slot::Hidden {
-                        place_column(ui, rb, Column::Sidebar, false, ctx);
-                    }
+                let mut body = rect;
+                if has(&left, Pane::Profile) {
+                    let (b, user) = rect.split_top_bottom_at_y(rect.bottom() - USER_PANEL_HEIGHT);
+                    place(ui, user, Pane::Profile, ctx);
+                    body = b;
+                }
+                let (ra, rb) = body.split_left_right_at_x(body.left() + rail_w);
+                if rail_w > 0.0 {
+                    place(ui, ra, Pane::Servers, ctx);
+                }
+                if has(&left, Pane::Channels) {
+                    place(ui, rb, Pane::Channels, ctx);
+                } else if rail_w <= 0.0 {
+                    // Only the user panel folded: fill with the list colour.
+                    ui.painter()
+                        .rect_filled(rb, 0, ctx.theme.pane_fill(Pane::Channels));
                 }
             },
             ctx,
@@ -723,8 +585,7 @@ pub fn host_drawers(egui_ctx: &egui::Context, area: Rect, r: &Responsive, ctx: &
         ease,
     );
     if t > 0.0
-        && let Some(w) = r.aside_drawer
-        && let Some(rect) = drawer(egui_ctx, aside_id, area, w, t, false)
+        && let Some(rect) = drawer(egui_ctx, aside_id, area, ASIDE_DRAWER_WIDTH, t, false)
     {
         drawer_body(
             egui_ctx,
@@ -732,7 +593,13 @@ pub fn host_drawers(egui_ctx: &egui::Context, area: Rect, r: &Responsive, ctx: &
             rect,
             area,
             |ui, ctx| {
-                place_column(ui, rect, Column::Aside, false, ctx);
+                let mut body = rect;
+                if has(&aside, Pane::Profile) {
+                    let (b, user) = rect.split_top_bottom_at_y(rect.bottom() - USER_PANEL_HEIGHT);
+                    place(ui, user, Pane::Profile, ctx);
+                    body = b;
+                }
+                place(ui, body, Pane::Members, ctx);
             },
             ctx,
         );
@@ -742,16 +609,27 @@ pub fn host_drawers(egui_ctx: &egui::Context, area: Rect, r: &Responsive, ctx: &
     }
 }
 
+/// Draw `pane` into `rect` of `ui` (clipped).
+fn place(ui: &mut egui::Ui, rect: egui::Rect, pane: Pane, ctx: &mut PaneCtx<'_>) {
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("rc_drawer_pane", pane.title()))
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    draw_pane(&mut child, pane, ctx);
+}
+
 /// Paint the scrim (40% black at `t` = 1) over `area` and return the
 /// drawer's rect, sliding in from the left or right edge.
 fn drawer(
     egui_ctx: &egui::Context,
     id: egui::Id,
-    area: Rect,
+    area: egui::Rect,
     w: f32,
     t: f32,
     left: bool,
-) -> Option<Rect> {
+) -> Option<egui::Rect> {
     let w = w.min(area.width());
     if w <= 0.0 {
         return None;
@@ -774,19 +652,19 @@ fn drawer(
     } else {
         area.right() - t * w
     };
-    Some(Rect::from_min_size(
-        pos2(x, area.top()),
+    Some(egui::Rect::from_min_size(
+        egui::pos2(x, area.top()),
         vec2(w, area.height()),
     ))
 }
 
-/// The drawer itself: an area above the scrim (same order, shown later, so
-/// it's on top) whose empty parts swallow clicks.
+/// The drawer itself: an area above the scrim whose empty parts swallow
+/// clicks.
 fn drawer_body(
     egui_ctx: &egui::Context,
     id: egui::Id,
-    rect: Rect,
-    area: Rect,
+    rect: egui::Rect,
+    area: egui::Rect,
     add: impl FnOnce(&mut egui::Ui, &mut PaneCtx<'_>),
     ctx: &mut PaneCtx<'_>,
 ) {
@@ -797,9 +675,6 @@ fn drawer_body(
         .show(egui_ctx, |ui| {
             ui.set_clip_rect(area);
             let _ = ui.allocate_rect(rect, Sense::click());
-            // Soft edge shadow towards the scrim.
-            ui.painter()
-                .rect_filled(rect.expand(1.0), 0, Color32::from_black_alpha(60));
             add(ui, ctx);
         });
     // The scrim was shown first; keep the drawer above it.

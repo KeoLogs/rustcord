@@ -22,8 +22,7 @@ use crate::friends::{
 use crate::gif_picker::{GifAction, GifPicker};
 use crate::home::{self, HomeAction, HomeCtx, HomeSelected, HomeState};
 use crate::invites::{self, AddServerAction, AddServerDialog, CardCtx, InviteAction, InviteCache};
-use crate::layout::{self, HostState, Pane, StackTab};
-use crate::layout_v3::LayoutV3;
+use crate::layout::{self, HostState, LAYOUT_KEY, LayoutBehavior, Pane};
 use crate::links::{self, LinkCheck, LinkDecision, LinkWarning};
 use crate::login::{LoginAction, LoginForm};
 use crate::markdown::{self, Block, MarkdownAction, ParseCache};
@@ -71,11 +70,11 @@ enum Screen {
 pub struct RustCordApp {
     config: Config,
     screen: Screen,
-    /// The saved column layout (layout_v3).
-    layout: LayoutV3,
-    /// A v2 layout was migrated at startup: show the toast once the main
-    /// screen is up.
-    layout_migrated: bool,
+    tree: egui_tiles::Tree<Pane>,
+    /// The preset last picked in Settings (to tell Discord from Compact,
+    /// which share an arrangement).
+    applied_preset: Option<crate::layout_presets::Preset>,
+    editing_layout: bool,
     settings: Option<SettingsPage>,
     /// Zoom currently applied (with the active theme's visuals), to
     /// re-apply only when it or the theme changes.
@@ -107,21 +106,20 @@ pub struct RustCordApp {
 impl RustCordApp {
     pub fn new(cc: &eframe::CreationContext<'_>, env_token: Option<String>, demo: bool) -> Self {
         // Demo screenshots (`RUSTCORD_DEMO_OPEN` / `_SHOT`) start from the
-        // defaults (nothing a previous demo run saved) and use a scratch
-        // themes folder so they never touch the user's installed themes.
-        let demo_shot = demo
+        // defaults, never from what an earlier demo run saved.
+        let shot = demo
             && (std::env::var("RUSTCORD_DEMO_OPEN").is_ok()
                 || std::env::var("RUSTCORD_DEMO_SHOT").is_ok());
-        let storage = cc.storage.filter(|_| !demo_shot);
+        let storage = cc.storage.filter(|_| !shot);
         let mut config: Config = storage
             .and_then(|s| eframe::get_value(s, CONFIG_KEY))
             .unwrap_or_default();
-        if demo_shot {
-            // `RUSTCORD_DEMO_THEME=light`: Discord Light for screenshots.
+        if shot {
+            // `RUSTCORD_DEMO_THEME=light`: Discord Light.
             if std::env::var("RUSTCORD_DEMO_THEME").as_deref() == Ok("light") {
                 config.theme = ThemeChoice::DiscordLight;
             }
-            // `RUSTCORD_DEMO_SCALE=1.25`: zoom (like Windows display scale).
+            // `RUSTCORD_DEMO_SCALE=1.25`: zoom (like a Windows display scale).
             if let Some(z) = std::env::var("RUSTCORD_DEMO_SCALE")
                 .ok()
                 .and_then(|v| v.parse::<f32>().ok())
@@ -129,26 +127,34 @@ impl RustCordApp {
                 config.zoom = z.clamp(0.5, 3.0);
             }
         }
-        let loaded = crate::layout_v3::load(storage);
-        let (mut layout, mut layout_migrated) = (loaded.layout, loaded.migrated);
+        let mut tree = storage
+            .and_then(|s| eframe::get_value::<egui_tiles::Tree<Pane>>(s, LAYOUT_KEY))
+            .filter(layout::is_complete)
+            // A saved layout must be a well-formed tree with every panel once.
+            .and_then(|t| crate::layout_presets::sanitize(&t).ok())
+            .unwrap_or_else(layout::default_tree);
         if demo {
+            // `RUSTCORD_DEMO_LAYOUT=alt | leo5 | <preset>`: other layouts.
             match std::env::var("RUSTCORD_DEMO_LAYOUT").as_deref() {
-                // A free-form v2 tree like Leo's, migrated (shows the toast).
-                Ok("alt") => {
-                    layout = LayoutV3::from_v2(&layout::alt_tree());
-                    layout_migrated = true;
-                }
+                Ok("alt") => tree = layout::alt_tree(),
+                Ok("leo5") => tree = layout::leo5_tree(),
                 Ok(name) => {
                     if let Some(p) = crate::layout_presets::Preset::ALL
                         .into_iter()
                         .find(|p| format!("{p:?}").eq_ignore_ascii_case(name))
                     {
-                        layout = LayoutV3::from_preset(p);
+                        tree = crate::layout_presets::build(p);
                     }
                 }
                 Err(_) => {}
             }
         }
+
+        // Demo screenshots (`RUSTCORD_DEMO_OPEN` / `_SHOT`) use a scratch
+        // themes folder so they never touch the user's installed themes.
+        let demo_shot = demo
+            && (std::env::var("RUSTCORD_DEMO_OPEN").is_ok()
+                || std::env::var("RUSTCORD_DEMO_SHOT").is_ok());
         let themes_dir = if demo_shot {
             Some(std::env::temp_dir().join("rustcord-demo-themes"))
         } else {
@@ -162,8 +168,9 @@ impl RustCordApp {
             active_theme,
             theme_key: None,
             config,
-            layout,
-            layout_migrated,
+            tree,
+            applied_preset: None,
+            editing_layout: false,
             settings: None,
             applied: None,
             ram: RamSampler::default(),
@@ -289,6 +296,7 @@ impl RustCordApp {
             self.config.saved_token = None;
         }
         self.settings = None;
+        self.editing_layout = false;
         self.session = None;
         self.screen = Screen::Login(LoginForm::new(self.config.remember_login, error));
     }
@@ -324,77 +332,65 @@ impl RustCordApp {
         }
     }
 
-    /// Thin bar across the top while not connected (like Discord's
-    /// "Connecting…" notice; the Status bar module shows the connection
-    /// state instead).
+    /// Thin bar across the top, only while editing the layout or while not
+    /// connected (like Discord's "Connecting…" notice; the Status bar module
+    /// shows the connection state instead).
     fn top_bar(&mut self, ui: &mut egui::Ui, pal: &Palette, status: &str, connected: bool) {
-        if connected || self.config.modules.status_bar {
+        let notice = !connected && !self.config.modules.status_bar;
+        if !self.editing_layout && !notice {
             return;
         }
         egui::Panel::top("top_bar")
             .frame(
                 egui::Frame::new()
-                    .fill(pal.accent)
+                    .fill(if self.editing_layout {
+                        pal.servers
+                    } else {
+                        pal.accent
+                    })
                     .inner_margin(egui::Margin::symmetric(10, 4)),
             )
             .show(ui, |ui| {
-                ui.with_layout(
-                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                    |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(status)
-                                    .size(13.0)
-                                    .bold()
-                                    .color(Color32::WHITE),
-                            )
-                            .truncate(),
+                ui.horizontal(|ui| {
+                    if self.editing_layout {
+                        ui.label(
+                            RichText::new(icons::label(icons::MOVE, "Editing layout"))
+                                .bold()
+                                .color(pal.accent),
                         );
-                    },
-                );
+                        ui.label(
+                            RichText::new(
+                                "hover a panel, hold and drag to move · drag the gaps to resize",
+                            )
+                            .small()
+                            .color(pal.muted),
+                        );
+                        if ui.button(icons::label(icons::RESET, "Reset")).clicked() {
+                            self.tree = layout::default_tree();
+                        }
+                        if ui
+                            .add(pal.primary_button(&icons::label(icons::CHECK, "Done")))
+                            .clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                        {
+                            self.editing_layout = false;
+                        }
+                    }
+                    if notice {
+                        ui.with_layout(
+                            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                            |ui| {
+                                ui.label(
+                                    RichText::new(status)
+                                        .size(13.0)
+                                        .bold()
+                                        .color(Color32::WHITE),
+                                );
+                            },
+                        );
+                    }
+                });
             });
-    }
-
-    /// Handle the header buttons' requests and keep the host's drawer state
-    /// in step with the tier `r` (this frame's layout).
-    fn layout_requests(&mut self, r: &crate::responsive::Responsive) {
-        let Screen::Main(state) = &mut self.screen else {
-            return;
-        };
-        let lists_in_drawer = r.left_drawer.is_some();
-        let aside_in_drawer = !r.tier.aside_docked();
-        let host = &mut state.host;
-        host.tier = Some(r.tier);
-        host.lists_in_drawer = lists_in_drawer;
-        host.aside_in_drawer = aside_in_drawer;
-        if std::mem::take(&mut host.toggle_left) {
-            host.left_open = lists_in_drawer && !host.left_open;
-        }
-        if std::mem::take(&mut state.toggle_members) {
-            if aside_in_drawer {
-                // The drawer opens even if the aside was hidden while docked.
-                state.host.aside_open = !state.host.aside_open;
-                if state.host.aside_open {
-                    self.layout.aside_hidden = false;
-                }
-            } else {
-                self.layout.aside_hidden = !self.layout.aside_hidden;
-            }
-        }
-        if std::mem::take(&mut state.toggle_channels) {
-            if lists_in_drawer {
-                // « inside the drawer closes it.
-                state.host.left_open = false;
-            } else {
-                self.layout.sidebar_hidden = !self.layout.sidebar_hidden;
-            }
-        }
-        state.members_visible = if aside_in_drawer {
-            state.host.aside_open
-        } else {
-            !self.layout.aside_hidden
-        };
-        state.channels_visible = lists_in_drawer || !self.layout.sidebar_hidden;
     }
 }
 
@@ -526,14 +522,7 @@ impl eframe::App for RustCordApp {
         self.run_demo_shot(&ctx);
         if wants_settings {
             self.settings = Some(SettingsPage::new(&self.config));
-        }
-        if std::mem::take(&mut self.layout_migrated)
-            && let Screen::Main(state) = &mut self.screen
-        {
-            state.toast = Some((
-                crate::layout_v3::MIGRATION_TOAST.to_string(),
-                Instant::now(),
-            ));
+            self.editing_layout = false;
         }
 
         // Settings page replaces the main UI while open.
@@ -541,7 +530,22 @@ impl eframe::App for RustCordApp {
             let Screen::Main(state) = &mut self.screen else {
                 return;
             };
-            page.layout = self.layout.clone();
+            // Highlight the preset with this arrangement (divider positions
+            // are pixel sizes now, so they don't count); between Discord
+            // and Compact, the one last applied, else by the member list.
+            let matches = crate::layout_presets::detect_arrangement(&self.tree);
+            page.layout_preset =
+                self.applied_preset
+                    .filter(|p| matches.contains(p))
+                    .or_else(|| {
+                        let compact = crate::layout_presets::Preset::Compact;
+                        let hidden = !layout::pane_visible(&self.tree, Pane::Members);
+                        if hidden && matches.contains(&compact) {
+                            Some(compact)
+                        } else {
+                            matches.first().copied()
+                        }
+                    });
             let action = page.ui(
                 ui,
                 &self.config,
@@ -571,21 +575,20 @@ impl eframe::App for RustCordApp {
                     }
                 }
                 Some(SettingsAction::Close) => self.settings = None,
-                Some(SettingsAction::ResetLayout) => self.layout = LayoutV3::default(),
+                Some(SettingsAction::EditLayout) => {
+                    self.settings = None;
+                    self.editing_layout = true;
+                }
+                Some(SettingsAction::ResetLayout) => self.tree = layout::default_tree(),
                 Some(SettingsAction::ApplyPreset(p)) => {
-                    // A preset keeps which side columns the user hid.
-                    let (aside, sidebar) = (self.layout.aside_hidden, self.layout.sidebar_hidden);
-                    self.layout = LayoutV3::from_preset(p);
-                    self.layout.sidebar_hidden = sidebar;
-                    if p != crate::layout_presets::Preset::Compact {
-                        self.layout.aside_hidden = aside;
-                    }
+                    self.tree = crate::layout_presets::build(p);
+                    self.applied_preset = Some(p);
                     state.toast = Some((format!("Layout: {}", p.name()), Instant::now()));
                 }
                 Some(SettingsAction::CopyLayout) => {
-                    ctx.copy_text(crate::layout_v3::export(&self.layout));
+                    ctx.copy_text(crate::layout_presets::export(&self.tree));
                 }
-                Some(SettingsAction::ImportLayout(l)) => self.layout = l.sanitize(),
+                Some(SettingsAction::ImportLayout(tree)) => self.tree = *tree,
                 Some(SettingsAction::PickTheme { folder }) => {
                     let _ = state.tx.send(ToBackend::PickTheme { folder });
                 }
@@ -595,6 +598,9 @@ impl eframe::App for RustCordApp {
             return;
         }
 
+        if !self.config.modules.layout_editor {
+            self.editing_layout = false;
+        }
         self.top_bar(ui, &pal, &status, connected);
 
         let Screen::Main(state) = &mut self.screen else {
@@ -623,42 +629,84 @@ impl eframe::App for RustCordApp {
             }
         }
         state.shortcuts(&ctx, &self.config);
-        // ---- Columns (layout_v3): only the chat flexes; side columns have
-        // pixel widths and collapse into drawers as the window narrows.
+        // ---- Tiles: fit the free layout to the window (pixel sizes, the
+        // chat absorbs, low-priority panes fold into drawers when narrow).
         let area = ui.available_rect_before_wrap();
-        let prev_tier = state.host.tier;
-        let r = crate::responsive::compute(&self.layout, area.width(), prev_tier);
-        self.layout_requests(&r);
-        let Screen::Main(state) = &mut self.screen else {
-            return;
+        let metrics = crate::tile_fit::Metrics {
+            gap: if self.editing_layout { 6.0 } else { 0.0 },
+            tab_bar: 24.0,
         };
-        let r = crate::responsive::compute(&self.layout, area.width(), prev_tier);
-        let before = (state.selected_guild.clone(), state.selected_channel.clone());
-        // Theme backdrop behind inset / glass panes.
-        self.active_theme.paint_backdrop(ui.painter(), area);
-        {
-            let mut pctx = layout::PaneCtx {
-                state,
+        let tier = crate::responsive::tier_with_hysteresis(area.width(), state.host.tier);
+        state.host.tier = Some(tier);
+        // No folding while editing: every panel stays reachable to drag.
+        let folds = if self.editing_layout {
+            crate::tile_fit::Folds::default()
+        } else {
+            crate::tile_fit::plan_folds(&self.tree, area.width(), tier, metrics)
+        };
+        let folded = crate::tile_fit::apply_folds(&mut self.tree, &folds);
+        crate::tile_fit::fit(&mut self.tree, area, metrics);
+        state.host.lists_in_drawer = !folded.in_drawer(crate::tile_fit::Drawer::Left).is_empty();
+        state.host.aside_in_drawer = folds.members;
+        if std::mem::take(&mut state.host.toggle_left) {
+            state.host.left_open = state.host.lists_in_drawer && !state.host.left_open;
+        }
+        state.members_visible = if folds.members {
+            state.host.aside_open
+        } else {
+            layout::pane_visible(&self.tree, Pane::Members)
+        };
+        state.channels_visible = folds.lists || layout::pane_visible(&self.tree, Pane::Channels);
+        let picked_before = state.selected_channel.clone();
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            let mut behavior = LayoutBehavior {
+                state: &mut *state,
+                config: &self.config,
+                pal,
+                theme: &self.active_theme,
+                editing: self.editing_layout,
+            };
+            // Theme backdrop behind inset / glass panes and the gaps.
+            self.active_theme
+                .paint_backdrop(ui.painter(), ui.max_rect());
+            self.tree.ui(&mut behavior, ui);
+        });
+        crate::tile_fit::restore(&mut self.tree, &folded);
+        layout::end_frame(&self.tree, &ctx);
+        layout::draw_drawers(
+            &ctx,
+            area,
+            &folded,
+            &mut layout::PaneCtx {
+                state: &mut *state,
                 config: &self.config,
                 pal: &pal,
                 theme: &self.active_theme,
-            };
-            layout::host_columns(
-                ui,
-                &mut self.layout,
-                &r,
-                self.config.modules.layout_editor,
-                &mut pctx,
-            );
-            layout::host_drawers(&ctx, area, &r, &mut pctx);
-        }
-        // Picking a channel in the left drawer closes it; picking a server
-        // in the stacked column's Servers tab shows its channels.
-        if state.selected_channel != before.1 {
+            },
+        );
+        // Picking a channel in the left drawer closes it.
+        if state.selected_channel != picked_before {
             state.host.left_open = false;
         }
-        if state.selected_guild != before.0 && state.host.stack_tab == StackTab::Servers {
-            state.host.stack_tab = StackTab::Channels;
+        if std::mem::take(&mut state.toggle_members) {
+            if folds.members {
+                // Members lives in the drawer: open / close it (showing the
+                // panel again if the user had hidden it).
+                state.host.aside_open = !state.host.aside_open;
+                if state.host.aside_open && !layout::pane_visible(&self.tree, Pane::Members) {
+                    layout::toggle_pane(&mut self.tree, Pane::Members);
+                }
+            } else {
+                layout::toggle_pane(&mut self.tree, Pane::Members);
+            }
+        }
+        if std::mem::take(&mut state.toggle_channels) {
+            if folds.lists {
+                // « inside the drawer closes it.
+                state.host.left_open = false;
+            } else {
+                layout::toggle_pane(&mut self.tree, Pane::Channels);
+            }
         }
 
         state.overlays(ui, &self.config, &pal);
@@ -673,7 +721,7 @@ impl eframe::App for RustCordApp {
             self.config.saved_token = None;
         }
         eframe::set_value(storage, CONFIG_KEY, &self.config);
-        crate::layout_v3::save(storage, &self.layout);
+        eframe::set_value(storage, LAYOUT_KEY, &self.tree);
     }
 }
 
@@ -965,11 +1013,8 @@ pub struct State {
 
     /// Collapsed channel categories (this session only).
     collapsed: HashSet<String>,
-    /// Column host state: tier, drawers, stacked tab (layout.rs).
+    /// Tile host state: tier, drawers (layout.rs / tile_fit.rs).
     pub host: HostState,
-    /// Height the composer's content used last frame (the chat column sizes
-    /// the composer from it).
-    composer_h: f32,
     /// Is the Members panel shown (set by the app from the layout each frame).
     members_visible: bool,
     /// The members header button was clicked; the app toggles the panel.
@@ -1075,7 +1120,6 @@ impl State {
             popout: None,
             collapsed: HashSet::new(),
             host: HostState::default(),
-            composer_h: 0.0,
             members_visible: true,
             toggle_members: false,
             channels_visible: true,
@@ -2259,18 +2303,6 @@ impl State {
             .is_some_and(|(_, c)| c.is_forum())
     }
 
-    /// Does the chat column have a composer (not on the Friends / Requests
-    /// pages or in a forum)?
-    pub fn composer_shown(&self) -> bool {
-        !self.home_page_open() && !self.selected_is_forum()
-    }
-
-    /// Height of the composer's content last frame (box, banners, typing
-    /// line), for `responsive::composer_height`.
-    pub fn composer_content_height(&self) -> f32 {
-        self.composer_h
-    }
-
     /// The Friends or Message Requests page is showing instead of the chat.
     fn home_page_open(&self) -> bool {
         self.selected_guild.as_deref() == Some(DM_GUILD_ID)
@@ -3226,20 +3258,15 @@ impl State {
             .first()
             .map(|g| g.id.clone())
             .unwrap_or_default();
-        if view == "dm" {
-            // A DM with a big image (media fit).
+        if view == "dm" || view == "drawer" || view == "aside" {
+            // A DM with a big image; `drawer` / `aside` open that drawer
+            // (narrow windows).
             self.select_guild(DM_GUILD_ID.into());
             self.select_channel("401".into(), ctx, config);
-            return true;
-        }
-        if view == "drawer" || view == "aside" {
-            // Narrow windows: the left / aside drawer open.
-            self.select_guild(DM_GUILD_ID.into());
-            self.select_channel("401".into(), ctx, config);
-            if view == "drawer" {
-                self.host.left_open = true;
-            } else {
-                self.toggle_members = true;
+            match view {
+                "drawer" => self.host.toggle_left = true,
+                "aside" => self.toggle_members = true,
+                _ => {}
             }
             return true;
         }
@@ -3418,15 +3445,37 @@ impl State {
                 .map(|g| RailItem::Guild(g.id.clone()))
                 .collect(),
         };
-        egui::ScrollArea::vertical()
-            .id_salt("servers")
-            .auto_shrink(false)
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 8.0;
-                let dm_selected = self.selected_guild.as_deref() == Some(DM_GUILD_ID);
-                let badge = self.guild_badge(&self.dms, &now);
-                let resp = rail_item(
+        // Docked as a strip (a row across the top / bottom): the icons go in
+        // a row that scrolls sideways, so the rail never crops.
+        let full = ui.max_rect();
+        let strip = full.width() > full.height() * 1.5 && full.height() < 140.0;
+        // In a strip every item gets one icon-wide cell.
+        macro_rules! cell {
+            ($ui:ident, $body:expr) => {
+                if strip {
+                    let h = $ui.available_height();
+                    $ui.allocate_ui_with_layout(
+                        vec2(RAIL_STRIP_CELL, h),
+                        egui::Layout::top_down(egui::Align::Center),
+                        |$ui| $body,
+                    )
+                    .inner
+                } else {
+                    $body
+                }
+            };
+        }
+        let content = |ui: &mut egui::Ui| {
+            ui.spacing_mut().item_spacing = if strip {
+                vec2(4.0, 0.0)
+            } else {
+                vec2(ui.spacing().item_spacing.x, 8.0)
+            };
+            let dm_selected = self.selected_guild.as_deref() == Some(DM_GUILD_ID);
+            let badge = self.guild_badge(&self.dms, &now);
+            let resp = cell!(
+                ui,
+                rail_item(
                     ui,
                     RailIcon::Home,
                     "Direct Messages",
@@ -3434,26 +3483,37 @@ impl State {
                     badge,
                     config,
                     pal,
+                )
+            );
+            if resp.clicked() {
+                ev.clicked = Some(DM_GUILD_ID.to_string());
+            }
+            egui::Popup::context_menu(&resp)
+                .frame(widgets::menu_frame(pal))
+                .show(|ui| {
+                    if widgets::menu_item(
+                        ui,
+                        Some(icons::CHECKS),
+                        "Mark as Read",
+                        Tone::Normal,
+                        pal,
+                    )
+                    .clicked()
+                    {
+                        ev.mark_read = Some(DM_GUILD_ID.to_string());
+                    }
+                });
+            // Separator under Home, centred under the icons (a short
+            // vertical line in a strip).
+            if strip {
+                let (sep, _) =
+                    ui.allocate_exact_size(vec2(2.0, ui.available_height()), egui::Sense::hover());
+                ui.painter().rect_filled(
+                    egui::Rect::from_center_size(sep.center(), vec2(2.0, 32.0)),
+                    1,
+                    pal.divider,
                 );
-                if resp.clicked() {
-                    ev.clicked = Some(DM_GUILD_ID.to_string());
-                }
-                egui::Popup::context_menu(&resp)
-                    .frame(widgets::menu_frame(pal))
-                    .show(|ui| {
-                        if widgets::menu_item(
-                            ui,
-                            Some(icons::CHECKS),
-                            "Mark as Read",
-                            Tone::Normal,
-                            pal,
-                        )
-                        .clicked()
-                        {
-                            ev.mark_read = Some(DM_GUILD_ID.to_string());
-                        }
-                    });
-                // Separator under Home, centred under the icons.
+            } else {
                 let (sep, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 2.0), egui::Sense::hover());
                 let x = if sep.width() >= RAIL_NAMES_WIDTH {
@@ -3466,90 +3526,110 @@ impl State {
                     1,
                     pal.divider,
                 );
-                for item in &items {
-                    match item {
-                        RailItem::Guild(id) => {
-                            if let Some(g) = self.guilds.iter().find(|g| &g.id == id) {
+            }
+            for item in &items {
+                match item {
+                    RailItem::Guild(id) => {
+                        if let Some(g) = self.guilds.iter().find(|g| &g.id == id) {
+                            cell!(ui, self.rail_guild(ui, g, &now, &mut ev, config, pal));
+                        }
+                    }
+                    RailItem::Folder {
+                        id,
+                        name,
+                        color,
+                        guild_ids,
+                    } => {
+                        let guilds: Vec<&Guild> = guild_ids
+                            .iter()
+                            .filter_map(|gid| self.guilds.iter().find(|g| &g.id == gid))
+                            .collect();
+                        if guilds.is_empty() {
+                            continue;
+                        }
+                        let open = self.open_folders.contains(id);
+                        let mut badge = Badge::default();
+                        for g in &guilds {
+                            let b = self.guild_badge(g, &now);
+                            badge.unread |= b.unread;
+                            badge.mentions += b.mentions;
+                        }
+                        let label = name.clone().unwrap_or_else(|| {
+                            guilds
+                                .iter()
+                                .map(|g| g.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        });
+                        let folder = FolderIcon {
+                            name: &label,
+                            color: color.map(members::rgb).unwrap_or(pal.accent),
+                            guilds: &guilds,
+                            open,
+                            selected: guilds
+                                .iter()
+                                .any(|g| self.selected_guild.as_ref() == Some(&g.id)),
+                            badge: if open { Badge::default() } else { badge },
+                        };
+                        // Background strip behind an open folder.
+                        let bg = ui.painter().add(egui::Shape::Noop);
+                        let top = ui.cursor().top();
+                        if cell!(ui, folder_item(ui, &folder, config, pal)).clicked() {
+                            ev.toggle_folder = Some(*id);
+                        }
+                        if open && strip {
+                            for g in &guilds {
+                                cell!(ui, self.rail_guild(ui, g, &now, &mut ev, config, pal));
+                            }
+                        } else if open {
+                            for g in &guilds {
                                 self.rail_guild(ui, g, &now, &mut ev, config, pal);
                             }
-                        }
-                        RailItem::Folder {
-                            id,
-                            name,
-                            color,
-                            guild_ids,
-                        } => {
-                            let guilds: Vec<&Guild> = guild_ids
-                                .iter()
-                                .filter_map(|gid| self.guilds.iter().find(|g| &g.id == gid))
-                                .collect();
-                            if guilds.is_empty() {
-                                continue;
-                            }
-                            let open = self.open_folders.contains(id);
-                            let mut badge = Badge::default();
-                            for g in &guilds {
-                                let b = self.guild_badge(g, &now);
-                                badge.unread |= b.unread;
-                                badge.mentions += b.mentions;
-                            }
-                            let label = name.clone().unwrap_or_else(|| {
-                                guilds
-                                    .iter()
-                                    .map(|g| g.name.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            });
-                            let folder = FolderIcon {
-                                name: &label,
-                                color: color.map(members::rgb).unwrap_or(pal.accent),
-                                guilds: &guilds,
-                                open,
-                                selected: guilds
-                                    .iter()
-                                    .any(|g| self.selected_guild.as_ref() == Some(&g.id)),
-                                badge: if open { Badge::default() } else { badge },
+                            let w = ui.available_width();
+                            let x = if w >= RAIL_NAMES_WIDTH {
+                                ui.min_rect().left() + 12.0 + 24.0
+                            } else {
+                                ui.min_rect().center().x
                             };
-                            // Background strip behind an open folder.
-                            let bg = ui.painter().add(egui::Shape::Noop);
-                            let top = ui.cursor().top();
-                            if folder_item(ui, &folder, config, pal).clicked() {
-                                ev.toggle_folder = Some(*id);
-                            }
-                            if open {
-                                for g in &guilds {
-                                    self.rail_guild(ui, g, &now, &mut ev, config, pal);
-                                }
-                                let w = ui.available_width();
-                                let x = if w >= RAIL_NAMES_WIDTH {
-                                    ui.min_rect().left() + 12.0 + 24.0
-                                } else {
-                                    ui.min_rect().center().x
-                                };
-                                let rect = egui::Rect::from_x_y_ranges(
-                                    x - 28.0..=x + 28.0,
-                                    top - 4.0..=ui.cursor().top() - 4.0,
-                                );
-                                ui.painter().set(
-                                    bg,
-                                    egui::Shape::rect_filled(
-                                        rect,
-                                        16,
-                                        folder.color.gamma_multiply(0.18),
-                                    ),
-                                );
-                            }
+                            let rect = egui::Rect::from_x_y_ranges(
+                                x - 28.0..=x + 28.0,
+                                top - 4.0..=ui.cursor().top() - 4.0,
+                            );
+                            ui.painter().set(
+                                bg,
+                                egui::Shape::rect_filled(
+                                    rect,
+                                    16,
+                                    folder.color.gamma_multiply(0.18),
+                                ),
+                            );
                         }
                     }
                 }
-                // --- onboarding --- Add a Server.
-                if self.invites.is_some() {
-                    let wide = ui.available_width() >= RAIL_NAMES_WIDTH;
-                    if invites::rail_add_button(ui, pal, wide).clicked() {
-                        ev.add_server = true;
-                    }
+            }
+            // --- onboarding --- Add a Server.
+            if self.invites.is_some() {
+                let wide = !strip && ui.available_width() >= RAIL_NAMES_WIDTH;
+                if cell!(ui, invites::rail_add_button(ui, pal, wide)).clicked() {
+                    ev.add_server = true;
                 }
-            });
+            }
+        };
+        if strip {
+            egui::ScrollArea::horizontal()
+                .id_salt("servers_strip")
+                .auto_shrink(false)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.horizontal_centered(content);
+                });
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("servers")
+                .auto_shrink(false)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, content);
+        }
         if ev.add_server
             && let Some(s) = &mut self.invites
         {
@@ -4376,7 +4456,7 @@ impl State {
                     self.toggle_channels = true;
                 }
             } else if self.host.lists_in_drawer {
-                // Narrow window: rail + sidebar live in the left drawer.
+                // Narrow window: the lists live in the left drawer.
                 if icon_button(
                     ui,
                     icons::LIST,
@@ -5288,11 +5368,6 @@ impl State {
             })
             .response
             .rect;
-        if (used.height() - self.composer_h).abs() > 0.5 {
-            // The column resizes the composer next frame.
-            self.composer_h = used.height();
-            ui.ctx().request_repaint();
-        }
 
         // Files waiting to upload: Discord's attachment cards above the box
         // (floating over the chat, so the message box keeps its height),
@@ -5834,7 +5909,7 @@ impl State {
         // Discord Messenger's segmented status bar: connection | where you
         // are | unread mentions … typing | RAM, each with a line icon.
         egui::Panel::bottom("status_bar")
-            .exact_size(crate::responsive::STATUS_BAR_HEIGHT)
+            .exact_size(24.0)
             .frame(
                 egui::Frame::new()
                     .fill(pal.servers)
@@ -6551,10 +6626,7 @@ pub(crate) fn paint_avatar(
 /// soft shadow under it (Discord's channel-list and chat headers). Returns
 /// the header's rect.
 fn header_bar(ui: &mut egui::Ui, pal: &Palette) -> egui::Rect {
-    let (rect, _) = ui.allocate_exact_size(
-        vec2(ui.available_width(), crate::responsive::CHAT_HEADER_HEIGHT),
-        egui::Sense::hover(),
-    );
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), egui::Sense::hover());
     let y = rect.bottom();
     let painter = ui.painter();
     painter.hline(rect.x_range(), y - 0.5, egui::Stroke::new(1.0, pal.servers));
@@ -7062,6 +7134,8 @@ fn inbox_row(ui: &mut egui::Ui, item: &InboxItem, pal: &Palette) -> egui::Respon
 
 /// The rail shows server names when dragged at least this wide.
 const RAIL_NAMES_WIDTH: f32 = 160.0;
+/// One server cell when the rail is docked as a strip (a row).
+const RAIL_STRIP_CELL: f32 = 64.0;
 
 /// Server icons are 48 px; a rail squeezed below Discord's 72 px (small
 /// window, custom layout) shrinks them instead of clipping them.
