@@ -3786,6 +3786,7 @@ dependencies = [
  "notify-rust",
  "prost",
  "qrcode",
+ "raw-window-handle",
  "reqwest",
  "rfd",
  "rustls",

@@ -70,6 +70,9 @@ pub struct Config {
     /// Flash the taskbar entry when a notification arrives and the window
     /// isn't focused.
     pub flash_taskbar: bool,
+    /// Red unread count (mentions + unread DMs) over the taskbar icon.
+    /// Windows only for now (`taskbar.rs`).
+    pub taskbar_badge: bool,
 
     /// Smaller member list rows without the activity line.
     pub compact_member_list: bool,
@@ -118,6 +121,7 @@ impl Default for Config {
             client_identity: ClientIdentity::Web,
             desktop_notifications: true,
             flash_taskbar: true,
+            taskbar_badge: true,
             compact_member_list: false,
             bot_member_intents: false,
             profile_themes: true,
@@ -511,6 +515,8 @@ mod tests {
         assert!(c.modules.paste_media && c.modules.favourite_gifs);
         // Favourite GIFs came later: none yet.
         assert!(c.favourite_gifs.is_empty());
+        // The taskbar badge came later: on.
+        assert!(c.taskbar_badge);
     }
 
     #[test]

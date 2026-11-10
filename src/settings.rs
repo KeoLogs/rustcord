@@ -981,22 +981,6 @@ fn account(ui: &mut egui::Ui, me: Option<&User>, pal: &Palette) {
 }
 
 fn notifications(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
-    if !config.modules.notifications {
-        hint(
-            ui,
-            pal,
-            "The Notifications module is off, so RustCord shows no desktop notifications \
-             and keeps no mentions inbox. Unread markers and mention badges still work.",
-        );
-        ui.add_space(8.0);
-        if ui
-            .add(pal.primary_button("Turn on Notifications module"))
-            .clicked()
-        {
-            config.modules.notifications = true;
-        }
-        return;
-    }
     let row = |ui: &mut egui::Ui, on: &mut bool, title: &str, desc: &str| {
         egui::Frame::new()
             .fill(pal.sidebar)
@@ -1018,28 +1002,50 @@ fn notifications(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
             });
         ui.add_space(6.0);
     };
+    // Works like the rail's badges, with or without the Notifications module.
+    let badge_row = |ui: &mut egui::Ui, on: &mut bool| {
+        row(
+            ui,
+            on,
+            "Show unread badge on taskbar icon",
+            "A red count of your mentions and unread DMs over RustCord's taskbar icon              (9+ past nine). Muted servers and channels don't count. Windows only for now.",
+        )
+    };
+    if !config.modules.notifications {
+        hint(
+            ui,
+            pal,
+            "The Notifications module is off, so RustCord shows no desktop notifications              and keeps no mentions inbox. Unread markers and mention badges still work.",
+        );
+        ui.add_space(8.0);
+        if ui
+            .add(pal.primary_button("Turn on Notifications module"))
+            .clicked()
+        {
+            config.modules.notifications = true;
+        }
+        ui.add_space(12.0);
+        badge_row(ui, &mut config.taskbar_badge);
+        return;
+    }
     row(
         ui,
         &mut config.desktop_notifications,
         "Enable desktop notifications",
-        "Pop up a notification for mentions and DMs (and, in servers set to \
-         \"All messages\", every message) when the window isn't focused or the \
-         channel isn't open. Muted servers and channels never notify.",
+        "Pop up a notification for mentions and DMs (and, in servers set to          \"All messages\", every message) when the window isn't focused or the          channel isn't open. Muted servers and channels never notify.",
     );
     row(
         ui,
         &mut config.flash_taskbar,
         "Flash taskbar",
-        "Flash RustCord's taskbar / dock icon when a notification arrives and the \
-         window isn't focused.",
+        "Flash RustCord's taskbar / dock icon when a notification arrives and the          window isn't focused.",
     );
+    badge_row(ui, &mut config.taskbar_badge);
     ui.add_space(6.0);
     hint(
         ui,
         pal,
-        "Notification levels and mutes come from your Discord account (set them in \
-         the official client for now). Bot accounts only notify on mentions and DMs. \
-         Recent mentions are listed under the bell in the chat header.",
+        "Notification levels and mutes come from your Discord account (set them in          the official client for now). Bot accounts only notify on mentions and DMs.          Recent mentions are listed under the bell in the chat header.",
     );
 }
 

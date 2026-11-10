@@ -13,6 +13,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::account_menu::{self, AccountAction, Confirm};
 use crate::accounts::{AccountData, AccountError, MAX_ACCOUNTS, SavedAccount, Token, Vault};
 use crate::autocomplete::{self, Autocomplete, Candidate, Trigger};
+use crate::badge::Badge;
 use crate::config::{CONFIG_KEY, Config};
 use crate::embed;
 use crate::emoji_picker::{self, CustomEmojiGroup, EmojiRef, Picked, PickerCtx, RecentEmoji};
@@ -43,6 +44,7 @@ use crate::search::{SearchAction, SearchCtx, SearchPanel, SearchScope, Suggestio
 use crate::settings::{SettingsAction, SettingsPage, SyncChange};
 use crate::settings_proto::{self as sp, RailItem, UserSettings};
 use crate::status::{self, CustomStatusDialog, DialogResult};
+use crate::taskbar::{Target, TaskbarBadge};
 use crate::theme::{self, Bold, Palette};
 use crate::threads::{self, DialogOutcome, Thread, ThreadAction, ThreadDialog, ThreadStore};
 use crate::timefmt;
@@ -99,6 +101,8 @@ pub struct RustCordApp {
     theme_gen: u64,
     /// The main window's title as last set.
     title: String,
+    /// Unread count over the main window's taskbar icon.
+    badge: TaskbarBadge,
     /// Demo mode only (`RUSTCORD_DEMO_OPEN=view`): a view to open once the
     /// demo data is in, for screenshots.
     demo_open: Option<String>,
@@ -187,6 +191,7 @@ impl RustCordApp {
             windows: Vec::new(),
             theme_gen: 0,
             title: String::new(),
+            badge: TaskbarBadge::default(),
             demo_open: demo
                 .then(|| std::env::var("RUSTCORD_DEMO_OPEN").ok())
                 .flatten(),
@@ -399,6 +404,7 @@ impl RustCordApp {
                 state: Box::new(state),
                 tree: self.tree.clone(),
                 ram: RamSampler::default(),
+                badge: TaskbarBadge::default(),
             }),
             config: self.config.clone(),
             theme: self.active_theme.clone(),
@@ -814,7 +820,19 @@ impl RamSampler {
 }
 
 impl eframe::App for RustCordApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Taskbar badge: runs here (not in `ui`) so it also updates while
+        // the window is minimised. Counted only while the setting is on.
+        let count = match &self.screen {
+            Screen::Main(state) if self.config.taskbar_badge => state.unread_total(),
+            _ => 0,
+        };
+        self.badge.update(
+            crate::taskbar::frame_target(frame),
+            count,
+            self.config.taskbar_badge,
+            crate::taskbar::rgb(self.active_theme.palette.danger),
+        );
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
@@ -860,6 +878,11 @@ impl eframe::App for RustCordApp {
         }
         eframe::set_value(storage, CONFIG_KEY, &self.config);
         eframe::set_value(storage, LAYOUT_KEY, &self.tree);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Badge icons and the taskbar COM object (Windows; no-op elsewhere).
+        crate::taskbar::shutdown();
     }
 }
 
@@ -1284,6 +1307,8 @@ struct WindowLive {
     /// A copy of the main layout (the window has its own size).
     tree: egui_tiles::Tree<Pane>,
     ram: RamSampler,
+    /// This account's unread count over this window's taskbar icon.
+    badge: TaskbarBadge,
 }
 
 impl AccountWindow {
@@ -1323,6 +1348,18 @@ fn window_screen(w: &mut AccountWindow, ui: &mut egui::Ui) {
     };
     let state = &mut live.state;
     session_logic(state, &ctx, &w.config, true);
+    // Its own account's count on its own taskbar button.
+    let count = if w.config.taskbar_badge {
+        state.unread_total()
+    } else {
+        0
+    };
+    live.badge.update(
+        Target::Title(&w.title),
+        count,
+        w.config.taskbar_badge,
+        crate::taskbar::rgb(w.theme.palette.danger),
+    );
     let mut close = ctx.input(|i| i.viewport().close_requested());
     if let Some(reason) = state.fatal.take() {
         w.fatal = Some(reason);
@@ -4436,39 +4473,19 @@ impl State {
 
     /// Unread pill / mention badge / muted look for a server icon.
     fn guild_badge(&self, g: &Guild, now: &str) -> Badge {
-        if g.is_dms() {
-            // DMs: only a mention count (every unmuted DM message counts).
-            let mentions = g
-                .channels
-                .iter()
-                .filter(|c| !self.is_muted(&g.id, c, now))
-                .map(|c| self.reads.mentions(&c.id))
-                .sum();
-            return Badge {
-                unread: false,
-                mentions,
-                muted: false,
-            };
-        }
-        if self.mutes.guild_muted(&g.id, now) {
-            return Badge {
-                unread: false,
-                mentions: 0,
-                muted: true,
-            };
-        }
-        let mut badge = Badge::default();
-        for c in g.channels.iter().filter(|c| c.is_text()) {
-            if self
-                .mutes
-                .channel_muted(&g.id, &c.id, c.parent_id.as_deref(), now)
-            {
-                continue;
-            }
-            badge.unread |= self.reads.is_unread(&c.id);
-            badge.mentions += self.reads.mentions(&c.id);
-        }
-        badge
+        crate::badge::guild_badge(g, &self.reads, &self.mutes, now)
+    }
+
+    /// The taskbar badge count: the sum of the rail's red badges (mentions
+    /// plus unread DMs, muted servers and channels left out).
+    fn unread_total(&self) -> u32 {
+        crate::badge::total_count(
+            &self.dms,
+            &self.guilds,
+            &self.reads,
+            &self.mutes,
+            &notify::now_iso(),
+        )
     }
 
     /// Drop typing entries older than 10s. Returns true if anyone is still typing.
@@ -8901,14 +8918,6 @@ fn typing_row(ui: &mut egui::Ui, names: &[&str], pal: &Palette) {
         galley,
         pal.muted,
     );
-}
-
-/// Unread / mention / muted state of a server icon.
-#[derive(Clone, Copy, Default)]
-struct Badge {
-    unread: bool,
-    mentions: u32,
-    muted: bool,
 }
 
 /// Window has keyboard focus (unknown counts as focused).
