@@ -822,6 +822,9 @@ pub fn list_ui(
                         }
                     }
                     Some(Row::Member(m)) => {
+                        if resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
                         if member_row(ui, rect, &resp, m, &view, compact, config, pal) {
                             clicked = Some(Clicked {
                                 member: (**m).clone(),

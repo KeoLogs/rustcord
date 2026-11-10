@@ -291,6 +291,14 @@ impl Palette {
         v.widgets.active.bg_fill = self.selected;
         v.widgets.active.fg_stroke = Stroke::new(1.0, self.text);
         v.widgets.open.weak_bg_fill = self.selected;
+        // Buttons read as clickable: pointer cursor, a faint outline on
+        // hover (also visible on filled buttons, whose fill doesn't change),
+        // and pressed ones sit flat instead of growing.
+        v.interact_cursor = Some(egui::CursorIcon::PointingHand);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, self.strong.gamma_multiply(0.22));
+        v.widgets.active.bg_stroke = Stroke::new(1.0, self.strong.gamma_multiply(0.4));
+        v.widgets.hovered.expansion = 1.0;
+        v.widgets.active.expansion = 0.0;
 
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.divider);
         v.popup_shadow = egui::Shadow {

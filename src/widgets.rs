@@ -47,7 +47,7 @@ pub fn menu_item(
         (Tone::Normal, false) => (None, pal.text),
     };
     if let Some(bg) = bg {
-        ui.painter().rect_filled(rect, 4, bg);
+        ui.painter().rect_filled(rect, 4, pressed_fill(&resp, bg));
     }
     let galley = crate::app::truncated(
         ui,
@@ -92,7 +92,8 @@ pub fn dot_item(
     let (rect, resp) = ui.allocate_exact_size(vec2(w, MENU_ROW), egui::Sense::click());
     let hovered = resp.hovered();
     if hovered {
-        ui.painter().rect_filled(rect, 4, pal.accent);
+        ui.painter()
+            .rect_filled(rect, 4, pressed_fill(&resp, pal.accent));
     } else if selected {
         ui.painter().rect_filled(rect, 4, pal.hover);
     }
@@ -115,6 +116,23 @@ pub fn dot_item(
         ui.close();
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A hover fill, a little darker while the mouse button is held on it, so
+/// clicks feel like presses.
+pub fn pressed_fill(resp: &egui::Response, fill: Color32) -> Color32 {
+    if resp.is_pointer_button_down_on() {
+        let [r, g, b, a] = fill.to_srgba_unmultiplied();
+        let k = 0.82;
+        Color32::from_rgba_unmultiplied(
+            (r as f32 * k) as u8,
+            (g as f32 * k) as u8,
+            (b as f32 * k) as u8,
+            a,
+        )
+    } else {
+        fill
+    }
 }
 
 /// Thin line between menu groups.
@@ -170,8 +188,15 @@ pub fn icon_button_sized(
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size), egui::Sense::click());
     let hovered = resp.hovered() && enabled;
-    if hovered {
-        ui.painter().rect_filled(rect.shrink(2.0), 4, pal.hover);
+    let pressed = enabled && resp.is_pointer_button_down_on();
+    // Fade the hover background in and out instead of snapping.
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(resp.id.with("hover"), hovered, 0.08);
+    if t > 0.0 {
+        let fill = if pressed { pal.selected } else { pal.hover };
+        ui.painter()
+            .rect_filled(rect.shrink(2.0), 4, fill.gamma_multiply(t));
     }
     let col = if !enabled {
         pal.muted_text()
@@ -180,7 +205,13 @@ pub fn icon_button_sized(
     } else {
         pal.muted
     };
-    icons::paint(ui, rect, icon, icons::font(glyph), col);
+    // Pressed: the glyph sinks a pixel (same size, so no new atlas glyphs).
+    let at = if pressed {
+        rect.translate(vec2(0.0, 1.0))
+    } else {
+        rect
+    };
+    icons::paint(ui, at, icon, icons::font(glyph), col);
     let resp = if enabled {
         resp.on_hover_cursor(egui::CursorIcon::PointingHand)
     } else {

@@ -1143,11 +1143,17 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool, pal: &Palette) -> egui::Response {
     let t = ui.ctx().animate_bool_with_time(resp.id, *on, 0.12);
     let off_col = egui::Color32::from_gray(if pal.dark { 0x50 } else { 0xb0 });
     let bg = lerp_color(off_col, pal.online, t);
+    let bg = if resp.hovered() {
+        // A touch brighter on hover, darker while pressed.
+        crate::widgets::pressed_fill(&resp, lerp_color(bg, pal.strong, 0.12))
+    } else {
+        bg
+    };
     ui.painter().rect_filled(rect, 11, bg);
     let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, t);
     ui.painter()
         .circle_filled(egui::pos2(x, rect.center().y), 8.0, egui::Color32::WHITE);
-    resp
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 // ---------------------------------------------------------------------------

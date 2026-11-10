@@ -7484,7 +7484,8 @@ fn inbox_row(ui: &mut egui::Ui, item: &InboxItem, pal: &Palette) -> egui::Respon
             egui::StrokeKind::Inside,
         );
     }
-    resp.on_hover_text("Jump to message")
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Jump to message")
 }
 
 /// One server cell when the rail is docked as a strip (a row).
@@ -8677,11 +8678,15 @@ fn add_reaction_button(
     pal: &Palette,
 ) -> Option<ReactionAction> {
     let (r, _) = ui.allocate_exact_size(vec2(32.0, 32.0), egui::Sense::hover());
-    let btn = ui.interact(r, id, egui::Sense::click());
+    let btn = ui
+        .interact(r, id, egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
     let open = egui::Popup::is_id_open(ui.ctx(), id.with("popup"));
     let hot = btn.hovered() || open;
     if hot {
-        ui.painter().rect_filled(r.shrink(2.0), 4, pal.hover);
+        let fill = if open { pal.selected } else { pal.hover };
+        ui.painter()
+            .rect_filled(r.shrink(2.0), 4, widgets::pressed_fill(&btn, fill));
     }
     icons::paint(
         ui,
@@ -8772,10 +8777,17 @@ fn hover_bar(
                             *action = Some(MessageAction::Edit(m.id.clone(), m.content.clone()));
                         }
                         let (r, _) = ui.allocate_exact_size(vec2(32.0, 32.0), egui::Sense::hover());
-                        let more = ui.interact(r, more_id, egui::Sense::click());
+                        let more = ui
+                            .interact(r, more_id, egui::Sense::click())
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
                         let open = egui::Popup::is_id_open(ui.ctx(), more_id.with("popup"));
                         if more.hovered() || open {
-                            ui.painter().rect_filled(r.shrink(2.0), 4, pal.hover);
+                            let fill = if open { pal.selected } else { pal.hover };
+                            ui.painter().rect_filled(
+                                r.shrink(2.0),
+                                4,
+                                widgets::pressed_fill(&more, fill),
+                            );
                         }
                         icons::paint(
                             ui,
@@ -8967,11 +8979,14 @@ fn attachment_ui(
             Some((w, h)) => image.fit_to_exact_size(vec2(w, h)),
             None => image.max_size(vec2(max_w, max_h)),
         };
-        let resp = ui.add(image).on_hover_text(format!(
-            "{} ({}) · click to open full size",
-            a.filename,
-            a.human_size()
-        ));
+        let resp = ui
+            .add(image)
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(format!(
+                "{} ({}) · click to open full size",
+                a.filename,
+                a.human_size()
+            ));
         if resp.clicked() {
             clicked = Some(a.url.clone());
         }
