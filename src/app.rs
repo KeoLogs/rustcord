@@ -2575,7 +2575,13 @@ impl State {
                 })
                 .collect::<Vec<_>>()
         };
-        let user_name = |id: &str| names.get(id).cloned();
+        let lookup = ChatLookup {
+            guild,
+            guilds: &self.guilds,
+            dms: &self.dms,
+            members: &self.member_cache,
+            names,
+        };
         let channel_name = |id: &str| {
             std::iter::once(&self.dms)
                 .chain(&self.guilds)
@@ -2594,8 +2600,10 @@ impl State {
             },
             suggest_users: &suggest_users,
             suggest_channels: &suggest_channels,
-            user_name: &user_name,
             channel_name: &channel_name,
+            lookup: &lookup,
+            formatting: !config.disable_formatting,
+            emoji_images: config.modules.emoji_images,
             // Room for the box, header and pager under the button.
             list_height: Some(
                 (ctx.content_rect().bottom() - s.anchor.bottom() - 150.0).clamp(160.0, 420.0),
@@ -5609,6 +5617,12 @@ impl State {
             );
             return;
         }
+        // Friends / Message Requests: the last DM's members don't belong
+        // here (selected_channel still holds that DM).
+        if self.home_page_open() {
+            self.home_aside(ui, header, config, pal);
+            return;
+        }
         let Some(channel_id) = self.selected_channel.clone() else {
             return;
         };
@@ -5761,6 +5775,104 @@ impl State {
         }
         if let Some(c) = clicked {
             self.open_profile(c.member.user, guild, c.rect, &ctx);
+        }
+    }
+
+    /// The aside next to the Friends / Message Requests page: "Active Now",
+    /// friends who are online with a status or activity line. A click opens
+    /// the DM (existing ones locally, no API call).
+    fn home_aside(
+        &mut self,
+        ui: &mut egui::Ui,
+        header: egui::Rect,
+        config: &Config,
+        pal: &Palette,
+    ) {
+        let galley = truncated(
+            ui,
+            "Active Now",
+            theme::bold_font(14.0),
+            pal.strong,
+            header.width() - 32.0,
+        );
+        ui.painter().galley(
+            egui::pos2(
+                header.left() + 16.0,
+                header.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            pal.strong,
+        );
+        let mut active: Vec<(&User, Status, &str)> = self
+            .friends
+            .as_ref()
+            .into_iter()
+            .flat_map(|f| f.rels.iter())
+            .filter(|r| r.kind == crate::friends::RelKind::Friend)
+            .filter_map(|r| {
+                let p = self.presences.get(&r.user.id)?;
+                let act = p.activity.as_deref()?;
+                (p.status != Status::Offline).then_some((&r.user, p.status, act))
+            })
+            .collect();
+        active.sort_by_cached_key(|(u, _, _)| u.name.to_lowercase());
+        if active.is_empty() {
+            empty_state(
+                ui,
+                icons::USERS,
+                "It's quiet for now",
+                "Friends who are playing something or have a status show up here.",
+                None,
+                pal,
+            );
+            return;
+        }
+        let mut open = None;
+        egui::ScrollArea::vertical()
+            .id_salt("home_aside")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (u, status, act) in &active {
+                    let (rect, resp) = ui.allocate_exact_size(
+                        vec2(ui.available_width(), 52.0),
+                        egui::Sense::click(),
+                    );
+                    let hovered = resp.hovered();
+                    if hovered {
+                        ui.painter().rect_filled(rect, 4, pal.hover);
+                    }
+                    let a = egui::Rect::from_center_size(
+                        egui::pos2(rect.left() + 24.0, rect.center().y),
+                        vec2(32.0, 32.0),
+                    );
+                    paint_avatar(ui, a, &u.id, &u.name, &u.avatar_url, config, pal);
+                    let ring = if hovered { pal.hover } else { pal.sidebar };
+                    members::status_dot(ui, a, *status, ring, pal);
+                    let x = a.right() + 12.0;
+                    let w = rect.right() - 8.0 - x;
+                    let name = truncated(ui, &u.name, theme::bold_font(14.5), pal.strong, w);
+                    let sub = truncated(ui, act, egui::FontId::proportional(12.0), pal.muted, w);
+                    let elided = name.elided || sub.elided;
+                    let top = rect.center().y - (name.size().y + sub.size().y - 2.0) / 2.0;
+                    let nh = name.size().y;
+                    ui.painter().galley(egui::pos2(x, top), name, pal.strong);
+                    ui.painter()
+                        .galley(egui::pos2(x, top + nh - 2.0), sub, pal.muted);
+                    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    let resp = if elided {
+                        resp.on_hover_text(format!("{}\n{act}", u.name))
+                    } else {
+                        resp
+                    };
+                    if resp.clicked() {
+                        open = Some(u.id.clone());
+                    }
+                }
+            });
+        if let Some(uid) = open {
+            let ctx = ui.ctx().clone();
+            self.home_action(HomeAction::Dm(uid), &ctx, config);
         }
     }
 

@@ -46,6 +46,7 @@ use eframe::egui::{self, Color32, RichText, Sense, vec2};
 use serde_json::Value;
 
 use crate::icons;
+use crate::markdown;
 use crate::theme::{Bold, Palette};
 use crate::types::Message;
 
@@ -56,7 +57,6 @@ pub const PAGE_SIZE: u32 = 25;
 /// Largest offset Discord accepts; later results can't be paged to.
 pub const MAX_OFFSET: u32 = 9975;
 /// Characters of a result's text shown before it's cut off.
-const MAX_PREVIEW_CHARS: usize = 400;
 /// Autocomplete rows for users / channels.
 const MAX_SUGGESTIONS: usize = 8;
 /// Pause after typing before searching by itself.
@@ -706,64 +706,6 @@ pub fn match_ranges(hay: &str, terms: &[String]) -> Vec<Range<usize>> {
     out
 }
 
-/// Message text for a result: `<@id>` → `@name`, `<#id>` → `#channel`,
-/// `<:emoji:id>` → `:emoji:`, `<t:unix>` → local time; cut to a preview.
-pub fn clean_content(
-    content: &str,
-    user_name: &dyn Fn(&str) -> Option<String>,
-    channel_name: &dyn Fn(&str) -> Option<String>,
-) -> String {
-    let mut out = String::with_capacity(content.len());
-    let mut rest = content;
-    while let Some(open) = rest.find('<') {
-        out.push_str(&rest[..open]);
-        let tail = &rest[open..];
-        if let Some(close) = tail.find('>')
-            && let Some(text) = render_tag(&tail[1..close], user_name, channel_name)
-        {
-            out.push_str(&text);
-            rest = &tail[close + 1..];
-            continue;
-        }
-        out.push('<');
-        rest = &tail[1..];
-    }
-    out.push_str(rest);
-    if out.chars().count() > MAX_PREVIEW_CHARS {
-        out = out.chars().take(MAX_PREVIEW_CHARS).collect::<String>() + "…";
-    }
-    out
-}
-
-fn render_tag(
-    inner: &str,
-    user_name: &dyn Fn(&str) -> Option<String>,
-    channel_name: &dyn Fn(&str) -> Option<String>,
-) -> Option<String> {
-    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    if let Some(id) = inner.strip_prefix("@&") {
-        return digits(id).then(|| "@role".to_string());
-    }
-    if let Some(id) = inner.strip_prefix("@!").or_else(|| inner.strip_prefix('@')) {
-        return digits(id).then(|| format!("@{}", user_name(id).unwrap_or("unknown-user".into())));
-    }
-    if let Some(id) = inner.strip_prefix('#') {
-        return digits(id)
-            .then(|| format!("#{}", channel_name(id).unwrap_or("unknown-channel".into())));
-    }
-    if let Some(ts) = inner.strip_prefix("t:") {
-        let unix = ts.split(':').next()?;
-        let unix: i64 = unix.parse().ok()?;
-        return (unix > 0).then(|| crate::timefmt::full(unix));
-    }
-    // <:name:id> or <a:name:id>
-    let parts: Vec<&str> = inner.split(':').collect();
-    match parts.as_slice() {
-        ["" | "a", name, id] if !name.is_empty() && digits(id) => Some(format!(":{name}:")),
-        _ => None,
-    }
-}
-
 /// "1,234".
 fn group_digits(n: u64) -> String {
     let s = n.to_string();
@@ -1012,9 +954,15 @@ pub struct SearchCtx<'a> {
     /// first, at most `n`.
     pub suggest_users: &'a dyn Fn(&str, usize) -> Vec<Suggestion>,
     pub suggest_channels: &'a dyn Fn(&str, usize) -> Vec<Suggestion>,
-    /// Names for `<@id>` / `<#id>` in result text and channel headers.
-    pub user_name: &'a dyn Fn(&str) -> Option<String>,
+    /// Names for channel headers.
     pub channel_name: &'a dyn Fn(&str) -> Option<String>,
+    /// Mentions, roles and channels in result text (rendered as markdown
+    /// like the chat).
+    pub lookup: &'a dyn markdown::Lookup,
+    /// Settings > Chat formatting; off = plain text.
+    pub formatting: bool,
+    /// The Emoji images module.
+    pub emoji_images: bool,
     /// Height of the results list; None = fill the space below the box
     /// (side panel). Popups should set it (their height starts tiny).
     pub list_height: Option<f32>,
@@ -1053,6 +1001,8 @@ pub struct SearchPanel {
     total: u64,
     partial: bool,
     results: Vec<Message>,
+    /// Parsed markdown of each result (same order), parsed once per page.
+    blocks: Vec<Vec<markdown::Block>>,
     /// Parse of `input` (re-done when it changes or on Enter).
     parsed: Option<(String, Parsed)>,
     sugg_for: String,
@@ -1141,6 +1091,10 @@ impl SearchPanel {
             return;
         }
         self.total = total;
+        self.blocks = messages
+            .iter()
+            .map(|m| markdown::parse(&m.content))
+            .collect();
         self.results = messages;
         self.partial = partial;
         self.status = Status::Done;
@@ -1230,6 +1184,7 @@ impl SearchPanel {
         self.seq += 1;
         self.status = Status::Loading;
         self.results = Vec::new();
+        self.blocks = Vec::new();
         Some(SearchAction::Search {
             seq: self.seq,
             query,
@@ -1588,7 +1543,7 @@ impl SearchPanel {
         }
         scroll.show(ui, |ui| {
             let mut last_channel: Option<&str> = None;
-            for m in &self.results {
+            for (i, m) in self.results.iter().enumerate() {
                 if last_channel != Some(m.channel_id.as_str()) {
                     last_channel = Some(&m.channel_id);
                     ui.add_space(6.0);
@@ -1601,7 +1556,7 @@ impl SearchPanel {
                     };
                     ui.label(RichText::new(header).size(12.0).color(pal.muted).bold());
                 }
-                if result_card(ui, m, &self.terms, cx) {
+                if result_card(ui, m, self.blocks.get(i), &self.terms, cx) {
                     action = Some(SearchAction::Jump {
                         channel_id: m.channel_id.clone(),
                         message_id: m.id.clone(),
@@ -1705,78 +1660,121 @@ fn centered_note(
     ui.add_space(16.0);
 }
 
-/// One result. Returns true when it (or its Jump button) was clicked.
-fn result_card(ui: &mut egui::Ui, m: &Message, terms: &[String], cx: &SearchCtx<'_>) -> bool {
+/// One result: avatar, name, time and the message rendered as markdown
+/// (spoilers stay hidden until clicked; clicking one reveals it rather than
+/// jumping). Returns true when the card, its text or its Jump button was
+/// clicked.
+fn result_card(
+    ui: &mut egui::Ui,
+    m: &Message,
+    blocks: Option<&Vec<markdown::Block>>,
+    terms: &[String],
+    cx: &SearchCtx<'_>,
+) -> bool {
     let pal = cx.pal;
-    let card_id = ui.scope_id().with(("search_hit", &m.id));
-    let mut prepared = egui::Frame::new()
-        .corner_radius(6)
-        .inner_margin(egui::Margin::symmetric(10, 8))
-        .outer_margin(egui::Margin::symmetric(0, 2))
-        .begin(ui);
-    {
-        let ui = &mut prepared.content_ui;
-        ui.set_width(ui.available_width());
-        ui.horizontal_top(|ui| {
-            let size = 32.0;
-            let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-            avatar(ui, rect, m, cx);
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&m.author.name).color(pal.strong).bold());
-                    ui.label(
-                        RichText::new(crate::timefmt::full(m.time))
-                            .small()
-                            .color(pal.muted),
-                    )
-                    .on_hover_text(crate::timefmt::long(m.time));
+    // Spoiler reveal state is per card, apart from the chat's.
+    let key = format!("search:{}", m.id);
+    let mut jump = false;
+    // The card's own click sense sits under its contents, so spoilers and
+    // the Jump button get their clicks first.
+    let card = ui.scope_builder(egui::UiBuilder::new().sense(Sense::click()), |ui| {
+        let mut prepared = egui::Frame::new()
+            .corner_radius(6)
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .outer_margin(egui::Margin::symmetric(0, 2))
+            .begin(ui);
+        {
+            let ui = &mut prepared.content_ui;
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                let size = 32.0;
+                let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+                avatar(ui, rect, m, cx);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        // Room for the Jump button on the right.
+                        ui.set_max_width((ui.available_width() - 56.0).max(40.0));
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&m.author.name).color(pal.strong).bold(),
+                            )
+                            .truncate()
+                            .selectable(false),
+                        );
+                        ui.label(
+                            RichText::new(crate::timefmt::full(m.time))
+                                .small()
+                                .color(pal.muted),
+                        )
+                        .on_hover_text(crate::timefmt::long(m.time));
+                    });
+                    if !m.content.is_empty() {
+                        let plain;
+                        let blocks = match blocks {
+                            Some(b) if cx.formatting => b.as_slice(),
+                            _ => {
+                                plain = markdown::plain(&m.content);
+                                plain.as_slice()
+                            }
+                        };
+                        let mut rctx = markdown::RenderCtx::new(pal, cx.lookup, &key);
+                        rctx.emoji_images = cx.emoji_images;
+                        rctx.bold_family = Some(crate::theme::bold_family());
+                        rctx.highlight = terms;
+                        let out = markdown::render(ui, blocks, &rctx);
+                        // Text, mentions and links open the result too.
+                        jump |= out.action.is_some() || out.response.is_some_and(|r| r.clicked());
+                    }
+                    for a in &m.attachments {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!(
+                                    "{} {}  ({})",
+                                    icons::PAPERCLIP,
+                                    a.filename,
+                                    a.human_size()
+                                ))
+                                .small()
+                                .color(pal.muted),
+                            )
+                            .truncate()
+                            .selectable(false),
+                        );
+                    }
+                    if m.content.is_empty() && m.attachments.is_empty() {
+                        ui.label(RichText::new("(no text)").italics().color(pal.muted));
+                    }
                 });
-                let text = clean_content(&m.content, cx.user_name, cx.channel_name);
-                if !text.is_empty() {
-                    let job = highlighted(
-                        &text,
-                        &match_ranges(&text, terms),
-                        pal,
-                        ui.available_width(),
-                    );
-                    ui.add(egui::Label::new(job).selectable(false));
-                }
-                for a in &m.attachments {
-                    ui.label(
-                        RichText::new(format!(
-                            "{} {}  ({})",
-                            icons::PAPERCLIP,
-                            a.filename,
-                            a.human_size()
-                        ))
-                        .small()
-                        .color(pal.muted),
-                    );
-                }
-                if text.is_empty() && m.attachments.is_empty() {
-                    ui.label(RichText::new("(no text)").italics().color(pal.muted));
-                }
             });
-        });
-    }
-    let outer = prepared.allocate_space(ui);
-    let hovered = ui.rect_contains_pointer(outer.rect);
-    prepared.frame.fill = if hovered { pal.msg_hover } else { pal.chat };
-    prepared.paint(ui);
-
-    let card = ui
-        .interact(outer.rect, card_id, Sense::click())
+        }
+        let outer = prepared.allocate_space(ui);
+        let hovered = ui.rect_contains_pointer(outer.rect);
+        prepared.frame.fill = if hovered { pal.msg_hover } else { pal.chat };
+        prepared.paint(ui);
+        if hovered {
+            // Sized to its text and never wrapped (the "Jum/p" bug), at the
+            // card's top right.
+            let btn = egui::Button::new(RichText::new("Jump").size(12.0).color(pal.text))
+                .fill(pal.selected)
+                .corner_radius(4)
+                .wrap_mode(egui::TextWrapMode::Extend)
+                .min_size(vec2(44.0, 20.0));
+            let row = egui::Rect::from_min_max(
+                egui::pos2(outer.rect.left(), outer.rect.top() + 8.0),
+                egui::pos2(outer.rect.right() - 10.0, outer.rect.top() + 28.0),
+            );
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(row)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            jump |= child.add(btn).clicked();
+        }
+    });
+    let resp = card
+        .response
         .on_hover_cursor(egui::CursorIcon::PointingHand);
-    let mut jump = card.clicked();
-    if hovered {
-        let r =
-            egui::Rect::from_min_size(outer.rect.right_top() + vec2(-58.0, 8.0), vec2(48.0, 20.0));
-        let btn = egui::Button::new(RichText::new("Jump").size(12.0).color(pal.text))
-            .fill(pal.selected)
-            .corner_radius(4);
-        jump |= ui.put(r, btn).clicked();
-    }
-    jump
+    jump || resp.clicked()
 }
 
 fn avatar(ui: &egui::Ui, rect: egui::Rect, m: &Message, cx: &SearchCtx<'_>) {
@@ -1806,36 +1804,6 @@ fn avatar(ui: &egui::Ui, rect: egui::Rect, m: &Message, cx: &SearchCtx<'_>) {
             Color32::WHITE,
         );
     }
-}
-
-/// Text with the matched ranges highlighted like Discord's search hits.
-fn highlighted(
-    text: &str,
-    ranges: &[Range<usize>],
-    pal: &Palette,
-    wrap: f32,
-) -> egui::text::LayoutJob {
-    let font = egui::FontId::proportional(14.5);
-    let normal = egui::TextFormat::simple(font.clone(), pal.text);
-    let hit = egui::TextFormat {
-        color: pal.strong,
-        background: pal.accent.gamma_multiply(0.45),
-        ..egui::TextFormat::simple(font, pal.strong)
-    };
-    let mut job = egui::text::LayoutJob::default();
-    job.wrap.max_width = wrap;
-    let mut at = 0;
-    for r in ranges {
-        if r.start > at {
-            job.append(&text[at..r.start], 0.0, normal.clone());
-        }
-        job.append(&text[r.clone()], 0.0, hit.clone());
-        at = r.end;
-    }
-    if at < text.len() {
-        job.append(&text[at..], 0.0, normal);
-    }
-    job
 }
 
 // ---------------------------------------------------------------------------
@@ -2140,29 +2108,6 @@ mod tests {
         assert!(match_ranges("anything", &[]).is_empty());
     }
 
-    #[test]
-    fn cleans_mentions_and_emoji() {
-        let user = |id: &str| (id == "1").then(|| "leo".to_string());
-        let chan = |id: &str| (id == "2").then(|| "general".to_string());
-        assert_eq!(
-            clean_content(
-                "hi <@1> <@!9> in <#2> <@&5> <:pog:123> <a:dance:456>",
-                &user,
-                &chan
-            ),
-            "hi @leo @unknown-user in #general @role :pog: :dance:"
-        );
-        assert_eq!(
-            clean_content("a < b > c <3 <@x>", &user, &chan),
-            "a < b > c <3 <@x>"
-        );
-        let long = "x".repeat(MAX_PREVIEW_CHARS + 10);
-        assert_eq!(
-            clean_content(&long, &user, &chan).chars().count(),
-            MAX_PREVIEW_CHARS + 1
-        );
-    }
-
     fn no_users(_: &str, _: usize) -> Vec<Suggestion> {
         vec![]
     }
@@ -2327,13 +2272,15 @@ mod tests {
             resolver: resolver(),
             suggest_users: &some_users,
             suggest_channels: &no_users,
-            user_name: &name,
+            lookup: &crate::markdown::NoLookup,
+            formatting: true,
+            emoji_images: false,
             channel_name: &name,
             list_height: Some(300.0),
         };
         let msg = |id: &str, channel: &str| {
             Message::from_json(&serde_json::json!({
-                "id": id, "channel_id": channel, "content": "hello <@1> world",
+                "id": id, "channel_id": channel, "content": "hello **<@1>** world ||secret||",
                 "timestamp": "2026-11-09T12:00:00+00:00",
                 "author": { "id": "1", "username": "leo" },
                 "attachments": [{ "filename": "a.png", "size": 2048 }]

@@ -1199,6 +1199,8 @@ pub struct RenderCtx<'a> {
     /// A registered bold font family, if any. Without one, bold text is drawn
     /// in the stronger text colour.
     pub bold_family: Option<FontFamily>,
+    /// Lower-case words to highlight (search results); empty = none.
+    pub highlight: &'a [String],
 }
 
 impl<'a> RenderCtx<'a> {
@@ -1211,6 +1213,7 @@ impl<'a> RenderCtx<'a> {
             emoji_size: 20.0,
             jumbo_emoji_size: 44.0,
             bold_family: None,
+            highlight: &[],
         }
     }
 }
@@ -1718,9 +1721,35 @@ impl Renderer<'_, '_> {
                 text
             };
             let format = self.text_format(ui, &atom.style, code, hidden);
-            job.append(&text, 0.0, format);
+            if hidden || code || self.ctx.highlight.is_empty() {
+                job.append(&text, 0.0, format);
+            } else {
+                self.append_highlighted(&mut job, &text, format);
+            }
         }
         self.flush(ui, &mut job, key, links);
+    }
+
+    /// Append `text` with the search terms in `ctx.highlight` marked like
+    /// Discord's search hits.
+    fn append_highlighted(&self, job: &mut LayoutJob, text: &str, format: TextFormat) {
+        let pal = self.pal();
+        let hit = TextFormat {
+            color: pal.strong,
+            background: pal.accent.gamma_multiply(0.45),
+            ..format.clone()
+        };
+        let mut at = 0;
+        for r in crate::search::match_ranges(text, self.ctx.highlight) {
+            if r.start > at {
+                job.append(&text[at..r.start], 0.0, format.clone());
+            }
+            job.append(&text[r.clone()], 0.0, hit.clone());
+            at = r.end;
+        }
+        if at < text.len() {
+            job.append(&text[at..], 0.0, format);
+        }
     }
 
     /// Draw a run of text that shares the same spoiler / link.
