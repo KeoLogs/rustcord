@@ -1,8 +1,10 @@
 # Changelog
 
 Every update that reaches Leo bumps the version in `Cargo.toml` (shown in
-Settings → About and the API user agent): the minor number for each PR /
-feature batch, the patch number for fix-only pushes.
+Settings → About). Version x.y.z:
+- x: big update (y and z reset to 0)
+- y: add-ons and improvements (z resets to 0)
+- z: bug and issue fixes
 
 ## 0.2.0: Release B, Phase 1 (PR #9)
 - Layout resizing fixed (`tile_fit`): only the chat stretches, drawers below

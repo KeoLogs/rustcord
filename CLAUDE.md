@@ -174,9 +174,10 @@ I/O in `app.rs`.
 
 ## Versions
 
-Every update pushed for Leo bumps `version` in `Cargo.toml` and adds a
-`CHANGELOG.md` entry: minor for each PR / feature batch, patch for
-fix-only pushes. Settings → About shows it.
+Every update pushed for Leo bumps `version` in `Cargo.toml` (x.y.z) and
+adds a `CHANGELOG.md` entry. Leo's scheme: x = big update, y = add-ons and
+improvements, z = bug and issue fixes. y resets to 0 when x goes up; z
+resets to 0 when x or y goes up. Settings → About shows it.
 
 ## Before finishing any change
 
