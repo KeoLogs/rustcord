@@ -35,9 +35,12 @@ const INF: f32 = f32::INFINITY;
 
 /// Smallest chat (messages) width / height before panes fold.
 pub const MESSAGES_MIN: [f32; 2] = [240.0, 120.0];
-/// Composer height range when it's its own tile: one line of text plus the
-/// typing line, up to a few lines.
-pub const COMPOSER_RANGE: (f32, f32) = (COMPOSER_MIN_HEIGHT + 28.0, 220.0);
+/// Composer height range when it's its own tile: one flat row, as tall as
+/// the user panel so the bottom row lines up (the reply banner, typing line
+/// and upload cards float above it), up to a few lines.
+pub const COMPOSER_RANGE: (f32, f32) = (USER_PANEL_HEIGHT, 220.0);
+/// The composer's minimum before 0.6.1 (box plus a reserved typing line).
+const OLD_COMPOSER_MIN: f32 = COMPOSER_MIN_HEIGHT + 28.0;
 /// A list pane (channels, members) is never shorter than this.
 const LIST_MIN_HEIGHT: f32 = 120.0;
 
@@ -539,6 +542,32 @@ pub fn restore(tree: &mut Tree<Pane>, folded: &Folded) {
     }
 }
 
+/// One-time move for layouts saved before 0.6.1: a message box left at the
+/// old minimum height (72 plus its frame) drops to the new compact one, so
+/// it lines up with the user panel. A box the user made taller keeps its
+/// extra height. Returns whether anything changed.
+pub fn compact_composer(tree: &mut Tree<Pane>) -> bool {
+    let Some(mut child) = tree.tiles.find_pane(&Pane::Composer) else {
+        return false;
+    };
+    while let Some(parent) = tree.tiles.parent_of(child) {
+        if let Some(Tile::Container(Container::Linear(lin))) = tree.tiles.get_mut(parent)
+            && lin.dir == LinearDir::Vertical
+        {
+            let share = lin.shares[child];
+            // The old minimum plus any frame / tab bar (at most ~24 px).
+            if (OLD_COMPOSER_MIN - 0.5..=OLD_COMPOSER_MIN + 24.5).contains(&share) {
+                lin.shares
+                    .set_share(child, share - (OLD_COMPOSER_MIN - COMPOSER_RANGE.0));
+                return true;
+            }
+            return false;
+        }
+        child = parent;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -815,15 +844,17 @@ mod tests {
     #[test]
     fn window_min_fits_the_framed_minimums() {
         // leo-5 stacks the rail strip, the members + user panel column and
-        // the composer: with the frames that's taller than the old fixed
-        // 400 px minimum (the cropped-chat report), so the minimum grows.
+        // the composer: the window minimum follows the framed panes' sum
+        // (the cropped-chat report). Since 0.6.1 the compact composer
+        // (52, like the user panel) brings it back to about the old fixed
+        // 400 px minimum.
         let min = min_size(&leo5_tree(), FRAMED, true);
         let need = (RAIL.min + 19.0)
             + (LIST_MIN_HEIGHT + 19.0)
             + (USER_PANEL_HEIGHT + 19.0)
             + (COMPOSER_RANGE.0 + 19.0);
         assert!((min[1] - need).abs() < 0.5, "{min:?} vs {need}");
-        assert!(min[1] + BARS > WINDOW_MIN[1]);
+        assert!((min[1] + BARS - WINDOW_MIN[1]).abs() < 8.0, "{min:?}");
         // Narrow windows fold the side panes, so the width stays small.
         assert!(min[0] <= WINDOW_MIN[0], "{min:?}");
     }
@@ -861,6 +892,40 @@ mod tests {
                 "{name}: {comp:?}"
             );
         }
+    }
+
+    #[test]
+    fn old_composer_height_compacts_once() {
+        let composer_share = |t: &Tree<Pane>| {
+            let child = t.tiles.find_pane(&Pane::Composer).unwrap();
+            let tab = t.tiles.parent_of(child).unwrap();
+            let col = t.tiles.parent_of(tab).unwrap();
+            match t.tiles.get(col) {
+                Some(Tile::Container(Container::Linear(lin))) => lin.shares[tab],
+                _ => panic!("composer not in a column"),
+            }
+        };
+        let set = |t: &mut Tree<Pane>, v: f32| {
+            let child = t.tiles.find_pane(&Pane::Composer).unwrap();
+            let tab = t.tiles.parent_of(child).unwrap();
+            let col = t.tiles.parent_of(tab).unwrap();
+            if let Some(Tile::Container(Container::Linear(lin))) = t.tiles.get_mut(col) {
+                lin.shares.set_share(tab, v);
+            }
+        };
+        // Saved at the old minimum in the framed look (72 + 19).
+        let mut t = crate::layout::default_tree();
+        set(&mut t, OLD_COMPOSER_MIN + 19.0);
+        assert!(compact_composer(&mut t));
+        assert!((composer_share(&t) - (COMPOSER_RANGE.0 + 19.0)).abs() < 0.01);
+        // Already compact, or made taller by the user: left alone.
+        assert!(!compact_composer(&mut t));
+        set(&mut t, 160.0);
+        assert!(!compact_composer(&mut t));
+        assert!((composer_share(&t) - 160.0).abs() < 0.01);
+        // The new default is already compact and lines up with the user
+        // panel.
+        assert_eq!(COMPOSER_RANGE.0, USER_PANEL_HEIGHT);
     }
 
     #[test]

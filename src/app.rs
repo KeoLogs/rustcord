@@ -56,6 +56,9 @@ const TYPING_TIMEOUT: Duration = Duration::from_secs(10);
 const TYPING_RESEND: Duration = Duration::from_secs(8);
 const IMAGE_MAX: (f32, f32) = (400.0, 350.0);
 /// Acks for messages arriving in the open channel are sent at most this often.
+/// Storage flag: the 0.6.1 one-time compact message box move is done
+/// (`tile_fit::compact_composer`).
+const COMPOSER_COMPACT_KEY: &str = "layout_composer_compact_061";
 const ACK_INTERVAL: Duration = Duration::from_secs(3);
 /// Shown when a form is submitted while a rate-limit wait is running.
 const SLOW_DOWN_RETRY: &str = "Slow down: try again in a few seconds.";
@@ -153,6 +156,14 @@ impl RustCordApp {
             // A saved layout must be a well-formed tree with every panel once.
             .and_then(|t| crate::layout_presets::sanitize(&t).ok())
             .unwrap_or_else(layout::default_tree);
+        // 0.6.1: a message box saved at the old (taller) minimum becomes
+        // the compact row once, so it lines up with the user panel.
+        let compacted = storage
+            .and_then(|s| eframe::get_value::<bool>(s, COMPOSER_COMPACT_KEY))
+            .unwrap_or(false);
+        if !compacted {
+            crate::tile_fit::compact_composer(&mut tree);
+        }
         if demo {
             // `RUSTCORD_DEMO_LAYOUT=alt | leo5`: other layouts.
             match std::env::var("RUSTCORD_DEMO_LAYOUT").as_deref() {
@@ -878,6 +889,7 @@ impl eframe::App for RustCordApp {
         }
         eframe::set_value(storage, CONFIG_KEY, &self.config);
         eframe::set_value(storage, LAYOUT_KEY, &self.tree);
+        eframe::set_value(storage, COMPOSER_COMPACT_KEY, &true);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1820,6 +1832,10 @@ pub struct State {
     focus_composer: bool,
     /// The message box's widget id (for Ctrl+V media paste focus checks).
     composer_id: Option<egui::Id>,
+    /// Top of the message box tile's frame this frame (set by
+    /// `layout::draw_pane`), so the composer's floating rows (reply banner,
+    /// typing, uploads) sit above its border instead of over it.
+    pub composer_frame_top: Option<f32>,
     /// V was down last frame while pasting (Windows file-only clipboard).
     paste_v_down: bool,
     /// Last media paste: a held Ctrl+V (key repeat) adds it only once.
@@ -1939,6 +1955,7 @@ impl State {
             toggle_channels: false,
             focus_composer: false,
             composer_id: None,
+            composer_frame_top: None,
             paste_v_down: false,
             last_media_paste: None,
             premium_type: 0,
@@ -5200,7 +5217,7 @@ impl State {
         // Where things go: (avatar+name hit area, gear button).
         let (hit, gear, show_text) = if w >= 150.0 {
             let gear = egui::Rect::from_center_size(
-                egui::pos2(full.right() - 22.0, full.center().y),
+                egui::pos2(full.right() - 16.0, full.center().y),
                 vec2(32.0, 32.0),
             );
             let hit = egui::Rect::from_min_max(
@@ -6708,7 +6725,6 @@ impl State {
         let mut changed = false;
         let mut remove = None;
         let mut toggle_ping = false;
-        let mut box_rect = egui::Rect::NOTHING;
         let mut edit_id = None;
         let mut cursor = None;
         let mut has_focus = false;
@@ -6751,84 +6767,101 @@ impl State {
             }
         }
 
-        // Built bottom-up (like Discord) so the input row always stays visible
-        // and extra rows (files, reply banner) grow upwards.
-        let used = ui
+        // One flat row on the pane background (the blocky look, no bubble):
+        // [+] message …  [GIF] [emoji] [send]. As a tile it fills the pane
+        // and is centred; in the thread panel it's one user-panel row high.
+        // The reply banner, typing line and upload cards float above it, so
+        // the pane keeps its compact height.
+        let avail = ui.available_height();
+        let row_h = if avail <= crate::tile_fit::COMPOSER_RANGE.1 + 1.0 {
+            avail.max(32.0)
+        } else {
+            crate::responsive::USER_PANEL_HEIGHT
+        };
+        // Top of the pane's frame (set by `layout::draw_pane`), so the
+        // floating rows sit above its border, not over it.
+        let frame_top = self.composer_frame_top.take();
+        let box_rect = ui
             .with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                // Who's typing (under the box)
-                let typers: Vec<&str> = config
-                    .modules
-                    .typing_indicators
-                    .then(|| self.typing.get(&channel_id))
-                    .flatten()
-                    .map(|t| t.iter().map(|t| t.name.as_str()).collect())
-                    .unwrap_or_default();
-                typing_row(ui, &typers, pal);
-
-                // (+) [ message …               ] ➤
-                let reply_banner = !matches!(self.compose, Compose::New);
-                let mut box_frame = egui::Frame::new()
-                    .fill(pal.input)
-                    .corner_radius(8)
-                    .inner_margin(egui::Margin {
-                        left: 12,
-                        right: 12,
-                        top: 10,
-                        bottom: 10,
-                    });
-                if reply_banner {
-                    box_frame = box_frame.corner_radius(egui::CornerRadius {
-                        nw: 0,
-                        ne: 0,
-                        sw: 8,
-                        se: 8,
-                    });
-                }
-                box_rect = box_frame
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            if plus_button(ui, pal).clicked() {
-                                self.files_target = Some(channel_id.clone());
-                                let _ = self.tx.send(ToBackend::PickFiles);
-                            }
-                            ui.add_space(8.0);
-                            let can_send =
-                                !self.draft.trim().is_empty() || !self.pending_files.is_empty();
-                            let hint = match self
-                                .find_channel(&channel_id)
-                                .map(|(_, c)| (c.is_dm(), c.name.clone()))
-                            {
-                                Some((true, name)) => format!("Message @{name}"),
-                                Some((false, name)) => format!("Message #{name}"),
-                                None => "Message".into(),
-                            };
-                            // Right-hand buttons: [GIF] [emoji] [send].
-                            let n_buttons =
-                                1 + usize::from(config.modules.gif_picker) + usize::from(can_send);
-                            let send_w = n_buttons as f32 * (28.0 + ui.spacing().item_spacing.x);
-                            let out = egui::TextEdit::singleline(&mut self.draft)
-                                .hint_text(RichText::new(hint).color(pal.muted))
-                                .font(egui::FontId::proportional(15.0))
-                                .frame(egui::Frame::NONE)
-                                .margin(egui::Margin::ZERO)
-                                .desired_width(ui.available_width() - send_w)
-                                .show(ui);
-                            let resp = out.response;
-                            edit_id = Some(resp.id);
-                            self.composer_id = Some(resp.id);
-                            cursor = out.cursor_range.map(|r| r.primary.index.0);
-                            has_focus = resp.has_focus();
-                            if std::mem::take(&mut self.focus_composer) {
+                ui.allocate_ui_with_layout(
+                    vec2(ui.available_width(), row_h),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_size(vec2(ui.available_width(), row_h));
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        if widgets::icon_button_sized(
+                            ui,
+                            icons::PLUS,
+                            "Upload files (or drag them onto the window)",
+                            false,
+                            true,
+                            32.0,
+                            20.0,
+                            pal,
+                        )
+                        .clicked()
+                        {
+                            self.files_target = Some(channel_id.clone());
+                            let _ = self.tx.send(ToBackend::PickFiles);
+                        }
+                        ui.add_space(6.0);
+                        let can_send =
+                            !self.draft.trim().is_empty() || !self.pending_files.is_empty();
+                        let hint = match self
+                            .find_channel(&channel_id)
+                            .map(|(_, c)| (c.is_dm(), c.name.clone()))
+                        {
+                            Some((true, name)) => format!("Message @{name}"),
+                            Some((false, name)) => format!("Message #{name}"),
+                            None => "Message".into(),
+                        };
+                        // Right-hand buttons: [GIF] [emoji] [send].
+                        let step = ui.spacing().item_spacing.x;
+                        let right_w = (1 + usize::from(config.modules.gif_picker)) as f32
+                            * (32.0 + step)
+                            + if can_send { 28.0 + step } else { 0.0 }
+                            + 4.0;
+                        let out = egui::TextEdit::singleline(&mut self.draft)
+                            .hint_text(RichText::new(hint).color(pal.muted))
+                            .font(egui::FontId::proportional(15.0))
+                            .frame(egui::Frame::NONE)
+                            .margin(egui::Margin::ZERO)
+                            .desired_width((ui.available_width() - right_w).max(40.0))
+                            .show(ui);
+                        let resp = out.response;
+                        edit_id = Some(resp.id);
+                        self.composer_id = Some(resp.id);
+                        cursor = out.cursor_range.map(|r| r.primary.index.0);
+                        has_focus = resp.has_focus();
+                        if std::mem::take(&mut self.focus_composer) {
+                            resp.request_focus();
+                        }
+                        changed = resp.changed();
+                        if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            cancel = true;
+                        }
+                        let enter =
+                            resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            // Discord has no send button; a subtle one shows
+                            // only when there's something to send.
+                            let send_btn = can_send && send_button(ui, pal).clicked();
+                            if enter || send_btn {
+                                send = true;
                                 resp.request_focus();
                             }
-                            changed = resp.changed();
-                            if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                cancel = true;
-                            }
-                            let enter =
-                                resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let emoji = widgets::icon_button_sized(
+                                ui,
+                                icons::SMILEY,
+                                "Emoji",
+                                self.emoji_picker_open,
+                                true,
+                                32.0,
+                                20.0,
+                                pal,
+                            );
+                            emoji_btn = Some(emoji);
                             if config.modules.gif_picker {
                                 let open = self.gif_picker.is_some();
                                 let gif = widgets::icon_button_sized(
@@ -6837,8 +6870,8 @@ impl State {
                                     "GIFs",
                                     open,
                                     true,
-                                    28.0,
-                                    24.0,
+                                    32.0,
+                                    20.0,
                                     pal,
                                 );
                                 let demo = !open && self.demo_gifs.is_some();
@@ -6847,133 +6880,161 @@ impl State {
                                         Some(ComposerAction::ToggleGifPicker(gif.rect));
                                 }
                             }
-                            let emoji = widgets::icon_button_sized(
-                                ui,
-                                icons::SMILEY,
-                                "Emoji",
-                                self.emoji_picker_open,
-                                true,
-                                28.0,
-                                22.0,
-                                pal,
-                            );
-                            emoji_btn = Some(emoji);
-                            // Discord has no send button; a subtle one shows only
-                            // when there's something to send.
-                            let send_btn = can_send && send_button(ui, pal).clicked();
-                            if enter || send_btn {
-                                send = true;
-                                resp.request_focus();
+                        });
+                    },
+                )
+                .response
+                .rect
+            })
+            .inner;
+
+        // Above the row (floating over the chat, bottom up): who's typing,
+        // the reply / edit banner, then the files waiting to upload.
+        let typers: Vec<String> = config
+            .modules
+            .typing_indicators
+            .then(|| self.typing.get(&channel_id))
+            .flatten()
+            .map(|t| t.iter().map(|t| t.name.clone()).collect())
+            .unwrap_or_default();
+        let (banner, ping) = match &self.compose {
+            Compose::New => (None, None),
+            Compose::Reply { author, ping, .. } => {
+                (Some(("Replying to ", author.clone())), Some(*ping))
+            }
+            Compose::Edit { .. } => (Some(("Editing message", String::new())), None),
+        };
+        // A frame top from another composer (the tile's, when this is the
+        // thread panel's) is ignored: it must sit just above this row.
+        let frame_top =
+            frame_top.filter(|t| (box_rect.top() - 40.0..=box_rect.top() + 0.5).contains(t));
+        let float_bottom = frame_top.unwrap_or(box_rect.top()) - 4.0;
+        // Esc cancels a reply / edit even when the message box isn't
+        // focused (unless a picker or another text field has it).
+        if banner.is_some()
+            && !self.emoji_picker_open
+            && self.gif_picker.is_none()
+            && ui
+                .ctx()
+                .memory(|m| m.focused())
+                .is_none_or(|f| Some(f) == edit_id)
+            && ui.input(|i| i.key_pressed(egui::Key::Escape))
+        {
+            cancel = true;
+        }
+        let w = box_rect.width();
+        let shadow = egui::Shadow {
+            offset: [0, -2],
+            blur: 8,
+            spread: 0,
+            color: Color32::from_black_alpha(if pal.dark { 60 } else { 20 }),
+        };
+        let mut stack_top = float_bottom;
+        if banner.is_some() || !typers.is_empty() {
+            let layer = ui.layer_id();
+            let area = egui::Area::new(egui::Id::unique("rc_composer_float").with(&channel_id))
+                .order(float_order(layer))
+                .pivot(egui::Align2::LEFT_BOTTOM)
+                .fixed_pos(egui::pos2(box_rect.left(), float_bottom))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::new()
+                        .fill(pal.menu_bg())
+                        .stroke(egui::Stroke::new(1.0, pal.divider))
+                        .corner_radius(4)
+                        .inner_margin(egui::Margin::symmetric(12, 4))
+                        .shadow(shadow)
+                        .show(ui, |ui| {
+                            ui.set_width(w - 24.0);
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            if let Some((what, who)) = &banner {
+                                ui.horizontal(|ui| {
+                                    ui.set_min_height(24.0);
+                                    ui.spacing_mut().item_spacing.x = 0.0;
+                                    ui.label(RichText::new(*what).size(13.0).color(pal.muted));
+                                    if !who.is_empty() {
+                                        ui.label(
+                                            RichText::new(who).size(13.0).bold().color(pal.text),
+                                        );
+                                    } else {
+                                        ui.label(
+                                            RichText::new(" · Esc to cancel")
+                                                .size(13.0)
+                                                .color(pal.muted),
+                                        );
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            cancel |= widgets::icon_button_sized(
+                                                ui,
+                                                icons::X,
+                                                "Cancel (Esc)",
+                                                false,
+                                                true,
+                                                24.0,
+                                                16.0,
+                                                pal,
+                                            )
+                                            .clicked();
+                                            if let Some(on) = ping {
+                                                ui.add_space(10.0);
+                                                // Discord's "@ ON" switch: ping
+                                                // the author?
+                                                let (text, col) = if on {
+                                                    ("@ ON", pal.accent)
+                                                } else {
+                                                    ("@ OFF", pal.muted)
+                                                };
+                                                let chip = ui
+                                                    .add(
+                                                        egui::Button::new(
+                                                            RichText::new(text)
+                                                                .size(12.0)
+                                                                .bold()
+                                                                .color(col),
+                                                        )
+                                                        .frame(false),
+                                                    )
+                                                    .on_hover_text(if on {
+                                                        "Mentioning the author (click to turn off)"
+                                                    } else {
+                                                        "Not mentioning the author (click to turn on)"
+                                                    });
+                                                toggle_ping = chip.clicked();
+                                                ui.add_space(6.0);
+                                            }
+                                        },
+                                    );
+                                });
+                            }
+                            if !typers.is_empty() {
+                                let names: Vec<&str> = typers.iter().map(String::as_str).collect();
+                                typing_row(ui, &names, pal);
                             }
                         });
-                    })
-                    .response
-                    .rect;
-
-                // Reply / edit banner, attached to the top of the box.
-                let (banner, ping) = match &self.compose {
-                    Compose::New => (None, None),
-                    Compose::Reply { author, ping, .. } => {
-                        (Some(("Replying to ", author.clone())), Some(*ping))
-                    }
-                    Compose::Edit { .. } => (Some(("Editing message", String::new())), None),
-                };
-                if let Some((what, who)) = banner {
-                    egui::Frame::new()
-                        .fill(pal.sidebar)
-                        .corner_radius(egui::CornerRadius {
-                            nw: 8,
-                            ne: 8,
-                            sw: 0,
-                            se: 0,
-                        })
-                        .inner_margin(egui::Margin::symmetric(12, 6))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 0.0;
-                                ui.label(RichText::new(what).size(13.0).color(pal.muted));
-                                if !who.is_empty() {
-                                    ui.label(RichText::new(who).size(13.0).bold().color(pal.text));
-                                } else {
-                                    ui.label(
-                                        RichText::new(" · Esc to cancel")
-                                            .size(13.0)
-                                            .color(pal.muted),
-                                    );
-                                }
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let x = ui
-                                            .add(
-                                                egui::Button::new(
-                                                    RichText::new(icons::X)
-                                                        .size(16.0)
-                                                        .color(pal.muted),
-                                                )
-                                                .frame(false),
-                                            )
-                                            .on_hover_text("Cancel (Esc)");
-                                        cancel |= x.clicked();
-                                        if let Some(on) = ping {
-                                            ui.add_space(10.0);
-                                            // Discord's "@ ON" switch: ping the author?
-                                            let (text, col) = if on {
-                                                ("@ ON", pal.accent)
-                                            } else {
-                                                ("@ OFF", pal.muted)
-                                            };
-                                            let chip = ui
-                                                .add(
-                                                    egui::Button::new(
-                                                        RichText::new(text)
-                                                            .size(12.0)
-                                                            .bold()
-                                                            .color(col),
-                                                    )
-                                                    .frame(false),
-                                                )
-                                                .on_hover_text(if on {
-                                                    "Mentioning the author (click to turn off)"
-                                                } else {
-                                                    "Not mentioning the author (click to turn on)"
-                                                });
-                                            toggle_ping = chip.clicked();
-                                            ui.add_space(6.0);
-                                        }
-                                    },
-                                );
-                            });
-                        });
-                }
-            })
-            .response
-            .rect;
+                });
+            float_above(ui, area.response.layer_id);
+            stack_top = area.response.rect.top();
+        }
 
         // Files waiting to upload: Discord's attachment cards above the box
         // (floating over the chat, so the message box keeps its height),
         // with spoiler (eye) and remove (trash) buttons. The message text is
         // the comment.
         if !self.pending_files.is_empty() {
-            let w = box_rect.width();
             let limit = self.upload_limit();
             let layer = ui.layer_id();
             let cards = egui::Area::new(egui::Id::unique("rc_upload_cards").with(&channel_id))
                 .order(float_order(layer))
                 .pivot(egui::Align2::LEFT_BOTTOM)
-                .fixed_pos(egui::pos2(box_rect.left(), used.top() - 6.0))
+                .fixed_pos(egui::pos2(box_rect.left(), stack_top - 6.0))
                 .show(ui.ctx(), |ui| {
                     egui::Frame::new()
                         .fill(pal.input)
-                        .corner_radius(8)
+                        .stroke(egui::Stroke::new(1.0, pal.divider))
+                        .corner_radius(4)
                         .inner_margin(10)
-                        .shadow(egui::Shadow {
-                            offset: [0, -2],
-                            blur: 8,
-                            spread: 0,
-                            color: Color32::from_black_alpha(if pal.dark { 60 } else { 20 }),
-                        })
+                        .shadow(shadow)
                         .show(ui, |ui| {
                             ui.set_width(w - 20.0);
                             ui.horizontal_wrapped(|ui| {
@@ -8765,21 +8826,6 @@ fn channel_row(
         }
     };
     (resp, close)
-}
-
-/// Discord's ⊕ upload button: a filled circle with a plus cut out.
-fn plus_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 24.0), egui::Sense::click());
-    let col = if resp.hovered() {
-        pal.strong
-    } else {
-        pal.muted
-    };
-    // The filled Phosphor icon has the plus cut out, so it reads on any
-    // theme (glass themes have a see-through input fill).
-    icons::paint(ui, rect, icons::PLUS_CIRCLE, icons::fill_font(26.0), col);
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Upload files (or drag them onto the window)")
 }
 
 /// The subtle send arrow at the right of the message box (only when there's

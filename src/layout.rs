@@ -216,12 +216,9 @@ fn pane_margin(pane: Pane) -> egui::Margin {
     match pane {
         Pane::Servers => egui::Margin::symmetric(0, 12),
         Pane::Channels | Pane::Messages => egui::Margin::ZERO,
-        Pane::Composer => egui::Margin {
-            left: 16,
-            right: 16,
-            top: 0,
-            bottom: 0,
-        },
+        // The same small side padding as the user panel, so the "+" and
+        // the avatar line up with their pane edges (blocky look).
+        Pane::Composer => egui::Margin::symmetric(8, 0),
         Pane::Members => egui::Margin::ZERO,
         Pane::Profile => egui::Margin::symmetric(8, 0),
     }
@@ -357,6 +354,9 @@ pub fn draw_pane(ui: &mut egui::Ui, pane: Pane, ctx: &mut PaneCtx<'_>) {
     // transparent for panes the theme paints.
     ctx.theme.paint_pane_background(ui.painter(), rect, pane);
     let content = ctx.theme.pane_content(rect, pane);
+    if pane == Pane::Composer {
+        ctx.state.composer_frame_top = Some(rect.top());
+    }
     let show = |ui: &mut egui::Ui, ctx: &mut PaneCtx<'_>| {
         egui::Frame::new()
             .fill(ctx.theme.pane_fill(pane))

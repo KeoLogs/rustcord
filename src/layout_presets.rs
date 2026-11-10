@@ -130,7 +130,7 @@ pub fn build(preset: Preset) -> Tree<Pane> {
             let members = b.pane(Pane::Members);
             let lists = b.row(&[(servers, 72.0), (channels, 240.0)]);
             let left = b.col(&[(lists, 700.0), (profile, 52.0)]);
-            let chat = b.col(&[(messages, 680.0), (composer, 72.0)]);
+            let chat = b.col(&[(messages, 680.0), (composer, 52.0)]);
             let root = b.row(&[(left, 312.0), (chat, 728.0), (members, 240.0)]);
             b.finish(root)
         }
@@ -147,7 +147,7 @@ pub fn build(preset: Preset) -> Tree<Pane> {
             let composer = b.pane(Pane::Composer);
             let members = b.pane(Pane::Members);
             let tree = b.col(&[(channels, 700.0), (profile, 52.0)]);
-            let chat = b.col(&[(messages, 680.0), (composer, 72.0)]);
+            let chat = b.col(&[(messages, 680.0), (composer, 52.0)]);
             let root = b.row(&[
                 (servers, 72.0),
                 (tree, 240.0),
@@ -169,7 +169,7 @@ pub fn build(preset: Preset) -> Tree<Pane> {
             let composer = b.pane(Pane::Composer);
             let members = b.pane(Pane::Members);
             let left = b.col(&[(servers, 700.0), (profile, 52.0)]);
-            let chat = b.col(&[(messages, 680.0), (composer, 72.0)]);
+            let chat = b.col(&[(messages, 680.0), (composer, 52.0)]);
             let root = b.row(&[
                 (left, 72.0),
                 (channels, 240.0),
@@ -189,7 +189,7 @@ pub fn build(preset: Preset) -> Tree<Pane> {
             let members = b.pane(Pane::Members);
             let lists = b.row(&[(servers, 72.0), (channels, 200.0)]);
             let left = b.col(&[(lists, 700.0), (profile, 52.0)]);
-            let chat = b.col(&[(messages, 680.0), (composer, 72.0)]);
+            let chat = b.col(&[(messages, 680.0), (composer, 52.0)]);
             let root = b.row(&[(left, 272.0), (chat, 768.0), (members, 240.0)]);
             b.hide(Pane::Members);
             b.finish(root)
@@ -206,7 +206,7 @@ pub fn build(preset: Preset) -> Tree<Pane> {
             let composer = b.pane(Pane::Composer);
             let members = b.pane(Pane::Members);
             let left = b.col(&[(lists, 700.0), (profile, 52.0)]);
-            let chat = b.col(&[(messages, 680.0), (composer, 72.0)]);
+            let chat = b.col(&[(messages, 680.0), (composer, 52.0)]);
             let root = b.row(&[(left, 240.0), (chat, 800.0), (members, 240.0)]);
             b.finish(root)
         }
