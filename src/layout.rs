@@ -612,6 +612,36 @@ pub struct HostState {
     /// The chat header's LIST button was clicked (the app toggles the left
     /// drawer).
     pub toggle_left: bool,
+    /// The minimum window size last sent to the OS ([`keep_window_min`]).
+    pub min_window: Option<[f32; 2]>,
+}
+
+/// Keep the window's minimum inner size at what the layout needs: every
+/// pane's minimum plus its frame (border, label), the gaps and the bars
+/// around the tiles (`bars`: window size minus the tile area), never under
+/// `responsive::WINDOW_MIN`. Sent only when it changes; the OS then grows a
+/// window that's smaller (winit re-applies the bounds at once), and
+/// `tile_fit` squashes the lists, not the chat or composer, until it does.
+pub fn keep_window_min(
+    ctx: &egui::Context,
+    host: &mut HostState,
+    tree: &Tree<Pane>,
+    m: crate::tile_fit::Metrics,
+    bars: egui::Vec2,
+) {
+    let monitor = ctx.input(|i| i.viewport().monitor_size);
+    // Widths assume folding even in the layout editor (which doesn't fold),
+    // so entering it never widens the window.
+    let min = crate::tile_fit::window_min(tree, m, true, [bars.x, bars.y], monitor);
+    let changed = host
+        .min_window
+        .is_none_or(|old| (old[0] - min[0]).abs() > 0.5 || (old[1] - min[1]).abs() > 0.5);
+    if changed {
+        host.min_window = Some(min);
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+            min[0], min[1],
+        )));
+    }
 }
 
 /// Drawer slide time (doc §3.3 / §7: 120 ms ease-out).

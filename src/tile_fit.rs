@@ -28,7 +28,7 @@ use egui_tiles::{Container, LinearDir, Tile, TileId, Tiles, Tree};
 
 use crate::layout::Pane;
 use crate::responsive::{
-    ASIDE, COMPOSER_MIN_HEIGHT, RAIL, RAIL_NAMES, SIDEBAR, Tier, USER_PANEL_HEIGHT,
+    ASIDE, COMPOSER_MIN_HEIGHT, RAIL, RAIL_NAMES, SIDEBAR, Tier, USER_PANEL_HEIGHT, WINDOW_MIN,
 };
 
 const INF: f32 = f32::INFINITY;
@@ -194,10 +194,14 @@ fn contains(tiles: &Tiles<Pane>, id: TileId, pane: Pane, depth: usize) -> bool {
 
 /// Which child gives up space first when the container is too small: the
 /// lowest-priority content (members, then lists, then the user panel).
+/// The chat's own place in this order only matters when the window is
+/// under every minimum: the scrolling lists are squashed before it, and
+/// the composer and user panel last.
 fn shrink_rank(tiles: &Tiles<Pane>, id: TileId) -> u8 {
     [
         Pane::Members,
         Pane::Channels,
+        Pane::Messages,
         Pane::Servers,
         Pane::Profile,
         Pane::Composer,
@@ -211,7 +215,9 @@ fn shrink_rank(tiles: &Tiles<Pane>, id: TileId) -> u8 {
 /// `extent`. Each is clamped to its range; the flex child (the chat) takes
 /// the difference first, then the others (shrinking lowest-priority first).
 /// If every child is at its limit, the flex child (or the first unbounded
-/// one) still takes the rest, so the sizes always fill `extent`.
+/// one) still takes the rest, so the sizes always fill `extent`. Under
+/// every minimum the children are squashed in `shrink_order` (which lists
+/// the flex child too, after the scrolling lists).
 pub fn allocate(
     sizes: &[f32],
     ranges: &[(f32, f32)],
@@ -254,9 +260,12 @@ pub fn allocate(
             s[i] -= d;
             diff += d;
         }
-        // Still too big (the window is under every minimum): squash, chat
-        // first. Panes clip, so this never overlaps.
-        for &i in &order {
+        // Still too big (the window is under every minimum, e.g. the frame
+        // before a new minimum window size lands): squash in priority order,
+        // lists first, the composer and user panel last. Panes clip, so
+        // this never overlaps.
+        let squash = shrink_order.iter().copied().chain(flex);
+        for i in squash {
             if diff >= 0.0 {
                 break;
             }
@@ -343,6 +352,53 @@ fn fit_tile(tiles: &mut Tiles<Pane>, id: TileId, rect: Rect, m: Metrics, depth: 
         pos += s + m.gap;
         fit_tile(tiles, c, r, m, depth + 1);
     }
+}
+
+/// Smallest tile area `[width, height]` that holds every visible pane at
+/// its minimum (with frame chrome, gaps and tab bars). The width assumes
+/// every foldable pane is folded (narrower windows fold them into drawers)
+/// unless `can_fold` is off (nothing folds); the height is the largest
+/// over the fold states, so it holds at every width. The window's minimum
+/// inner size is this plus the bars around the tiles.
+pub fn min_size(tree: &Tree<Pane>, m: Metrics, can_fold: bool) -> [f32; 2] {
+    let lo = |t: &Tree<Pane>, axis| {
+        t.root
+            .filter(|&r| t.tiles.is_visible_in_layout(r))
+            .map_or(0.0, |r| range(&t.tiles, r, axis, m).0)
+    };
+    if !can_fold {
+        return [lo(tree, Axis::X), lo(tree, Axis::Y)];
+    }
+    let folded = |members, lists| {
+        let mut t = tree.clone();
+        apply_folds(&mut t, &Folds { members, lists });
+        t
+    };
+    let members = folded(true, false);
+    let all = folded(true, true);
+    let h = lo(tree, Axis::Y)
+        .max(lo(&members, Axis::Y))
+        .max(lo(&all, Axis::Y));
+    [lo(&all, Axis::X), h]
+}
+
+/// The window's minimum inner size: [`min_size`] plus `bars` (the window
+/// size minus the tile area: status bar, top bar), never under
+/// `WINDOW_MIN`, and never past the monitor (if known), whole points.
+pub fn window_min(
+    tree: &Tree<Pane>,
+    m: Metrics,
+    can_fold: bool,
+    bars: [f32; 2],
+    monitor: Option<eframe::egui::Vec2>,
+) -> [f32; 2] {
+    let tiles = min_size(tree, m, can_fold);
+    let mut out = [0, 1].map(|i| (tiles[i] + bars[i].max(0.0)).max(WINDOW_MIN[i]).ceil());
+    if let Some(mon) = monitor.filter(|v| v.x > 0.0 && v.y > 0.0) {
+        out[0] = out[0].min(mon.x);
+        out[1] = out[1].min(mon.y);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -510,19 +566,125 @@ mod tests {
             .collect()
     }
 
+    /// Pane rects (and tab bars) the way egui_tiles lays the tree out:
+    /// shares split the extent minus the gaps, tab bars on stacked panes.
+    fn laid_out(tree: &Tree<Pane>, rect: Rect, m: Metrics) -> (Vec<(Pane, Rect)>, Vec<Rect>) {
+        fn walk(
+            tiles: &Tiles<Pane>,
+            id: TileId,
+            rect: Rect,
+            m: Metrics,
+            out: &mut (Vec<(Pane, Rect)>, Vec<Rect>),
+        ) {
+            match tiles.get(id) {
+                Some(Tile::Pane(p)) => out.0.push((*p, rect)),
+                Some(Tile::Container(Container::Tabs(tabs))) => {
+                    let Some(child) = shown_tab(tiles, tabs) else {
+                        return;
+                    };
+                    let mut body = rect;
+                    if tab_bar_shown(tabs) {
+                        let (bar, rest) = rect.split_top_bottom_at_y(rect.top() + m.tab_bar);
+                        out.1.push(bar);
+                        body = rest;
+                    }
+                    walk(tiles, child, body, m, out);
+                }
+                Some(Tile::Container(Container::Linear(lin))) => {
+                    let kids = visible_children(tiles, &lin.children);
+                    if kids.is_empty() {
+                        return;
+                    }
+                    let axis = Axis::of(lin.dir);
+                    let gaps = m.gap * (kids.len() - 1) as f32;
+                    let sizes = lin.shares.split(&kids, (axis.len(rect) - gaps).max(0.0));
+                    let mut pos = match axis {
+                        Axis::X => rect.left(),
+                        Axis::Y => rect.top(),
+                    };
+                    for (&c, &s) in kids.iter().zip(&sizes) {
+                        let r = match axis {
+                            Axis::X => Rect::from_x_y_ranges(pos..=pos + s, rect.y_range()),
+                            Axis::Y => Rect::from_x_y_ranges(rect.x_range(), pos..=pos + s),
+                        };
+                        pos += s + m.gap;
+                        walk(tiles, c, r, m, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = (Vec::new(), Vec::new());
+        if let Some(root) = tree.root
+            && tree.tiles.is_visible_in_layout(root)
+        {
+            walk(&tree.tiles, root, rect, m, &mut out);
+        }
+        out
+    }
+
+    /// Area the gaps between tiles take (zero unless editing).
+    fn gap_area(tree: &Tree<Pane>, rect: Rect, m: Metrics) -> f32 {
+        if m.gap == 0.0 {
+            return 0.0;
+        }
+        let (parts, bars) = laid_out(tree, rect, m);
+        let used = parts.iter().map(|(_, r)| r.area()).sum::<f32>()
+            + bars.iter().map(|r| r.area()).sum::<f32>();
+        rect.area() - used
+    }
+
+    /// The default blocky look: 8 px gaps, 1 px borders, notch labels
+    /// (`Theme::pane_chrome` of the built-in theme).
+    const FRAMED: Metrics = Metrics {
+        gap: 0.0,
+        tab_bar: 24.0,
+        chrome: [10.0, 19.0],
+    };
+    /// The layout editor on top of that (6 px drag gaps).
+    const EDITING: Metrics = Metrics {
+        gap: 6.0,
+        tab_bar: 24.0,
+        chrome: [10.0, 19.0],
+    };
+    /// Status bar module (24 px) below the tiles.
+    const BARS: f32 = 24.0;
+
     /// Fold + fit `tree` at `size` and check: the panes tile the window
     /// with no overlap and no gap, nothing is under its minimum (no
     /// cropping), the chat is there and the user panel is somewhere.
     fn check(tree: &Tree<Pane>, size: [f32; 2], tier: Tier, name: &str) {
+        check_with(tree, size, tier, M, true, name);
+    }
+
+    /// [`check`] with frame metrics; returns the fitted tree (shares kept,
+    /// folds restored) so a sweep carries it frame to frame like the app.
+    fn check_with(
+        tree: &Tree<Pane>,
+        size: [f32; 2],
+        tier: Tier,
+        m: Metrics,
+        fold: bool,
+        name: &str,
+    ) -> Tree<Pane> {
         let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(size[0], size[1]));
         let mut t = tree.clone();
-        let folds = plan_folds(&t, size[0], tier, M);
+        let folds = if fold {
+            plan_folds(&t, size[0], tier, m)
+        } else {
+            Folds::default()
+        };
         let folded = apply_folds(&mut t, &folds);
-        fit(&mut t, rect, M);
-        let parts = pane_rects(&t, rect);
+        fit(&mut t, rect, m);
+        let (parts, bars) = laid_out(&t, rect, m);
         let ctx = format!("{name} at {}x{} ({tier:?}, {folds:?})", size[0], size[1]);
-        let area: f32 = schematic(&t, rect).iter().map(|(_, r)| r.area()).sum();
-        assert!((area - rect.area()).abs() < 2.0, "{ctx}: gap ({area})");
+        let area: f32 = parts.iter().map(|(_, r)| r.area()).sum::<f32>()
+            + bars.iter().map(|r| r.area()).sum::<f32>();
+        let gaps: f32 = gap_area(&t, rect, m);
+        assert!(
+            (area + gaps - rect.area()).abs() < 2.0,
+            "{ctx}: gap ({area} + {gaps})"
+        );
         for (i, (p, r)) in parts.iter().enumerate() {
             assert!(rect.expand(0.5).contains_rect(*r), "{ctx}: {p:?} outside");
             for (q, s) in &parts[i + 1..] {
@@ -534,12 +696,12 @@ mod tests {
             let (wx, _) = pane_range(*p, Axis::X);
             let (hy, _) = pane_range(*p, Axis::Y);
             assert!(
-                r.width() >= wx - 0.5,
+                r.width() >= wx + m.chrome[0] - 0.5,
                 "{ctx}: {p:?} cropped to width {}",
                 r.width()
             );
             assert!(
-                r.height() >= hy - 0.5,
+                r.height() >= hy + m.chrome[1] - 0.5,
                 "{ctx}: {p:?} cropped to height {}",
                 r.height()
             );
@@ -555,11 +717,13 @@ mod tests {
         for (p, r) in &parts {
             if matches!(p, Pane::Channels | Pane::Members) {
                 assert!(
-                    r.width() <= pane_range(*p, Axis::X).1 + 0.5,
+                    r.width() <= pane_range(*p, Axis::X).1 + m.chrome[0] + 0.5,
                     "{ctx}: {p:?} too wide"
                 );
             }
         }
+        restore(&mut t, &folded);
+        t
     }
 
     fn sweep(tree: &Tree<Pane>, name: &str) {
@@ -579,6 +743,123 @@ mod tests {
                 check(tree, [w, h], t, name);
                 w += 10.0;
             }
+        }
+    }
+
+    /// The window the app allows for a requested size: never under
+    /// `WINDOW_MIN` or the tree's own minimum plus the bars.
+    fn window_for(tree: &Tree<Pane>, m: Metrics, fold: bool, want: [f32; 2]) -> [f32; 2] {
+        let min = window_min(tree, m, fold, [0.0, BARS], None);
+        [want[0].max(min[0]), want[1].max(min[1])]
+    }
+
+    /// Resize like a user dragging the window edge: heights 1000 -> 400 ->
+    /// 1000 at several widths, then widths 1600 -> 480 -> 1600 at several
+    /// heights, carrying the fitted tree (its pixel shares) from frame to
+    /// frame like the app does.
+    fn drag_sweep(tree: &Tree<Pane>, m: Metrics, fold: bool, name: &str) {
+        let tiles_area = |win: [f32; 2]| [win[0], win[1] - BARS];
+        for w in [1600.0, 1200.0, 900.0, 700.0, 480.0] {
+            let mut t = tree.clone();
+            let mut tier = None;
+            let heights = (0..=60)
+                .map(|i| 1000.0 - i as f32 * 10.0)
+                .chain((0..=60).map(|i| 400.0 + i as f32 * 10.0));
+            for h in heights {
+                let size = tiles_area(window_for(&t, m, fold, [w, h]));
+                let tr = tier_with_hysteresis(size[0], tier);
+                tier = Some(tr);
+                t = check_with(&t, size, tr, m, fold, name);
+            }
+        }
+        for h in [1000.0, 760.0, 600.0, 400.0] {
+            let mut t = tree.clone();
+            let mut tier = None;
+            let widths = (0..=112)
+                .map(|i| 1600.0 - i as f32 * 10.0)
+                .chain((0..=112).map(|i| 480.0 + i as f32 * 10.0));
+            for w in widths {
+                let size = tiles_area(window_for(&t, m, fold, [w, h]));
+                let tr = tier_with_hysteresis(size[0], tier);
+                tier = Some(tr);
+                t = check_with(&t, size, tr, m, fold, name);
+            }
+        }
+    }
+
+    #[test]
+    fn framed_metrics_match_the_default_look() {
+        let c = crate::themes::ActiveTheme::default_theme().pane_chrome();
+        assert_eq!([c.x, c.y], FRAMED.chrome);
+    }
+
+    #[test]
+    fn framed_resize_never_crops() {
+        drag_sweep(&crate::layout::default_tree(), FRAMED, true, "default");
+        drag_sweep(&leo5_tree(), FRAMED, true, "leo-5");
+        drag_sweep(&crate::layout::alt_tree(), FRAMED, true, "alt");
+        for p in Preset::ALL {
+            drag_sweep(&layout_presets::build(p), FRAMED, true, &format!("{p:?}"));
+        }
+    }
+
+    #[test]
+    fn editor_resize_never_crops() {
+        // No folding while editing, and 6 px gaps between the tiles. The
+        // app only enforces the folded width (entering the editor never
+        // widens the window), so this checks widths the editor fits.
+        drag_sweep(&crate::layout::default_tree(), EDITING, false, "default");
+        drag_sweep(&leo5_tree(), EDITING, false, "leo-5");
+    }
+
+    #[test]
+    fn window_min_fits_the_framed_minimums() {
+        // leo-5 stacks the rail strip, the members + user panel column and
+        // the composer: with the frames that's taller than the old fixed
+        // 400 px minimum (the cropped-chat report), so the minimum grows.
+        let min = min_size(&leo5_tree(), FRAMED, true);
+        let need = (RAIL.min + 19.0)
+            + (LIST_MIN_HEIGHT + 19.0)
+            + (USER_PANEL_HEIGHT + 19.0)
+            + (COMPOSER_RANGE.0 + 19.0);
+        assert!((min[1] - need).abs() < 0.5, "{min:?} vs {need}");
+        assert!(min[1] + BARS > WINDOW_MIN[1]);
+        // Narrow windows fold the side panes, so the width stays small.
+        assert!(min[0] <= WINDOW_MIN[0], "{min:?}");
+    }
+
+    #[test]
+    fn tall_window_shares_do_not_crop_the_composer_when_short() {
+        // The user drags the message box to its tallest in a tall window,
+        // then makes the window as short as it goes.
+        for (tree, name) in [
+            (crate::layout::default_tree(), "default"),
+            (leo5_tree(), "leo-5"),
+        ] {
+            let mut t = check_with(&tree, [1400.0, 1400.0], Tier::Large, FRAMED, true, name);
+            let mut child = t.tiles.find_pane(&Pane::Composer).unwrap();
+            while let Some(parent) = t.tiles.parent_of(child) {
+                if let Some(Tile::Container(Container::Linear(lin))) = t.tiles.get_mut(parent)
+                    && lin.dir == LinearDir::Vertical
+                {
+                    lin.shares.set_share(child, 600.0);
+                    break;
+                }
+                child = parent;
+            }
+            let win = window_for(&t, FRAMED, true, [1400.0, 300.0]);
+            let size = [win[0], win[1] - BARS];
+            let t = check_with(&t, size, Tier::Large, FRAMED, true, name);
+            let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(size[0], size[1]));
+            let comp = pane_rects(&t, rect)
+                .into_iter()
+                .find(|(p, _)| *p == Pane::Composer)
+                .unwrap()
+                .1;
+            assert!(
+                comp.height() >= COMPOSER_RANGE.0 + 19.0 - 0.5,
+                "{name}: {comp:?}"
+            );
         }
     }
 
@@ -649,11 +930,12 @@ mod tests {
         let s = allocate(&[100.0, 600.0, 100.0], &r, 1000.0, Some(2), &[1, 0, 2]);
         assert_eq!(s, vec![100.0, 360.0, 540.0]);
         // Too small: the chat gives first, then the list, then the rail.
+        // Under every minimum (folding and the window's minimum size
+        // normally prevent that) the scrolling list is squashed before the
+        // chat.
         let s = allocate(&[100.0, 300.0, 600.0], &r, 500.0, Some(2), &[1, 0, 2]);
         assert!((s.iter().sum::<f32>() - 500.0).abs() < 0.01);
-        // The list and rail go down to their minimums; only then is the
-        // chat squashed (folding normally prevents that).
-        assert_eq!((s[0], s[1]), (72.0, 200.0));
+        assert_eq!(s, vec![72.0, 188.0, 240.0]);
         let s = allocate(&[100.0, 300.0, 600.0], &r, 700.0, Some(2), &[1, 0, 2]);
         assert_eq!(s, vec![100.0, 300.0, 300.0]);
         // Under every minimum: still exactly the extent (squashed, no gap).

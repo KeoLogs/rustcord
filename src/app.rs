@@ -634,6 +634,15 @@ impl RustCordApp {
         } else {
             crate::tile_fit::plan_folds(&self.tree, area.width(), tier, metrics)
         };
+        // The window can't get smaller than the layout's minimums (frame
+        // borders, labels, the bars around the tiles), so nothing crops.
+        layout::keep_window_min(
+            &ctx,
+            &mut state.host,
+            &self.tree,
+            metrics,
+            ctx.content_rect().size() - area.size(),
+        );
         let folded = crate::tile_fit::apply_folds(&mut self.tree, &folds);
         crate::tile_fit::fit(&mut self.tree, area, metrics);
         state.host.lists_in_drawer = !folded.in_drawer(crate::tile_fit::Drawer::Left).is_empty();

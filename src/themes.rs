@@ -718,10 +718,14 @@ impl ActiveTheme {
     }
 
     /// Extra width and height every pane needs for its frame (tile size
-    /// minus content size), so the layout keeps the content at its minimum.
+    /// minus content size; the largest over the panes, since a theme can
+    /// inset each one differently), so the layout keeps every pane's
+    /// content at its minimum in both directions.
     pub fn pane_chrome(&self) -> egui::Vec2 {
         let tile = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0));
-        tile.size() - self.pane_content(tile, Pane::Messages).size()
+        Pane::ALL.iter().fold(egui::Vec2::ZERO, |acc, &p| {
+            acc.max(tile.size() - self.pane_content(tile, p).size())
+        })
     }
 
     /// Draw a pane's background (call before its contents, with the pane's
