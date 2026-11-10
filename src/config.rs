@@ -20,10 +20,22 @@ pub struct Config {
     pub zoom: f32,
     pub modules: Modules,
 
-    /// Keep the token on this PC so you don't have to log in each time.
+    /// Keep logins on this PC (tokens in the OS credential store, see
+    /// `accounts.rs`) so you don't have to log in each time.
     pub remember_login: bool,
-    /// Saved token (only if `remember_login`). Prefixed "Bot " for bot accounts.
-    pub saved_token: Option<String>,
+    /// Old plaintext token from before tokens moved to the OS credential
+    /// store. Read once for the migration (`accounts::Vault::migrate`),
+    /// never written back.
+    #[serde(rename = "saved_token", skip_serializing)]
+    pub legacy_saved_token: Option<crate::accounts::Token>,
+    /// Saved accounts (non-secret metadata only; at most
+    /// `accounts::MAX_ACCOUNTS`). Their tokens live in the credential store.
+    pub accounts: Vec<crate::accounts::SavedAccount>,
+    /// User id of the account to log in with at start-up.
+    pub last_account: Option<String>,
+    /// Per-account local data keyed by user id (Discord-side things: last
+    /// channel, drafts, "Show as"). Everything else in Config is shared.
+    pub per_account: std::collections::BTreeMap<String, crate::accounts::AccountData>,
 
     /// Messages kept in memory per channel. Older ones are dropped.
     pub max_messages_per_channel: usize,
@@ -89,7 +101,10 @@ impl Default for Config {
             zoom: 1.0,
             modules: Modules::default(),
             remember_login: true,
-            saved_token: None,
+            legacy_saved_token: None,
+            accounts: Vec::new(),
+            last_account: None,
+            per_account: Default::default(),
             max_messages_per_channel: 200,
             cached_channels: 8,
             warn_before_links: true,

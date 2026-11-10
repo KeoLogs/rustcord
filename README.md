@@ -156,6 +156,23 @@ On Linux you may need GUI dev packages first:
 
 **Never commit your token.** `.env` files are git-ignored.
 
+### Where your login is kept
+
+With "Remember me on this PC" on, RustCord keeps each saved account's token
+in the operating system's credential store, never in its settings file:
+
+- Windows: Credential Manager (Windows Credentials, entries named
+  `RustCord` / `account:<user id>`).
+- macOS: the login Keychain (service `RustCord`).
+- Linux: the Secret Service (GNOME Keyring, KWallet, KeePassXC…). Without a
+  Secret Service running, logins can't be remembered and you log in each time.
+
+The settings file only lists the saved accounts' ids, names and avatars (up
+to 5). Turning "Remember me" off in Settings removes every saved login;
+logging out removes that account's entry. `DISCORD_TOKEN` is never saved.
+Versions before this change kept the token in the settings file; it is moved
+into the credential store once, on the first start, and removed from the file.
+
 ## Themes
 
 A theme is a folder with a `theme.rctheme` file (TOML, `format = 1`) and an

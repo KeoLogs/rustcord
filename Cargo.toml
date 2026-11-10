@@ -19,6 +19,9 @@ egui_tiles = { version = "0.18", features = ["serde"] }
 emojis = "0.9.1"
 flate2 = "1.1.11"
 futures-util = "0.3.34"
+# Saved logins in the OS credential store (Credential Manager / Keychain /
+# Secret Service via zbus, pure Rust: no libdbus needed). See accounts.rs.
+keyring = "4.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 memory-stats = "1.2.0"
 notify-rust = "4.19.0"

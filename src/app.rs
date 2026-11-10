@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, RichText, vec2};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::accounts::{SavedAccount, Token, Vault};
 use crate::autocomplete::{self, Autocomplete, Candidate, Trigger};
 use crate::config::{CONFIG_KEY, Config};
 use crate::embed;
@@ -82,9 +83,11 @@ pub struct RustCordApp {
     theme_key: Option<(Option<String>, bool)>,
     /// Status bar module's RAM reading.
     ram: RamSampler,
-    /// The running session's token and demo flag (in memory only), to
-    /// reconnect with a fresh IDENTIFY when "Show as" changes.
-    session: Option<(String, bool)>,
+    /// The running session (token in memory only), to reconnect with a
+    /// fresh IDENTIFY when "Show as" changes and to save the account at READY.
+    session: Option<Session>,
+    /// Saved accounts' tokens (OS credential store; in memory in demo mode).
+    vault: Vault,
     /// Demo mode only (`RUSTCORD_DEMO_OPEN=view`): a view to open once the
     /// demo data is in, for screenshots.
     demo_open: Option<String>,
@@ -117,6 +120,17 @@ impl RustCordApp {
             {
                 config.zoom = z.clamp(0.5, 3.0);
             }
+        }
+        // Tokens live in the OS credential store; demo runs never touch it.
+        let vault = if demo { Vault::memory() } else { Vault::os() };
+        // One-time move of the old plaintext `saved_token` into the store.
+        // If the store fails, still log in with it this once; it is never
+        // written back to the config file.
+        let mut unsaved_legacy = None;
+        let mut migrate_error = None;
+        if let Err((e, token)) = vault.migrate(&mut config) {
+            migrate_error = Some(e);
+            unsaved_legacy = Some(token);
         }
         let mut tree = storage
             .and_then(|s| eframe::get_value::<egui_tiles::Tree<Pane>>(s, LAYOUT_KEY))
@@ -157,6 +171,7 @@ impl RustCordApp {
             applied: None,
             ram: RamSampler::default(),
             session: None,
+            vault,
             demo_open: demo
                 .then(|| std::env::var("RUSTCORD_DEMO_OPEN").ok())
                 .flatten(),
@@ -167,21 +182,40 @@ impl RustCordApp {
             demo_shot_asked: false,
         };
 
-        // Log in straight away if we can: demo, DISCORD_TOKEN, or a saved token.
-        let saved = app
-            .config
-            .remember_login
-            .then(|| app.config.saved_token.clone())
-            .flatten();
+        // Log in straight away if we can: demo, DISCORD_TOKEN, or a saved
+        // account (DISCORD_TOKEN is never saved).
         if demo {
-            app.start_session(&cc.egui_ctx, String::new(), true);
-        } else if let Some(token) = env_token.or(saved) {
-            app.start_session(&cc.egui_ctx, token, false);
+            app.start_session(&cc.egui_ctx, Token::new(""), true, None);
+        } else if let Some(token) = env_token {
+            app.start_session(&cc.egui_ctx, Token::new(token), false, None);
+            if let Some(s) = &mut app.session {
+                s.saved = true;
+            }
+        } else if let Some(token) = unsaved_legacy {
+            app.start_session(&cc.egui_ctx, token, false, None);
+            if let (Screen::Main(state), Some(e)) = (&mut app.screen, migrate_error) {
+                state.toast = Some((
+                    format!("Couldn't move your saved login to the credential store: {e}"),
+                    Instant::now(),
+                ));
+            }
+        } else if app.config.remember_login
+            && let Some((token, account)) = app.vault.startup_token(&app.config)
+        {
+            app.start_session(&cc.egui_ctx, token, false, account);
         }
         app
     }
 
-    fn start_session(&mut self, ctx: &egui::Context, token: String, demo: bool) {
+    /// Connect with `token`. `account` is its saved user id when it came
+    /// from the credential store (`None` for a new or pending login).
+    fn start_session(
+        &mut self,
+        ctx: &egui::Context,
+        token: Token,
+        demo: bool,
+        account: Option<String>,
+    ) {
         crate::config::live::sync(&self.config.modules);
         let (ui_tx, ui_rx) = mpsc::channel();
         let (be_tx, be_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -189,8 +223,20 @@ impl RustCordApp {
             bot_member_intents: self.config.bot_member_intents,
             identity: self.config.client_identity,
         };
-        self.session = Some((token.clone(), demo));
-        crate::backend::spawn(token, demo, options, ui_tx, be_rx, ctx.clone());
+        crate::backend::spawn(
+            token.expose().to_string(),
+            demo,
+            options,
+            ui_tx,
+            be_rx,
+            ctx.clone(),
+        );
+        self.session = Some(Session {
+            token,
+            demo,
+            account,
+            saved: false,
+        });
         self.screen = Screen::Main(Box::new(State::new(ui_rx, be_tx)));
     }
 
@@ -273,9 +319,16 @@ impl RustCordApp {
 
     /// Back to the login screen. Dropping the State drops the backend's
     /// channel, which shuts the backend thread down.
+    /// `forget_token` removes only this session's account from the
+    /// credential store (and a pending, not yet re-keyed token).
     fn log_out(&mut self, error: Option<String>, forget_token: bool) {
-        if forget_token {
-            self.config.saved_token = None;
+        if forget_token && let Some(session) = &self.session {
+            if let Some(id) = session.account.clone() {
+                let _ = self.vault.forget(&mut self.config, &id);
+            } else if !session.saved {
+                // A migrated token that never reached READY.
+                let _ = self.vault.clear_pending();
+            }
         }
         self.settings = None;
         self.editing_layout = false;
@@ -435,6 +488,7 @@ impl eframe::App for RustCordApp {
         }
         state.drain_events(ctx, &self.config);
         apply_config_updates(&mut self.config, state);
+        save_account(&self.vault, &mut self.config, &mut self.session, state);
         if let Some(path) = state.picked_theme.take() {
             // Small file copies; the picker itself ran in the backend.
             let _ = self.theme_store.import(&path);
@@ -482,9 +536,6 @@ impl eframe::App for RustCordApp {
         if self.demo_shot {
             return;
         }
-        if !self.config.remember_login {
-            self.config.saved_token = None;
-        }
         eframe::set_value(storage, CONFIG_KEY, &self.config);
         eframe::set_value(storage, LAYOUT_KEY, &self.tree);
     }
@@ -503,11 +554,20 @@ impl RustCordApp {
         if let Screen::Login(form) = &mut self.screen {
             match form.ui(ui, &pal) {
                 Some(LoginAction::Login { token, remember }) => {
-                    self.config.remember_login = remember;
-                    self.config.saved_token = remember.then(|| token.clone());
-                    self.start_session(&ctx, token, false);
+                    // Saved to the credential store at READY, once the
+                    // account's user id is known (`save_account`).
+                    if remember {
+                        self.config.remember_login = true;
+                    }
+                    self.start_session(&ctx, token, false, None);
+                    if let Some(s) = &mut self.session {
+                        // Not remembered: never written anywhere.
+                        s.saved = !remember;
+                    }
                 }
-                Some(LoginAction::Demo) => self.start_session(&ctx, String::new(), true),
+                Some(LoginAction::Demo) => {
+                    self.start_session(&ctx, Token::new(""), true, None);
+                }
                 None => {}
             }
             return;
@@ -551,18 +611,42 @@ impl RustCordApp {
             match action {
                 Some(SettingsAction::Save { config, sync }) => {
                     let reconnect = config.client_identity != self.config.client_identity;
-                    self.config = *config;
+                    let forget_logins = self.config.remember_login && !config.remember_login;
+                    let mut config = *config;
+                    // Saved accounts aren't edited on the settings page; keep
+                    // the live list (READY may have saved one meanwhile).
+                    config.accounts = std::mem::take(&mut self.config.accounts);
+                    config.last_account = self.config.last_account.take();
+                    config.per_account = std::mem::take(&mut self.config.per_account);
+                    self.config = config;
+                    if forget_logins {
+                        // "Remember me" off: no token stays on this PC.
+                        if let Err(e) = self.vault.forget_all(&mut self.config) {
+                            state.toast = Some((
+                                format!("Couldn't remove saved logins: {e}"),
+                                Instant::now(),
+                            ));
+                        }
+                    }
                     for change in sync {
                         state.apply_sync_change(change);
                     }
                     // "Show as" only changes with a fresh IDENTIFY: start a
                     // new session (a new backend never RESUMEs the old one).
                     if reconnect
-                        && let Some((token, demo)) = self.session.clone()
-                        && !demo
                         && !state.is_bot_session()
+                        && let Some(session) = self.session.take_if(|s| !s.demo)
                     {
-                        self.start_session(&ctx, token, false);
+                        let Session {
+                            token,
+                            account,
+                            saved,
+                            ..
+                        } = session;
+                        self.start_session(&ctx, token, false, account);
+                        if let Some(s) = &mut self.session {
+                            s.saved = saved;
+                        }
                         if let Screen::Main(state) = &mut self.screen {
                             state.status = "Reconnecting to apply \"Show as\"…".into();
                         }
@@ -715,6 +799,46 @@ impl RustCordApp {
 
         state.overlays(ui, &self.config, &pal);
         apply_config_updates(&mut self.config, state);
+    }
+}
+
+/// The running session. Holds the token, so no `Debug`.
+struct Session {
+    token: Token,
+    demo: bool,
+    /// The saved account's user id (known at start for a stored login, set
+    /// at READY for a remembered new one).
+    account: Option<String>,
+    /// Nothing left to save: already stored with fresh metadata, or
+    /// "Remember me" was off / the token came from DISCORD_TOKEN.
+    saved: bool,
+}
+
+/// After READY: store a remembered login under its user id (re-keying a
+/// migrated pending token) and refresh its name / avatar. Runs once per
+/// session; a failure only shows a toast.
+fn save_account(
+    vault: &Vault,
+    config: &mut Config,
+    session: &mut Option<Session>,
+    state: &mut State,
+) {
+    let Some(session) = session.as_mut() else {
+        return;
+    };
+    if session.saved || session.demo {
+        return;
+    }
+    let Some(me) = &state.me else {
+        return;
+    };
+    session.saved = true;
+    if !config.remember_login {
+        return;
+    }
+    match vault.save(config, SavedAccount::from_user(me), &session.token) {
+        Ok(()) => session.account = Some(me.id.clone()),
+        Err(e) => state.toast = Some((e.to_string(), Instant::now())),
     }
 }
 

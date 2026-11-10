@@ -1,7 +1,9 @@
-//! The login screen: paste a token (user or bot), optionally remember it.
+//! The login screen: paste a token (user or bot), optionally remember it
+//! (in the OS credential store, see `accounts.rs`).
 
 use eframe::egui::{self, RichText, vec2};
 
+use crate::accounts::Token;
 use crate::theme::Palette;
 
 #[derive(Default)]
@@ -16,7 +18,7 @@ pub struct LoginForm {
 pub enum LoginAction {
     /// Log in with this token ("Bot " prefix for bots).
     Login {
-        token: String,
+        token: Token,
         remember: bool,
     },
     Demo,
@@ -97,7 +99,10 @@ impl LoginForm {
         });
         ui.add_space(6.0);
         ui.checkbox(&mut self.remember, "Remember me on this PC")
-            .on_hover_text("Saves the token in RustCord's settings file on this PC.");
+            .on_hover_text(
+                "Keeps the login in the system's credential store (Windows Credential \
+                 Manager, macOS Keychain or Secret Service), not in a file.",
+            );
 
         if let Some(err) = &self.error {
             ui.add_space(6.0);
@@ -114,7 +119,7 @@ impl LoginForm {
                 raw
             };
             action = Some(LoginAction::Login {
-                token,
+                token: Token::new(token),
                 remember: self.remember,
             });
         }

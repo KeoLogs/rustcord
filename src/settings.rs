@@ -154,9 +154,6 @@ impl SettingsPage {
                 sync.push(SyncChange::Compact(self.draft.compact_messages));
             }
         }
-        if !self.draft.remember_login {
-            self.draft.saved_token = None;
-        }
         self.base = self.draft.clone();
         self.synced = SyncedDraft::default();
         self.shake_at = None;
@@ -582,8 +579,10 @@ impl SettingsPage {
                     ui,
                     &mut config.remember_login,
                     "Remember me on this PC",
-                    "Keeps your token in RustCord's settings file so you stay logged in. \
-                     Turn off to log in each time.",
+                    "Keeps your logins in the system's credential store (Windows \
+                     Credential Manager, macOS Keychain or the Secret Service on \
+                     Linux), never in RustCord's settings file. Turning this off \
+                     removes every saved login from this PC.",
                     pal,
                 );
             }

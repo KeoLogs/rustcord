@@ -38,6 +38,12 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
 - `src/demo.rs` fakes the backend when `RUSTCORD_DEMO=1`. Demo runs use
   their own storage key (`storage::DEMO_APP_ID`, `src/storage.rs`), so they
   never read or write the real config, layout, window state or themes.
+- `src/accounts.rs`: saved logins. Tokens live only in the OS credential
+  store (`keyring`; `Vault`, `SecretStore` trait, `MemoryStore` for tests
+  and demo), keyed `account:<user id>`; Config holds only `SavedAccount`
+  metadata (max 5), `last_account` and `per_account` (Discord-side data;
+  app settings stay shared). A token is an `accounts::Token` (redacted
+  Debug, no Display/Serialize): never format it into logs, toasts or errors.
 - `src/config.rs` is the saved `Config` incl. `Modules` (on/off optional
   features). A module that's off must do no work and load nothing. New
   optional features should be modules (add to `Modules` + `MODULES`).
