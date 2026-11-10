@@ -172,6 +172,12 @@ I/O in `app.rs`.
 - Panels: `egui::Panel::top("id").show(ui, ...)`, `egui::Panel::bottom`,
   `egui::CentralPanel::default_margins().show(ui, ...)`.
 
+## Versions
+
+Every update pushed for Leo bumps `version` in `Cargo.toml` and adds a
+`CHANGELOG.md` entry: minor for each PR / feature batch, patch for
+fix-only pushes. Settings → About shows it.
+
 ## Before finishing any change
 
 ```sh
