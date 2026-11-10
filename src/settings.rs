@@ -524,6 +524,17 @@ impl SettingsPage {
                      log in. Without it, bots show who's recently active.",
                     pal,
                 );
+                ui.add_space(12.0);
+                label(ui, pal, "PROFILES");
+                switch_row(
+                    ui,
+                    &mut config.profile_themes,
+                    "Show profile themes",
+                    "Profile cards use people's own profile colours (Nitro profile \
+                     themes) and show their avatar decorations. Off: every card uses \
+                     your theme's colours.",
+                    pal,
+                );
             }
             Section::Chat => chat(ui, config, pal),
             Section::Notifications => notifications(ui, config, pal),

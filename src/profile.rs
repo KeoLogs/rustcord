@@ -42,8 +42,15 @@ pub struct Profile {
     pub pronouns: String,
     /// Banner colour (0xRRGGBB): theme colour, banner colour or accent.
     pub banner_color: Option<u32>,
-    /// CDN URL of the banner image, if they have one.
+    /// CDN URL of the banner image, if they have one (the server profile's
+    /// banner when loaded for a server and set there).
     pub banner_url: Option<String>,
+    /// Nitro profile theme: (primary, accent) as 0xRRGGBB. The card is a
+    /// gradient between them when Settings → Appearance → "Show profile
+    /// themes" is on.
+    pub theme_colors: Option<(u32, u32)>,
+    /// CDN URL of the avatar decoration (drawn around the big avatar).
+    pub decoration_url: Option<String>,
     /// Server member data from the profile (if loaded with a guild_id).
     pub member: Option<CachedMember>,
 }
@@ -81,10 +88,36 @@ impl Profile {
                     .map(|c| c as u32)
             });
         let id = s(user, "id");
-        let banner_url = user
-            .get("banner")
+        // A server profile (`guild_member_profile`) overrides the global one.
+        let guild_profile = &v["guild_member_profile"];
+        let theme = |o: &Value| -> Option<(u32, u32)> {
+            let a = o.get("theme_colors")?.as_array()?;
+            Some((a.first()?.as_u64()? as u32, a.get(1)?.as_u64()? as u32))
+        };
+        let theme_colors = theme(guild_profile).or_else(|| theme(profile));
+        let guild_banner = guild_id.as_deref().and_then(|g| {
+            guild_profile
+                .get("banner")
+                .and_then(Value::as_str)
+                .map(|h| {
+                    format!(
+                        "https://cdn.discordapp.com/guilds/{g}/users/{id}/banners/{h}.png?size=600"
+                    )
+                })
+        });
+        let banner_url = guild_banner.or_else(|| {
+            user.get("banner")
+                .and_then(Value::as_str)
+                .map(|h| format!("https://cdn.discordapp.com/banners/{id}/{h}.png?size=600"))
+        });
+        let decoration_url = user
+            .pointer("/avatar_decoration_data/asset")
             .and_then(Value::as_str)
-            .map(|h| format!("https://cdn.discordapp.com/banners/{id}/{h}.png?size=600"));
+            .map(|a| {
+                format!(
+                    "https://cdn.discordapp.com/avatar-decoration-presets/{a}.png?size=240&passthrough=false"
+                )
+            });
         let member = v.get("guild_member").filter(|m| m.is_object()).map(|m| {
             let m = members::Member::from_json(m);
             CachedMember {
@@ -100,6 +133,8 @@ impl Profile {
             pronouns: s(profile, "pronouns"),
             banner_color,
             banner_url,
+            theme_colors,
+            decoration_url,
             member,
         }
     }
@@ -242,8 +277,22 @@ pub fn popout_ui(
             egui::Align2::RIGHT_TOP,
         )
     };
-    let card_bg = if pal.dark { pal.servers } else { pal.chat };
-    let inner_bg = if pal.dark { pal.chat } else { pal.sidebar };
+    // Nitro profile theme (Settings → Appearance → Show profile themes):
+    // the card is a top-to-bottom gradient of the two theme colours, and
+    // the inner panel a see-through layer of the usual surface on top.
+    let theme = config
+        .profile_themes
+        .then(|| data.profile.and_then(|p| p.theme_colors))
+        .flatten()
+        .map(|(a, b)| (members::rgb(a), members::rgb(b)));
+    let (card_bg, inner_bg) = {
+        let card = if pal.dark { pal.servers } else { pal.chat };
+        let inner = if pal.dark { pal.chat } else { pal.sidebar };
+        match theme {
+            Some((top, _)) => (top, inner.gamma_multiply(0.62)),
+            None => (card, inner),
+        }
+    };
 
     let area = egui::Area::new(egui::Id::unique("profile_popout"))
         .order(egui::Order::Foreground)
@@ -251,8 +300,15 @@ pub fn popout_ui(
         .pivot(pivot)
         .constrain(true)
         .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(card_bg)
+            // Placeholder for the gradient: the card's height is only
+            // known once its contents are laid out.
+            let bg = ui.painter().add(egui::Shape::Noop);
+            let card = egui::Frame::new()
+                .fill(if theme.is_some() {
+                    Color32::TRANSPARENT
+                } else {
+                    card_bg
+                })
                 .corner_radius(8)
                 .shadow(egui::Shadow {
                     offset: [0, 4],
@@ -263,7 +319,12 @@ pub fn popout_ui(
                 .show(ui, |ui| {
                     ui.set_width(CARD_WIDTH);
                     card_contents(ui, pop, &data, card_bg, inner_bg, config, pal, &mut action);
-                });
+                })
+                .response
+                .rect;
+            if let Some((top, bottom)) = theme {
+                ui.painter().set(bg, gradient_shape(card, 8.0, top, bottom));
+            }
         });
 
     let clicked_outside = ctx.input(|i| i.pointer.any_pressed())
@@ -292,6 +353,7 @@ fn card_contents(
     // ---- Banner: image, profile colour, or a colour from the user id.
     let banner_h = 64.0;
     let (banner, _) = ui.allocate_exact_size(vec2(CARD_WIDTH, banner_h), egui::Sense::hover());
+    let themed = config.profile_themes && data.profile.is_some_and(|p| p.theme_colors.is_some());
     let banner_col = data
         .profile
         .and_then(|p| p.banner_color)
@@ -338,6 +400,16 @@ fn card_contents(
         config,
         pal,
     );
+    // Avatar decoration (a frame drawn around the avatar, 1.2x its size).
+    if themed
+        && config.modules.images
+        && let Some(url) = data.profile.and_then(|p| p.decoration_url.as_deref())
+    {
+        egui::Image::from_uri(url).paint_at(
+            ui,
+            egui::Rect::from_center_size(av_rect.center(), av_rect.size() * 1.2),
+        );
+    }
     if let Some(s) = data.presence.map(|p| p.status) {
         members::status_dot(ui, av, s, card_bg, pal);
     }
@@ -557,6 +629,44 @@ fn role_chip(ui: &mut egui::Ui, r: &Role, pal: &Palette) {
     p.galley(text_pos, galley, pal.text);
 }
 
+/// A rounded rectangle filled with a vertical gradient from `top` to
+/// `bottom` (a triangle fan; colour is linear in y, so it's exact).
+fn gradient_shape(rect: egui::Rect, radius: f32, top: Color32, bottom: Color32) -> egui::Shape {
+    use std::f32::consts::FRAC_PI_2;
+    let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
+    let color_at = |y: f32| {
+        let t = ((y - rect.top()) / rect.height().max(1.0)).clamp(0.0, 1.0);
+        top.lerp_to_gamma(bottom, t)
+    };
+    let mut mesh = egui::Mesh::default();
+    let c = rect.center();
+    mesh.colored_vertex(c, color_at(c.y));
+    // Corners clockwise from top-left: (centre, start angle).
+    let corners = [
+        (egui::pos2(rect.left() + r, rect.top() + r), 2.0 * FRAC_PI_2),
+        (
+            egui::pos2(rect.right() - r, rect.top() + r),
+            3.0 * FRAC_PI_2,
+        ),
+        (egui::pos2(rect.right() - r, rect.bottom() - r), 0.0),
+        (egui::pos2(rect.left() + r, rect.bottom() - r), FRAC_PI_2),
+    ];
+    const STEPS: usize = 6;
+    for (centre, start) in corners {
+        for i in 0..=STEPS {
+            let a = start + FRAC_PI_2 * i as f32 / STEPS as f32;
+            let p = centre + r * egui::vec2(a.cos(), a.sin());
+            mesh.colored_vertex(p, color_at(p.y));
+        }
+    }
+    let n = mesh.vertices.len() as u32;
+    for i in 1..n {
+        let next = if i + 1 < n { i + 1 } else { 1 };
+        mesh.add_triangle(0, i, next);
+    }
+    egui::Shape::mesh(mesh)
+}
+
 /// Banner colour when the profile has none: Discord uses the avatar's main
 /// colour; we use a stable colour from the user id.
 fn fallback_banner(user_id: &str, pal: &Palette) -> Color32 {
@@ -585,10 +695,42 @@ mod tests {
         assert_eq!(p.bio, "hello");
         assert_eq!(p.pronouns, "they/them");
         assert_eq!(p.banner_color, Some(255));
+        assert_eq!(p.theme_colors, Some((255, 0)));
+        assert!(p.decoration_url.is_none());
         assert!(p.banner_url.unwrap().contains("/banners/5/abc.png"));
         let m = p.member.unwrap();
         assert_eq!(m.nick.as_deref(), Some("Nick"));
         assert_eq!(m.roles, ["r1"]);
+    }
+
+    #[test]
+    fn server_profile_theme_and_decoration() {
+        let p = Profile::from_json(
+            &json!({
+                "user": { "id": "5", "banner": "abc",
+                          "avatar_decoration_data": { "asset": "a_deco", "sku_id": "1" } },
+                "user_profile": { "theme_colors": [1, 2] },
+                "guild_member_profile": { "theme_colors": [3, 4], "banner": "srv" },
+            }),
+            Some("g".into()),
+        );
+        assert_eq!(p.theme_colors, Some((3, 4)));
+        assert!(
+            p.banner_url
+                .unwrap()
+                .contains("/guilds/g/users/5/banners/srv.png")
+        );
+        assert!(
+            p.decoration_url
+                .unwrap()
+                .contains("/avatar-decoration-presets/a_deco.png")
+        );
+        // A single colour isn't a theme.
+        let p = Profile::from_json(
+            &json!({ "user": { "id": "5" }, "user_profile": { "theme_colors": [1] } }),
+            None,
+        );
+        assert_eq!(p.theme_colors, None);
     }
 
     #[test]

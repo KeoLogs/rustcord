@@ -64,6 +64,9 @@ pub struct Config {
     /// Bot accounts: ask for the Server Members + Presence intents and load
     /// the whole member list. Both must be enabled in the Developer Portal.
     pub bot_member_intents: bool,
+    /// Profile cards show people's Nitro profile themes (gradient colours)
+    /// and avatar decorations.
+    pub profile_themes: bool,
     /// Emoji picker: most recently used emoji (newest first).
     #[serde(default)]
     pub recent_emoji: crate::emoji_picker::RecentEmoji,
@@ -99,6 +102,7 @@ impl Default for Config {
             flash_taskbar: true,
             compact_member_list: false,
             bot_member_intents: false,
+            profile_themes: true,
             recent_emoji: Default::default(),
             skin_tone: 0,
             favourite_gifs: Vec::new(),

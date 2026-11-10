@@ -2915,14 +2915,13 @@ impl State {
         let Some(pop) = self.popout.take() else {
             return;
         };
-        // The card's big avatar and banner aren't used anywhere else.
+        // The card's big avatar, banner and avatar decoration aren't used
+        // anywhere else.
         ctx.forget_image(&pop.user.avatar_url.replace("size=64", "size=128"));
-        if let Some(url) = self
-            .profiles
-            .get(&pop.user.id, pop.guild_id.as_deref())
-            .and_then(|p| p.banner_url.clone())
-        {
-            ctx.forget_image(&url);
+        if let Some(p) = self.profiles.get(&pop.user.id, pop.guild_id.as_deref()) {
+            for url in [&p.banner_url, &p.decoration_url].into_iter().flatten() {
+                ctx.forget_image(url);
+            }
         }
     }
 
