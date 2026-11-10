@@ -746,6 +746,17 @@ impl ThreadStore {
         self.listings.remove(parent_id);
     }
 
+    /// A thread of `parent_id` called `name` (the newest if several are),
+    /// for thread-created messages whose payload has no thread id.
+    pub fn find_by_name(&self, parent_id: &str, name: &str) -> Option<&Thread> {
+        if name.is_empty() {
+            return None;
+        }
+        self.children(parent_id)
+            .filter(|t| t.name == name)
+            .max_by_key(|t| t.id_num())
+    }
+
     /// Insert or replace. With `joined_known` false (THREAD_UPDATE, which has
     /// no member object), a membership we already knew about is kept.
     fn upsert(&mut self, mut t: Thread, joined_known: bool) {
@@ -833,6 +844,55 @@ impl ThreadStore {
             self.previews.remove(&id);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Thread cards (a thread-created message in the chat)
+// ---------------------------------------------------------------------------
+
+/// The thread a message's card opens: the store's copy when we know it
+/// (live name and counts from THREAD_UPDATE), else one built from the
+/// message (`thread` object or `message_reference`), else the store's
+/// thread of this channel with the message's name (type 18 content is the
+/// thread name). None if nothing names a thread. `guild_id` fills in the
+/// server for a built one (history messages carry no `guild_id`).
+pub fn card_thread<'a>(
+    m: &crate::types::Message,
+    store: &'a ThreadStore,
+    guild_id: Option<&str>,
+) -> Option<std::borrow::Cow<'a, Thread>> {
+    use std::borrow::Cow;
+    if let Some(id) = m.thread_id() {
+        if let Some(t) = store.get(id) {
+            return Some(Cow::Borrowed(t));
+        }
+        let r = m.thread.as_deref();
+        let name = r
+            .map(|r| r.name.as_str())
+            .filter(|n| !n.is_empty())
+            .unwrap_or(&m.content);
+        return Some(Cow::Owned(Thread {
+            id: id.to_string(),
+            guild_id: m
+                .guild_id
+                .as_deref()
+                .or(guild_id)
+                .unwrap_or_default()
+                .to_string(),
+            parent_id: m.channel_id.clone(),
+            kind: CHANNEL_PUBLIC_THREAD,
+            name: name.to_string(),
+            message_count: r.and_then(|r| r.message_count).unwrap_or(0),
+            last_message_id: r.map_or(0, |r| r.last_message_id),
+            ..Thread::default()
+        }));
+    }
+    let name = m
+        .thread
+        .as_deref()
+        .map(|r| r.name.as_str())
+        .unwrap_or(&m.content);
+    store.find_by_name(&m.channel_id, name).map(Cow::Borrowed)
 }
 
 // ---------------------------------------------------------------------------
@@ -1724,5 +1784,75 @@ mod tests {
             iso(1_794_225_600).as_deref(),
             Some("2026-11-09T12:00:00+00:00")
         );
+    }
+
+    fn card_msg(v: Value) -> crate::types::Message {
+        crate::types::Message::from_json(&v)
+    }
+
+    #[test]
+    fn card_thread_prefers_the_store() {
+        let mut store = ThreadStore::new();
+        let mut live = t("77", "p1");
+        live.name = "renamed".into();
+        live.message_count = 9;
+        store.apply(ThreadEvent::Upsert(live));
+        let m = card_msg(json!({
+            "id": "5", "channel_id": "p1", "type": 18, "content": "ideas",
+            "message_reference": { "channel_id": "77" },
+        }));
+        let th = card_thread(&m, &store, Some("g1")).unwrap();
+        assert!(matches!(th, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(th.name, "renamed");
+        assert_eq!(th.message_count, 9);
+    }
+
+    #[test]
+    fn card_thread_built_from_the_message() {
+        let store = ThreadStore::new();
+        // Only the reference: name from the content, server from the caller.
+        let m = card_msg(json!({
+            "id": "5", "channel_id": "p1", "type": 18, "content": "ideas",
+            "message_reference": { "channel_id": "77" },
+        }));
+        let th = card_thread(&m, &store, Some("g1")).unwrap();
+        assert_eq!(
+            (th.id.as_str(), th.name.as_str(), th.parent_id.as_str()),
+            ("77", "ideas", "p1")
+        );
+        assert_eq!(th.guild_id, "g1");
+        assert_eq!(th.message_count, 0);
+        // The thread object wins for name and count.
+        let m = card_msg(json!({
+            "id": "5", "channel_id": "p1", "guild_id": "g2", "type": 18, "content": "old",
+            "thread": { "id": "78", "name": "new name", "message_count": 4,
+                        "last_message_id": "99" },
+        }));
+        let th = card_thread(&m, &store, Some("g1")).unwrap();
+        assert_eq!(th.name, "new name");
+        assert_eq!(th.guild_id, "g2");
+        assert_eq!((th.message_count, th.last_message_id), (4, 99));
+    }
+
+    #[test]
+    fn card_thread_falls_back_to_name() {
+        let mut store = ThreadStore::new();
+        let mut a = t("70", "p1");
+        a.name = "ideas".into();
+        let mut b = t("71", "p1");
+        b.name = "ideas".into();
+        let mut other = t("72", "p2");
+        other.name = "ideas".into();
+        for th in [a, b, other] {
+            store.apply(ThreadEvent::Upsert(th));
+        }
+        let m = card_msg(json!({ "id": "5", "channel_id": "p1", "type": 18, "content": "ideas" }));
+        // Newest thread of this channel with that name.
+        assert_eq!(card_thread(&m, &store, None).unwrap().id, "71");
+        let unknown =
+            card_msg(json!({ "id": "5", "channel_id": "p1", "type": 18, "content": "nope" }));
+        assert!(card_thread(&unknown, &store, None).is_none());
+        let empty = card_msg(json!({ "id": "5", "channel_id": "p1", "type": 18 }));
+        assert!(card_thread(&empty, &store, None).is_none());
     }
 }

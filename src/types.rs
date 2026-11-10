@@ -573,6 +573,42 @@ pub struct Message {
     pub has_components: bool,
     /// Reactions under the message (Reactions module).
     pub reactions: Vec<crate::reactions::Reaction>,
+    /// `message_reference.channel_id`, only when it isn't this channel
+    /// (a thread-created message's thread, a forward's source). Replies in
+    /// the same channel keep nothing.
+    pub ref_channel_id: Option<String>,
+    /// The `thread` object Discord puts on a message that has a thread.
+    pub thread: Option<Box<ThreadRef>>,
+}
+
+/// The thread a message points at (`thread` on the message).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThreadRef {
+    pub id: String,
+    pub name: String,
+    /// Messages in the thread, if the payload said.
+    pub message_count: Option<u32>,
+    /// Newest message in the thread (0 if unknown).
+    pub last_message_id: u64,
+}
+
+impl ThreadRef {
+    /// None without an id (nothing to open).
+    pub fn from_json(v: &Value) -> Option<Self> {
+        let id = v
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())?;
+        Some(Self {
+            id: id.to_string(),
+            name: str_of(v, "name"),
+            message_count: v
+                .get("message_count")
+                .and_then(Value::as_u64)
+                .map(|n| n.min(u64::from(u32::MAX)) as u32),
+            last_message_id: snowflake(v, "last_message_id").unwrap_or(0),
+        })
+    }
 }
 
 impl Message {
@@ -677,7 +713,28 @@ impl Message {
             } else {
                 Vec::new()
             },
+            ref_channel_id: v
+                .pointer("/message_reference/channel_id")
+                .and_then(Value::as_str)
+                .filter(|c| !c.is_empty() && *c != v["channel_id"].as_str().unwrap_or_default())
+                .map(str::to_string),
+            thread: v
+                .get("thread")
+                .filter(|t| t.is_object())
+                .and_then(ThreadRef::from_json)
+                .map(Box::new),
         }
+    }
+
+    /// The thread this message points at: its `thread` object, or for a
+    /// thread-created message (type 18) the referenced channel. None when
+    /// the payload has neither (see `threads::card_thread` for the
+    /// look-up by name).
+    pub fn thread_id(&self) -> Option<&str> {
+        if let Some(t) = &self.thread {
+            return Some(&t.id);
+        }
+        self.ref_channel_id.as_deref().filter(|_| self.kind == 18)
     }
 
     /// `https://discord.com/channels/<guild or @me>/<channel>/<message>`.
@@ -1251,4 +1308,68 @@ pub enum ToBackend {
         emoji: crate::emoji_picker::EmojiRef,
         burst: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn thread_created_message_keeps_its_thread() {
+        let m = Message::from_json(&json!({
+            "id": "5", "channel_id": "1", "type": 18, "content": "ideas",
+            "author": { "id": "9", "username": "sam" },
+            "message_reference": { "channel_id": "77", "guild_id": "100" },
+        }));
+        assert_eq!(m.ref_channel_id.as_deref(), Some("77"));
+        assert_eq!(m.thread_id(), Some("77"));
+        assert!(m.thread.is_none());
+    }
+
+    #[test]
+    fn thread_object_is_parsed() {
+        let m = Message::from_json(&json!({
+            "id": "5", "channel_id": "1", "type": 0, "content": "start here",
+            "author": { "id": "9", "username": "sam" },
+            "thread": { "id": "77", "name": "ideas", "message_count": 4,
+                        "last_message_id": "90", "type": 11 },
+        }));
+        let t = m.thread.as_deref().unwrap();
+        assert_eq!(t.id, "77");
+        assert_eq!(t.name, "ideas");
+        assert_eq!(t.message_count, Some(4));
+        assert_eq!(t.last_message_id, 90);
+        assert_eq!(m.thread_id(), Some("77"));
+    }
+
+    #[test]
+    fn thread_fields_are_lenient() {
+        // Same-channel reply: nothing kept.
+        let reply = Message::from_json(&json!({
+            "id": "5", "channel_id": "1", "type": 19,
+            "message_reference": { "channel_id": "1", "message_id": "4" },
+        }));
+        assert_eq!(reply.ref_channel_id, None);
+        assert_eq!(reply.thread_id(), None);
+        // A forward from another channel keeps the channel, but isn't a thread.
+        let fwd = Message::from_json(&json!({
+            "id": "5", "channel_id": "1", "message_reference": { "channel_id": "2" },
+        }));
+        assert_eq!(fwd.ref_channel_id.as_deref(), Some("2"));
+        assert_eq!(fwd.thread_id(), None);
+        // Broken thread objects are dropped; a missing count stays unknown.
+        let bad = Message::from_json(&json!({
+            "id": "5", "channel_id": "1", "thread": { "name": "no id" },
+            "message_reference": null,
+        }));
+        assert!(bad.thread.is_none());
+        let t = ThreadRef::from_json(&json!({ "id": "7", "message_count": "x" })).unwrap();
+        assert_eq!(t.message_count, None);
+        assert_eq!(t.last_message_id, 0);
+        // A type 18 without a reference has no id: the store look-up by
+        // name is the fallback.
+        let old = Message::from_json(&json!({ "id": "5", "channel_id": "1", "type": 18 }));
+        assert_eq!(old.thread_id(), None);
+    }
 }
