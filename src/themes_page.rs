@@ -1,8 +1,9 @@
 //! Settings → Themes: a grid of installed theme cards (mini preview, name,
 //! author, Active badge, Apply / Delete), "Import theme…", "Open themes
-//! folder" and "Reset to default". RustCord has one built-in look (Discord
-//! Dark); every other theme, Discord Light included, is imported from a
-//! `.rctheme` file (examples in `examples/themes/`).
+//! folder" and "Reset to default". RustCord has one built-in look (blocky
+//! bordered panes on the Discord Dark palette); every other theme, Discord
+//! Classic and Discord Light included, is imported from a `.rctheme` file
+//! (examples in `examples/themes/`).
 //!
 //! Pure UI: it returns a `ThemesAction`; the app applies themes, deletes
 //! (after the confirmation shown here) and asks the backend for the file
@@ -43,8 +44,8 @@ impl ThemesPage {
 
         ui.label(
             RichText::new(
-                "Themes change RustCord's colours and look. The default look is Discord Dark. \
-                 Import a .rctheme file, a theme folder or a .zip; Discord Light and other \
+                "Themes change RustCord's colours and look. The default look has bordered panes on dark colours. \
+                 Import a .rctheme file, a theme folder or a .zip; Discord Classic, Discord Light and other \
                  example themes are in the examples/themes folder of RustCord's source.",
             )
             .color(pal.muted),
@@ -85,7 +86,7 @@ impl ThemesPage {
                     store.active_custom.is_some(),
                     egui::Button::new(icons::label(icons::RESET, "Reset to default")),
                 )
-                .on_hover_text("Back to the default look (Discord Dark)")
+                .on_hover_text("Back to the default look (bordered panes)")
                 .on_disabled_hover_text("The default look is already applied")
                 .clicked()
             {

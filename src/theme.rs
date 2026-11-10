@@ -8,6 +8,7 @@
 //! fall back to system fonts.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, RichText, Stroke,
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::layout::Pane;
 
-/// The base palette of a theme: Discord Dark is RustCord's one built-in look;
+/// The base palette of a theme: Discord Dark is the built-in look's palette;
 /// Light is only the `base = "light"` of a `.rctheme` file (e.g. the Discord
 /// Light example in `examples/themes/`). There is no picker for these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -110,6 +111,22 @@ pub struct Palette {
     /// Server icons without a picture, and the Home button.
     pub rail_icon: Color32,
     pub dark: bool,
+}
+
+/// The active theme's corner scale (f32 bits), set by
+/// `themes::apply_style`, for the few frames drawn with a fixed radius
+/// (menus, primary buttons) that only get a `Palette`.
+static CORNER_SCALE: AtomicU32 = AtomicU32::new(0x3e80_0000); // 0.25
+
+/// Called when a theme is applied.
+pub fn set_corner_scale(scale: f32) {
+    CORNER_SCALE.store(scale.to_bits(), Ordering::Relaxed);
+}
+
+/// `r` scaled by the active theme's corner scale.
+pub fn corner(r: u8) -> u8 {
+    let scale = f32::from_bits(CORNER_SCALE.load(Ordering::Relaxed));
+    (f32::from(r) * scale).round().clamp(0.0, 255.0) as u8
 }
 
 /// Name of the SemiBold font family.
@@ -364,7 +381,7 @@ impl Palette {
                 .bold(),
         )
         .fill(self.accent)
-        .corner_radius(4)
+        .corner_radius(corner(4))
     }
 
     /// Discord's small uppercase section labels ("TEXT CHANNELS",

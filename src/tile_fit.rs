@@ -91,6 +91,9 @@ pub fn pane_range(pane: Pane, axis: Axis) -> (f32, f32) {
 pub struct Metrics {
     pub gap: f32,
     pub tab_bar: f32,
+    /// Extra width / height each pane's frame takes (the blocky look's
+    /// border, label and half gaps), added to every pane's min / max.
+    pub chrome: [f32; 2],
 }
 
 fn visible_children(tiles: &Tiles<Pane>, children: &[TileId]) -> Vec<TileId> {
@@ -131,7 +134,14 @@ fn range_depth(
         return (0.0, INF);
     }
     match tiles.get(id) {
-        Some(Tile::Pane(p)) => pane_range(*p, axis),
+        Some(Tile::Pane(p)) => {
+            let (lo, hi) = pane_range(*p, axis);
+            let extra = match axis {
+                Axis::X => m.chrome[0],
+                Axis::Y => m.chrome[1],
+            };
+            (lo + extra, hi + extra)
+        }
         Some(Tile::Container(Container::Tabs(tabs))) => {
             let Some(child) = shown_tab(tiles, tabs) else {
                 return (0.0, 0.0);
@@ -483,6 +493,7 @@ mod tests {
     const M: Metrics = Metrics {
         gap: 0.0,
         tab_bar: 24.0,
+        chrome: [0.0, 0.0],
     };
 
     fn leo5_tree() -> Tree<Pane> {

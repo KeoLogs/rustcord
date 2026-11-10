@@ -599,6 +599,7 @@ impl eframe::App for RustCordApp {
         let metrics = crate::tile_fit::Metrics {
             gap: if self.editing_layout { 6.0 } else { 0.0 },
             tab_bar: 24.0,
+            chrome: self.active_theme.pane_chrome().into(),
         };
         let tier = crate::responsive::tier_with_hysteresis(area.width(), state.host.tier);
         state.host.tier = Some(tier);

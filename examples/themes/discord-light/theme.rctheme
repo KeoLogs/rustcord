@@ -1,6 +1,6 @@
 # Discord Light: Discord's light look. It used to be a built-in choice in
-# Settings; RustCord now has one built-in look (Discord Dark) and this is
-# an example theme you import.
+# Settings; RustCord now has one built-in look (bordered panes) and this
+# is an example theme you import.
 format = 1
 
 [meta]
@@ -31,3 +31,8 @@ strong = "#060607"
 msg_hover = "#f7f7f8"
 divider = "#e1e2e4"
 rail_icon = "#ffffff"
+
+[style]
+# The classic look: flat panes without borders, gaps or labels.
+corner_scale = 1.0
+frame = { enabled = false }

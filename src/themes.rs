@@ -4,8 +4,9 @@
 //!
 //! Themes live in `<data dir>/themes/<id>/theme.rctheme` (+ an optional
 //! background image). None are bundled into the binary; the default look
-//! (Discord Dark) is always available, and example themes (Discord Light,
-//! test themes) live in `examples/themes/` for Import. With the "Custom
+//! (blocky bordered panes on the Discord Dark palette) is always available,
+//! and example themes (Discord Classic, Discord Light, test themes) live in
+//! `examples/themes/` for Import. With the "Custom
 //! themes" module off, nothing is read from disk.
 //!
 //! Memory: only the active theme's background image is decoded, downscaled
@@ -603,7 +604,8 @@ pub struct ActiveTheme {
 }
 
 impl ActiveTheme {
-    /// The default look (Discord Dark), used when no custom theme applies.
+    /// The default look (blocky bordered panes on the Discord Dark
+    /// palette), used when no custom theme applies.
     pub fn default_theme() -> Self {
         Self {
             palette: ThemeChoice::DiscordDark.palette(),
@@ -664,7 +666,61 @@ impl ActiveTheme {
     }
 
     fn paints(&self, pane: Pane) -> bool {
-        self.style.pane(pane).is_custom() || (pane == Pane::Messages && self.bg.is_some())
+        self.framed()
+            || self.style.pane(pane).is_custom()
+            || (pane == Pane::Messages && self.bg.is_some())
+    }
+
+    /// Panes are bordered boxes with gaps between them (the default look).
+    pub fn framed(&self) -> bool {
+        self.style.frame.enabled
+    }
+
+    /// The pane's card inside its tile rect: shrunk by the theme's `inset`,
+    /// and when framed by half the gap (more at the top, where the label
+    /// sits in the border).
+    pub fn pane_card(&self, tile: Rect, pane: Pane) -> Rect {
+        let inset = f32::from(self.style.pane(pane).inset);
+        if !self.framed() {
+            return tile.shrink(inset);
+        }
+        let side = inset.max(f32::from(self.style.frame.gap) / 2.0);
+        let top = if self.style.frame.labels {
+            side.max(LABEL_HALF)
+        } else {
+            side
+        };
+        let r = Rect::from_min_max(
+            pos2(tile.left() + side, tile.top() + top),
+            pos2(tile.right() - side, tile.bottom() - side),
+        );
+        if r.is_positive() { r } else { tile }
+    }
+
+    /// Where a pane's widgets go: the whole tile, or inside the border (and
+    /// below the label) when framed.
+    pub fn pane_content(&self, tile: Rect, pane: Pane) -> Rect {
+        if !self.framed() {
+            return tile;
+        }
+        let card = self.pane_card(tile, pane);
+        let top = if self.style.frame.labels {
+            LABEL_HALF
+        } else {
+            FRAME_BORDER
+        };
+        let r = Rect::from_min_max(
+            pos2(card.left() + FRAME_BORDER, card.top() + top),
+            card.max - vec2(FRAME_BORDER, FRAME_BORDER),
+        );
+        if r.is_positive() { r } else { card }
+    }
+
+    /// Extra width and height every pane needs for its frame (tile size
+    /// minus content size), so the layout keeps the content at its minimum.
+    pub fn pane_chrome(&self) -> egui::Vec2 {
+        let tile = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0));
+        tile.size() - self.pane_content(tile, Pane::Messages).size()
     }
 
     /// Draw a pane's background (call before its contents, with the pane's
@@ -673,13 +729,33 @@ impl ActiveTheme {
         if !self.paints(pane) {
             return;
         }
-        let window = painter.ctx().content_rect();
-        paint_pane(painter, rect, window, pane, &self.palette, &self.style);
+        if self.framed() {
+            let card = self.pane_card(rect, pane);
+            let ps = self.style.pane(pane);
+            let base = ps
+                .gradient
+                .unwrap_or_else(|| Gradient::flat(self.palette.pane_fill(pane)));
+            let alpha = if ps.glass {
+                self.style.glass_opacity
+            } else {
+                1.0
+            };
+            let r = f32::from(self.frame_radius(pane));
+            gradient_rect(painter, card, r, r, |y| {
+                base.at((y - card.top()) / card.height().max(1.0))
+                    .gamma_multiply(alpha)
+            });
+            if ps.glass {
+                glass_sheen(painter, card, r);
+            }
+        } else {
+            let window = painter.ctx().content_rect();
+            paint_pane(painter, rect, window, pane, &self.palette, &self.style);
+        }
         if pane == Pane::Messages
             && let (Some(tex), Some(spec)) = (&self.bg, &self.style.image)
         {
-            let ps = self.style.pane(pane);
-            let r = rect.shrink(ps.inset as f32);
+            let r = self.pane_card(rect, pane);
             let painter = painter.with_clip_rect(r.intersect(painter.clip_rect()));
             let size = tex.size_vec2();
             let uv = match spec.fit {
@@ -699,9 +775,76 @@ impl ActiveTheme {
             gradient_rect(painter, rect, 0.0, 0.0, |y| {
                 g.at((y - rect.top()) / rect.height().max(1.0))
             });
+        } else if self.framed() {
+            // The gaps between framed panes: the darkest surface.
+            painter.rect_filled(rect, 0, self.palette.servers);
         }
     }
+
+    /// Corner radius of a framed pane's box.
+    fn frame_radius(&self, pane: Pane) -> u8 {
+        self.style
+            .radius(self.style.pane(pane).corner_radius.max(4))
+    }
+
+    /// The 1 px border around a framed pane, with `label` cut into its top
+    /// edge. Call after the pane's contents, with the same tile rect.
+    pub fn paint_pane_frame(&self, painter: &Painter, tile: Rect, pane: Pane, label: &str) {
+        if !self.framed() {
+            return;
+        }
+        let f = &self.style.frame;
+        let card = self.pane_card(tile, pane);
+        let stroke = Stroke::new(FRAME_BORDER, f.border.unwrap_or(self.palette.divider));
+        let radius = CornerRadius::same(self.frame_radius(pane));
+        if !f.labels || label.is_empty() {
+            painter.rect_stroke(card, radius, stroke, StrokeKind::Inside);
+            return;
+        }
+        let galley = painter.layout_no_wrap(
+            label.to_string(),
+            egui::FontId::proportional(LABEL_SIZE),
+            f.label.unwrap_or(self.palette.muted),
+        );
+        let x = card.left() + LABEL_X;
+        let room = card.right() - LABEL_X - x;
+        if room < galley.size().x + LABEL_PAD || galley.size().x <= 0.0 {
+            // Too narrow for the label: a plain border.
+            painter.rect_stroke(card, radius, stroke, StrokeKind::Inside);
+            return;
+        }
+        // The notch: the border drawn three times, clipped around the label.
+        let band_bottom = card.top() + LABEL_HALF;
+        let (l, r) = (x - LABEL_PAD, x + galley.size().x + LABEL_PAD);
+        let clip = painter.clip_rect();
+        for part in [
+            Rect::from_min_max(pos2(tile.left(), band_bottom), tile.max),
+            Rect::from_min_max(tile.min, pos2(l, band_bottom)),
+            Rect::from_min_max(pos2(r, tile.top()), pos2(tile.right(), band_bottom)),
+        ] {
+            painter.with_clip_rect(part.intersect(clip)).rect_stroke(
+                card,
+                radius,
+                stroke,
+                StrokeKind::Inside,
+            );
+        }
+        let pos = pos2(x, card.top() + FRAME_BORDER / 2.0 - galley.size().y / 2.0);
+        painter.galley(pos, galley, Color32::PLACEHOLDER);
+    }
 }
+
+/// Border width of a framed pane.
+const FRAME_BORDER: f32 = 1.0;
+/// Notch label size (the `Small` text size, so no new font atlas entries).
+const LABEL_SIZE: f32 = 11.5;
+/// About half the label's height: room above the top border line, and
+/// below it before the pane's contents start.
+const LABEL_HALF: f32 = 7.0;
+/// The label's offset from the card's left edge.
+const LABEL_X: f32 = 12.0;
+/// Border cut on each side of the label.
+const LABEL_PAD: f32 = 4.0;
 
 /// UV rect showing the centre of an image scaled to cover `area`.
 fn cover_uv(area: egui::Vec2, img: egui::Vec2) -> Rect {
@@ -713,8 +856,9 @@ fn cover_uv(area: egui::Vec2, img: egui::Vec2) -> Rect {
 
 /// Radii, shadows, link colour and font scale on top of `Palette::apply`.
 pub fn apply_style(ctx: &egui::Context, s: &ThemeStyle) {
-    let r = CornerRadius::same(s.widget_radius);
-    let (wr, mr) = (s.window_radius, s.menu_radius);
+    let r = CornerRadius::same(s.radius(s.widget_radius));
+    let (wr, mr) = (s.radius(s.window_radius), s.radius(s.menu_radius));
+    crate::theme::set_corner_scale(s.corner_scale);
     let (ws, ps, link, border) = (s.window_shadow, s.popup_shadow, s.link, s.widget_border);
     let scale = s.font_scale;
     ctx.global_style_mut(|st| {
@@ -785,11 +929,12 @@ pub fn paint_pane(
         }
     }
     let card = rect.shrink(ps.inset as f32);
-    let r = ps.corner_radius as f32;
+    let radius = style.radius(ps.corner_radius);
+    let r = f32::from(radius);
     if ps.inset > 0
         && let Some(sh) = style.panel_shadow
     {
-        painter.add(sh.as_shape(card, CornerRadius::same(ps.corner_radius)));
+        painter.add(sh.as_shape(card, CornerRadius::same(radius)));
     }
     let alpha = if ps.glass { style.glass_opacity } else { 1.0 };
     gradient_rect(painter, card, r, r, |y| {
@@ -926,7 +1071,17 @@ pub fn paint_preview(painter: &Painter, rect: Rect, pal: &Palette, style: &Theme
         (chat, Pane::Messages),
         (comp, Pane::Composer),
     ] {
-        if s.pane(pane).is_custom() {
+        if s.frame.enabled {
+            // Blocky: each pane a bordered box with a small gap around it.
+            let card = r.shrink(1.5);
+            painter.rect_filled(card, 0, pal.pane_fill(pane));
+            painter.rect_stroke(
+                card,
+                0,
+                Stroke::new(1.0, s.frame.border.unwrap_or(pal.divider)),
+                StrokeKind::Inside,
+            );
+        } else if s.pane(pane).is_custom() {
             paint_pane(&painter, r, rect, pane, pal, &s);
         } else {
             painter.rect_filled(r, 0, pal.pane_fill(pane));

@@ -11,7 +11,7 @@ pub const CONFIG_KEY: &str = "config_v1";
 #[serde(default)]
 pub struct Config {
     /// Id (folder name) of the applied custom theme, if any; it overrides
-    /// the default look (Discord Dark) while the Custom themes module is on.
+    /// the default look (bordered panes) while the Custom themes module is on.
     /// Older configs also carry a `theme` key (the removed Dark / Light
     /// picker); it is ignored, so they load with the default look.
     #[serde(default)]

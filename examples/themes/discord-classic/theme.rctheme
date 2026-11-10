@@ -1,0 +1,40 @@
+# Discord Classic: RustCord's old built-in look (Discord Dark). Flat panes
+# in Discord's colours, no borders, gaps or labels, Discord's rounded
+# corners. The built-in look is now the bordered "blocky" one; import this
+# to go back to the classic look.
+format = 1
+
+[meta]
+name = "Discord Classic"
+author = "RustCord"
+version = "1.0"
+description = "The old default: Discord Dark, flat panes without borders."
+base = "dark"
+
+[colors]
+servers = "#1e1f22"
+sidebar = "#2b2d31"
+chat = "#313338"
+input = "#383a40"
+hover = "#35373c"
+selected = "#404249"
+text = "#dbdee1"
+muted = "#949ba4"
+accent = "#5865f2"
+online = "#23a55a"
+idle = "#f0b232"
+dnd = "#f23f43"
+offline = "#80848e"
+danger = "#da373c"
+mention = "#f23f43"
+unread = "#f2f3f5"
+strong = "#f2f3f5"
+msg_hover = "#2e3035"
+divider = "#3f4147"
+rail_icon = "#313338"
+
+[style]
+corner_scale = 1.0
+
+[style.frame]
+enabled = false

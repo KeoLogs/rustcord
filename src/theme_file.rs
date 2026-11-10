@@ -25,6 +25,14 @@
 //! widget_border = "#8faacc"       # outline buttons / inputs / checkboxes
 //! backdrop = { top = "#..", mid = "#..", bottom = "#.." }  # behind glass / inset panes
 //! accent_gradient = { top = "#..", bottom = "#.." }        # primary buttons
+//! corner_scale = 0.25             # 0 – 2, multiplies every corner radius
+//!
+//! [style.frame]                   # bordered panes (the default look)
+//! enabled = true                  # false = flat panes, no borders or gaps
+//! border = "#3f4147"              # default: [colors] divider
+//! label = "#949ba4"               # notch label colour; default: [colors] muted
+//! labels = true                   # pane names cut into the top border
+//! gap = 8                         # 0 – 24 px between panes
 //!
 //! [style.panes.messages]          # servers, profile, channels, messages, composer, members
 //! gradient = { top = "#..", bottom = "#.." }   # or: fill = "#.."
@@ -210,10 +218,42 @@ pub struct ThemeStyle {
     pub widget_border: Option<Color32>,
     pub panes: [PaneStyle; 6],
     pub image: Option<ImageSpec>,
+    /// Multiplies every corner radius (widgets, windows, menus, panes).
+    pub corner_scale: f32,
+    /// Bordered panes with notched labels.
+    pub frame: PaneFrame,
+}
+
+/// The blocky look: each pane is a box with a 1 px border, its name cut
+/// into the top border, and small even gaps between the boxes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaneFrame {
+    pub enabled: bool,
+    /// Border colour; `None` = the palette's `divider`.
+    pub border: Option<Color32>,
+    /// Label colour; `None` = the palette's `muted`.
+    pub label: Option<Color32>,
+    /// Show the pane names in the top border.
+    pub labels: bool,
+    /// Space between two panes (half of it around each pane).
+    pub gap: u8,
+}
+
+impl Default for PaneFrame {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            border: None,
+            label: None,
+            labels: true,
+            gap: 8,
+        }
+    }
 }
 
 impl Default for ThemeStyle {
-    /// The built-in Discord look (matches `Palette::apply`).
+    /// The built-in look: blocky bordered panes (matches `Palette::apply`
+    /// plus the frame and corner scale).
     fn default() -> Self {
         Self {
             widget_radius: 4,
@@ -230,6 +270,8 @@ impl Default for ThemeStyle {
             widget_border: None,
             panes: [PaneStyle::default(); 6],
             image: None,
+            corner_scale: 0.25,
+            frame: PaneFrame::default(),
         }
     }
 }
@@ -237,6 +279,11 @@ impl Default for ThemeStyle {
 impl ThemeStyle {
     pub fn pane(&self, pane: Pane) -> PaneStyle {
         pane_index(pane).map(|i| self.panes[i]).unwrap_or_default()
+    }
+
+    /// `r` times the theme's corner scale.
+    pub fn radius(&self, r: u8) -> u8 {
+        (f32::from(r) * self.corner_scale).round().clamp(0.0, 255.0) as u8
     }
 }
 
@@ -282,8 +329,20 @@ struct RawStyle {
     widget_border: Option<String>,
     backdrop: Option<RawGradient>,
     accent_gradient: Option<RawGradient>,
+    corner_scale: Option<f32>,
+    frame: Option<RawFrame>,
     #[serde(default)]
     panes: BTreeMap<String, RawPane>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFrame {
+    enabled: Option<bool>,
+    border: Option<String>,
+    label: Option<String>,
+    labels: Option<bool>,
+    gap: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -566,6 +625,27 @@ pub fn parse_theme(text: &str) -> Result<ThemeDef> {
         .as_ref()
         .map(|g| gradient("[style] accent_gradient", g))
         .transpose()?;
+    if let Some(v) = s.corner_scale {
+        style.corner_scale = range("[style] corner_scale", v, 0.0, 2.0)?;
+    }
+    if let Some(f) = &s.frame {
+        let d = PaneFrame::default();
+        style.frame = PaneFrame {
+            enabled: f.enabled.unwrap_or(d.enabled),
+            border: f
+                .border
+                .as_deref()
+                .map(|c| color("[style.frame] border", c))
+                .transpose()?,
+            label: f
+                .label
+                .as_deref()
+                .map(|c| color("[style.frame] label", c))
+                .transpose()?,
+            labels: f.labels.unwrap_or(d.labels),
+            gap: max("[style.frame] gap", f.gap.unwrap_or(d.gap), 24)?,
+        };
+    }
     for (key, p) in &s.panes {
         let Some(i) = PANE_KEYS.iter().position(|k| k == key) else {
             bail!(
@@ -794,7 +874,13 @@ fit = "tile"
     #[test]
     fn example_themes_parse() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/themes");
-        for name in ["discord-light", "2000s-messenger", "frutiger-aero"] {
+        for name in [
+            "discord-classic",
+            "discord-light",
+            "2000s-messenger",
+            "frosted-glass",
+            "frutiger-aero",
+        ] {
             let dir = root.join(name);
             let text = std::fs::read_to_string(dir.join(THEME_FILE)).unwrap();
             let t = parse_theme(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -805,6 +891,83 @@ fit = "tile"
                 assert!(len <= 300 * 1024, "{name}: image is {len} bytes");
             }
         }
+    }
+
+    #[test]
+    fn frame_tokens() {
+        let d = ThemeStyle::default();
+        assert!(
+            d.frame.enabled && d.frame.labels,
+            "the default look is framed"
+        );
+        assert!(d.corner_scale < 0.5, "and almost square");
+        let t = parse_theme(&format!(
+            "{MIN}[style]
+corner_scale = 0
+[style.frame]
+border = \"#102030\"
+label = \"#405060\"
+labels = false
+gap = 12
+"
+        ))
+        .unwrap();
+        let f = t.style.frame;
+        assert!(f.enabled && !f.labels);
+        assert_eq!(f.border, Some(Color32::from_rgb(0x10, 0x20, 0x30)));
+        assert_eq!(f.label, Some(Color32::from_rgb(0x40, 0x50, 0x60)));
+        assert_eq!(f.gap, 12);
+        assert_eq!(t.style.radius(8), 0);
+        let off = parse_theme(&format!(
+            "{MIN}[style]
+frame = {{ enabled = false }}
+"
+        ))
+        .unwrap();
+        assert!(!off.style.frame.enabled);
+        assert_eq!(off.style.frame.gap, PaneFrame::default().gap);
+        assert!(
+            err("[style.frame]
+gap = 40")
+            .contains("max 24")
+        );
+        assert!(
+            err("[style.frame]
+border = \"red\"")
+            .contains("[style.frame] border")
+        );
+        assert!(
+            err("[style.frame]
+lable = true")
+            .contains("lable")
+        );
+        assert!(
+            err("[style]
+corner_scale = 3.0")
+            .contains("corner_scale")
+        );
+    }
+
+    #[test]
+    fn discord_classic_example_is_the_old_built_in() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/themes/discord-classic")
+            .join(THEME_FILE);
+        let t = parse_theme(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(t.meta.base, ThemeChoice::DiscordDark);
+        assert_eq!(
+            format!("{:?}", t.palette),
+            format!("{:?}", ThemeChoice::DiscordDark.palette())
+        );
+        let classic = ThemeStyle {
+            corner_scale: 1.0,
+            frame: PaneFrame {
+                enabled: false,
+                ..PaneFrame::default()
+            },
+            ..ThemeStyle::default()
+        };
+        assert_eq!(t.style, classic);
     }
 
     #[test]

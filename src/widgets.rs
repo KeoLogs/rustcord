@@ -229,7 +229,7 @@ pub fn icon_button_sized(
 pub fn menu_frame(pal: &Palette) -> egui::Frame {
     egui::Frame::new()
         .fill(pal.menu_bg())
-        .corner_radius(8)
+        .corner_radius(crate::theme::corner(8))
         .inner_margin(8)
         .stroke(egui::Stroke::new(1.0, pal.divider.gamma_multiply(0.6)))
         .shadow(egui::Shadow {

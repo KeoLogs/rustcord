@@ -57,6 +57,18 @@ impl Pane {
         }
     }
 
+    /// The short lowercase name cut into a framed pane's top border.
+    pub fn label(self) -> &'static str {
+        match self {
+            Pane::Servers => "nav",
+            Pane::Profile => "user",
+            Pane::Channels => "channels",
+            Pane::Messages => "chat",
+            Pane::Composer => "input",
+            Pane::Members => "members",
+        }
+    }
+
     pub fn icon(self) -> &'static str {
         use crate::icons;
         match self {
@@ -238,8 +250,8 @@ pub fn end_frame(tree: &Tree<Pane>, ctx: &egui::Context) {
 
 // ---- Frame drag ---------------------------------------------------------
 //
-// Themes with an `inset` draw each pane as a card with a strip of backdrop
-// (the "frame") around it. Pressing on that empty strip and dragging moves
+// Framed panes (the default blocky look) and themes with an `inset` draw
+// each pane as a card with a strip of backdrop (the "frame") around it. Pressing on that empty strip and dragging moves
 // the OS window, like a title bar. The card itself and every widget keep
 // their clicks: the strips are registered *before* the tiles draw, so
 // anything egui_tiles or a pane registers on top (resize handles, tab bars)
@@ -254,21 +266,27 @@ fn frame_rects_id() -> egui::Id {
     egui::Id::unique("rustcord_frame_rects")
 }
 
-/// Remember a pane's tile rect and inset (only panes with an inset leave
-/// empty frame space). Called from `pane_ui`, so only panes on screen count.
-fn note_frame(ctx: &egui::Context, tile: egui::Rect, inset: f32) {
-    if inset <= 0.0 {
+/// Remember a pane's tile rect and card (only panes whose card is smaller
+/// than the tile leave empty frame space). Called from `pane_ui`, so only
+/// panes on screen count.
+fn note_frame(ctx: &egui::Context, tile: egui::Rect, card: egui::Rect) {
+    if card == tile || !tile.contains_rect(card) {
         return;
     }
     ctx.data_mut(|d| {
-        d.get_temp_mut_or_default::<Vec<(egui::Rect, f32)>>(frame_rects_id())
-            .push((tile, inset))
+        d.get_temp_mut_or_default::<Vec<(egui::Rect, egui::Rect)>>(frame_rects_id())
+            .push((tile, card))
     });
 }
 
 /// The empty strips of a tile around its card (`tile` shrunk by `inset`).
+#[cfg(test)]
 pub fn frame_strips(tile: egui::Rect, inset: f32) -> [egui::Rect; 4] {
-    let card = tile.shrink(inset);
+    frame_strips_around(tile, tile.shrink(inset))
+}
+
+/// The empty strips of a tile around `card` (top, bottom, left, right).
+pub fn frame_strips_around(tile: egui::Rect, card: egui::Rect) -> [egui::Rect; 4] {
     let r = |x0: f32, y0: f32, x1: f32, y1: f32| {
         egui::Rect::from_min_max([x0, y0].into(), [x1, y1].into())
     };
@@ -288,15 +306,15 @@ pub fn frame_strips(tile: egui::Rect, inset: f32) -> [egui::Rect; 4] {
 pub fn frame_drag(ui: &mut egui::Ui, enabled: bool) {
     let ctx = ui.ctx().clone();
     let frames = ctx.data_mut(|d| {
-        d.get_temp_mut_or_default::<Vec<(egui::Rect, f32)>>(frame_rects_id())
+        d.get_temp_mut_or_default::<Vec<(egui::Rect, egui::Rect)>>(frame_rects_id())
             .split_off(0)
     });
     if !enabled {
         return;
     }
     let base = ui.scope_id().with("frame_drag");
-    for (n, (tile, inset)) in frames.into_iter().enumerate() {
-        for (k, strip) in frame_strips(tile, inset).into_iter().enumerate() {
+    for (n, (tile, card)) in frames.into_iter().enumerate() {
+        for (k, strip) in frame_strips_around(tile, card).into_iter().enumerate() {
             if strip.width() <= 0.0 || strip.height() <= 0.0 {
                 continue;
             }
@@ -322,9 +340,10 @@ pub struct PaneCtx<'a> {
     pub theme: &'a crate::themes::ActiveTheme,
 }
 
-/// Draw one pane's content into `ui`: theme background, fill, margin, and
-/// the pane itself, **clipped to `ui.max_rect()`** so nothing draws past
-/// its edge (popups and menus are separate layers).
+/// Draw one pane's content into `ui`: theme background, fill, margin, the
+/// pane itself and (in the blocky look) its border with the notch label,
+/// **clipped to `ui.max_rect()`** so nothing draws past its edge (popups
+/// and menus are separate layers).
 ///
 /// Container-agnostic: the caller can be an egui_tiles tile, a side panel,
 /// a framed card or a viewport (layout_v3 `Mode`); it only has to hand over
@@ -335,13 +354,32 @@ pub fn draw_pane(ui: &mut egui::Ui, pane: Pane, ctx: &mut PaneCtx<'_>) {
     // Theme gradients / glass / background image first; the frame fill is
     // transparent for panes the theme paints.
     ctx.theme.paint_pane_background(ui.painter(), rect, pane);
-    egui::Frame::new()
-        .fill(ctx.theme.pane_fill(pane))
-        .inner_margin(pane_margin(pane))
-        .show(ui, |ui| {
-            ui.set_min_size(ui.available_size());
-            ctx.state.pane_ui(ui, pane, ctx.config, ctx.pal);
-        });
+    let content = ctx.theme.pane_content(rect, pane);
+    let show = |ui: &mut egui::Ui, ctx: &mut PaneCtx<'_>| {
+        egui::Frame::new()
+            .fill(ctx.theme.pane_fill(pane))
+            .inner_margin(pane_margin(pane))
+            .show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                ctx.state.pane_ui(ui, pane, ctx.config, ctx.pal);
+            });
+    };
+    if content == rect {
+        show(ui, ctx);
+    } else {
+        // Framed: the pane lives inside its border, below the label.
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(content)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| {
+                ui.set_clip_rect(content.intersect(ui.clip_rect()));
+                show(ui, ctx);
+            },
+        );
+        ctx.theme
+            .paint_pane_frame(ui.painter(), rect, pane, pane.label());
+    }
 }
 
 /// Draw a whole layout_v3 column into `ui` (container-agnostic, like
@@ -384,11 +422,7 @@ pub struct LayoutBehavior<'a> {
 impl Behavior<Pane> for LayoutBehavior<'_> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, tile_id: TileId, pane: &mut Pane) -> UiResponse {
         let rect = ui.max_rect();
-        note_frame(
-            ui.ctx(),
-            rect,
-            f32::from(self.theme.style.pane(*pane).inset),
-        );
+        note_frame(ui.ctx(), rect, self.theme.pane_card(rect, *pane));
         draw_pane(
             ui,
             *pane,
@@ -598,6 +632,8 @@ pub fn draw_drawers(
     use crate::tile_fit::Drawer;
     let left = folded.in_drawer(Drawer::Left);
     let aside = folded.in_drawer(Drawer::Aside);
+    // The user panel's content height plus its frame (blocky look).
+    let user_h = USER_PANEL_HEIGHT + ctx.theme.pane_chrome().y;
     if left.is_empty() {
         ctx.state.host.left_open = false;
     }
@@ -636,7 +672,7 @@ pub fn draw_drawers(
             |ui, ctx| {
                 let mut body = rect;
                 if has(&left, Pane::Profile) {
-                    let (b, user) = rect.split_top_bottom_at_y(rect.bottom() - USER_PANEL_HEIGHT);
+                    let (b, user) = rect.split_top_bottom_at_y(rect.bottom() - user_h);
                     place(ui, user, Pane::Profile, ctx);
                     body = b;
                 }
@@ -677,7 +713,7 @@ pub fn draw_drawers(
             |ui, ctx| {
                 let mut body = rect;
                 if has(&aside, Pane::Profile) {
-                    let (b, user) = rect.split_top_bottom_at_y(rect.bottom() - USER_PANEL_HEIGHT);
+                    let (b, user) = rect.split_top_bottom_at_y(rect.bottom() - user_h);
                     place(ui, user, Pane::Profile, ctx);
                     body = b;
                 }
@@ -757,6 +793,8 @@ fn drawer_body(
         .show(egui_ctx, |ui| {
             ui.set_clip_rect(area);
             let _ = ui.allocate_rect(rect, Sense::click());
+            // The gaps between framed panes.
+            ctx.theme.paint_backdrop(ui.painter(), rect);
             add(ui, ctx);
         });
     // The scrim was shown first; keep the drawer above it.

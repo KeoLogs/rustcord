@@ -35,6 +35,9 @@ rail_icon = "#ffffff"
 link = "#0645ad"
 
 [style]
+# The classic look: flat panes without borders, gaps or labels.
+corner_scale = 1.0
+frame = { enabled = false }
 corner_radius = { widgets = 5, windows = 10, menus = 6 }
 window_shadow = { offset = [2, 4], blur = 16, spread = 0, color = "#1a3a6a40" }
 popup_shadow = { offset = [2, 3], blur = 10, color = "#1a3a6a38" }

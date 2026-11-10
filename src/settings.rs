@@ -447,7 +447,7 @@ impl SettingsPage {
                             .get(id)
                             .map(|t| t.meta.name.clone())
                             .unwrap_or_else(|| id.clone()),
-                        _ => "Discord Dark (default)".to_owned(),
+                        _ => "RustCord (default)".to_owned(),
                     };
                     ui.label(RichText::new(name).bold().color(pal.strong));
                     ui.add_space(8.0);
@@ -456,7 +456,7 @@ impl SettingsPage {
                             config.custom_theme.is_some(),
                             egui::Button::new(icons::label(icons::RESET, "Reset to default")),
                         )
-                        .on_hover_text("Back to the default look (Discord Dark)")
+                        .on_hover_text("Back to the default look (bordered panes)")
                         .clicked()
                     {
                         config.custom_theme = None;
