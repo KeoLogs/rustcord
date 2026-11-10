@@ -6,6 +6,11 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## 0.3.1: Resize fix
+- The window can't shrink below what the layout needs (borders and labels
+  included), so short windows no longer squash the chat into a strip; lists
+  shrink first, the composer and user panel last.
+
 ## 0.3.0: Blocky default look (PR1b)
 - New default look: bordered panes with small notch labels, near-square
   corners, monospace font (Cascadia Mono). Themes can switch it off
