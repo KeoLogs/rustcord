@@ -56,7 +56,10 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   including markdown `<t:…>` timestamps; use `timefmt::hm()` for new ones.
 - UI look (Discord-like): `layout.rs` sets per-panel margins (channels and
   messages draw their own full-width headers via `header_bar`). Server rail:
-  `rail_item` (icon-only below `RAIL_NAMES_WIDTH`). Messages: `message_row`
+  `rail_item` via `widgets::RailButton` (icon fixed at the left; widening
+  the rail stretches it into a pill and fades the name in, no snap).
+  Layout sizing: `src/tile_fit.rs` (per-pane min/max, chat absorbs
+  resizes, drawers below the `responsive::Tier` breakpoints). Messages: `message_row`
   (hover background via a placeholder shape, the hover bar is an `Area`
   whose rect is kept in egui memory), `reply_preview`, `date_divider`.
   The members header button hides the Members tile with egui_tiles
