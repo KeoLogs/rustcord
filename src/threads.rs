@@ -895,6 +895,100 @@ pub fn card_thread<'a>(
     store.find_by_name(&m.channel_id, name).map(Cow::Borrowed)
 }
 
+/// Longest snippet on a thread card (characters; the UI also truncates to
+/// the card's width).
+const CARD_SNIPPET_CHARS: usize = 120;
+
+/// The newest message of a thread, as its card shows it.
+#[derive(Debug, Clone)]
+pub struct CardLast {
+    pub author: User,
+    /// One line of plain text (never empty).
+    pub snippet: String,
+}
+
+/// A thread card's preview line: the newest message when it's loaded,
+/// and the message count.
+#[derive(Debug, Clone, Default)]
+pub struct CardPreview {
+    pub last: Option<CardLast>,
+    /// Messages in the thread (0 = unknown or none).
+    pub count: u32,
+}
+
+impl CardPreview {
+    /// "1 message" / "N messages", None when the count is unknown.
+    pub fn count_text(&self) -> Option<String> {
+        match self.count {
+            0 => None,
+            1 => Some("1 message".to_string()),
+            n => Some(format!("{n} messages")),
+        }
+    }
+
+    /// The muted line when the newest message isn't loaded.
+    pub fn summary(&self) -> String {
+        match self.count_text() {
+            Some(c) => format!("{c} · Open to see messages"),
+            None => "Open to see messages".to_string(),
+        }
+    }
+}
+
+/// Build a card's preview from what's already here: the thread (store or
+/// THREAD_UPDATE count) and the thread channel's cached messages (oldest
+/// first), if it was opened or got messages this session. Never asks
+/// Discord for anything. `plain` turns a message into one line of text
+/// (`markdown::to_plain_text` through the parse cache).
+pub fn card_preview(
+    thread: &Thread,
+    cached: Option<&[crate::types::Message]>,
+    plain: &mut dyn FnMut(&crate::types::Message) -> String,
+) -> CardPreview {
+    let cached = cached.unwrap_or_default();
+    // Discord doesn't count the starter message (type 21).
+    let loaded = cached.iter().filter(|m| m.kind != 21).count();
+    let count = thread
+        .message_count
+        .max(u32::try_from(loaded).unwrap_or(u32::MAX));
+    let newest = cached
+        .iter()
+        .rev()
+        .find(|m| crate::sysmsg::is_normal(m.kind));
+    // The cache is behind the thread (it got newer messages we don't have):
+    // don't show an old message as the last one.
+    let behind = |m: &crate::types::Message| {
+        thread.last_message_id > 0 && m.id.parse::<u64>().unwrap_or(0) < thread.last_message_id
+    };
+    let last = newest
+        .filter(|_| !cached.last().is_some_and(behind))
+        .map(|m| CardLast {
+            author: m.author.clone(),
+            snippet: card_snippet(&plain(m), m),
+        });
+    CardPreview { last, count }
+}
+
+/// One line, at most `CARD_SNIPPET_CHARS`; a word for messages without
+/// text.
+fn card_snippet(text: &str, m: &crate::types::Message) -> String {
+    let mut s = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if s.chars().count() > CARD_SNIPPET_CHARS {
+        s = s.chars().take(CARD_SNIPPET_CHARS).collect::<String>() + "…";
+    }
+    if !s.is_empty() {
+        s
+    } else if !m.attachments.is_empty() {
+        "Sent an attachment".to_string()
+    } else if !m.stickers.is_empty() {
+        "Sent a sticker".to_string()
+    } else if !m.embeds.is_empty() {
+        "Sent an embed".to_string()
+    } else {
+        "Sent a message".to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Actions and UI context
 // ---------------------------------------------------------------------------
@@ -1854,5 +1948,95 @@ mod tests {
         assert!(card_thread(&unknown, &store, None).is_none());
         let empty = card_msg(json!({ "id": "5", "channel_id": "p1", "type": 18 }));
         assert!(card_thread(&empty, &store, None).is_none());
+    }
+
+    fn plain(m: &crate::types::Message) -> String {
+        crate::markdown::to_plain_text(
+            &crate::markdown::parse(&m.content),
+            &crate::markdown::NoLookup,
+        )
+    }
+
+    fn thread_msgs(ids: &[(&str, &str)]) -> Vec<crate::types::Message> {
+        ids.iter()
+            .map(|(id, content)| {
+                card_msg(json!({
+                    "id": id, "channel_id": "77", "content": content,
+                    "author": { "id": "9", "username": "sam", "global_name": "Sam" },
+                }))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn card_preview_from_cached_messages() {
+        let mut th = t("77", "p1");
+        th.message_count = 2;
+        th.last_message_id = 92;
+        let msgs = thread_msgs(&[
+            ("90", "first"),
+            ("91", "hi"),
+            (
+                "92",
+                "**big**
+news  here",
+            ),
+        ]);
+        let p = card_preview(&th, Some(&msgs), &mut plain);
+        let last = p.last.unwrap();
+        assert_eq!(last.author.name, "Sam");
+        assert_eq!(last.snippet, "big news here");
+        // More loaded than the stored count: the loaded number wins.
+        assert_eq!(p.count, 3);
+    }
+
+    #[test]
+    fn card_preview_without_messages() {
+        let mut th = t("77", "p1");
+        th.message_count = 4;
+        let p = card_preview(&th, None, &mut plain);
+        assert!(p.last.is_none());
+        assert_eq!(p.count_text().as_deref(), Some("4 messages"));
+        assert_eq!(p.summary(), "4 messages · Open to see messages");
+        th.message_count = 1;
+        let p = card_preview(&th, Some(&[]), &mut plain);
+        assert_eq!(p.summary(), "1 message · Open to see messages");
+        th.message_count = 0;
+        let p = card_preview(&th, None, &mut plain);
+        assert_eq!(p.count_text(), None);
+        assert_eq!(p.summary(), "Open to see messages");
+    }
+
+    #[test]
+    fn card_preview_skips_stale_and_system_messages() {
+        // The cache stops before the thread's newest message: no last line.
+        let mut th = t("77", "p1");
+        th.message_count = 5;
+        th.last_message_id = 99;
+        let msgs = thread_msgs(&[("90", "a"), ("91", "b")]);
+        let p = card_preview(&th, Some(&msgs), &mut plain);
+        assert!(p.last.is_none());
+        assert_eq!(p.count, 5);
+        // System lines (a pin) are skipped; empty text gets a word.
+        th.last_message_id = 0;
+        let mut msgs = thread_msgs(&[("90", "")]);
+        msgs[0]
+            .attachments
+            .push(crate::types::Attachment::from_json(
+                &json!({ "url": "u", "filename": "a.png" }),
+            ));
+        msgs.push(card_msg(
+            json!({ "id": "91", "channel_id": "77", "type": 6 }),
+        ));
+        let p = card_preview(&th, Some(&msgs), &mut plain);
+        assert_eq!(p.last.unwrap().snippet, "Sent an attachment");
+        // Long text is cut.
+        let long = "x".repeat(500);
+        let msgs = thread_msgs(&[("90", long.as_str())]);
+        let s = card_preview(&th, Some(&msgs), &mut plain)
+            .last
+            .unwrap()
+            .snippet;
+        assert_eq!(s.chars().count(), CARD_SNIPPET_CHARS + 1);
     }
 }
