@@ -3343,6 +3343,23 @@ impl State {
         }
     }
 
+    /// Open the Create Thread dialog (message menu, or the Threads popup's
+    /// Create): for `message` (id, content) or a standalone thread. Only
+    /// opens the form; nothing is created until its Create is clicked.
+    fn open_thread_dialog(&mut self, channel_id: &str, message: Option<(&str, &str)>) {
+        if !self.has_perm(channel_id, perms::CREATE_PUBLIC_THREADS) {
+            return;
+        }
+        let Some(ts) = &mut self.threads else {
+            return;
+        };
+        ts.browser = None;
+        ts.dialog = Some(match message {
+            Some((id, content)) => ThreadDialog::from_message(channel_id, id, content),
+            None => ThreadDialog::standalone(channel_id),
+        });
+    }
+
     /// Thread browser opened for a channel: ask for active (once per
     /// server) and archived (once per channel) threads. No polling.
     fn open_thread_browser(&mut self, channel_id: String, anchor: egui::Rect) {
@@ -3410,6 +3427,7 @@ impl State {
             return;
         };
         let mut action = None;
+        let mut create_in = None;
         if let Some(d) = &mut ts.dialog {
             match d.show(ctx, pal) {
                 DialogOutcome::Open => {}
@@ -3481,8 +3499,8 @@ impl State {
                 action = Some(a);
             }
             if create {
-                ts.dialog = Some(ThreadDialog::standalone(&cid));
                 ts.browser = None;
+                create_in = Some(cid.clone());
             }
             let outside = ctx.input(|i| {
                 i.pointer.any_click()
@@ -3495,6 +3513,9 @@ impl State {
             }
         }
         self.threads = Some(ts);
+        if let Some(cid) = create_in {
+            self.open_thread_dialog(&cid, None);
+        }
         if let Some(a) = action {
             if matches!(a, ThreadAction::OpenThread { .. })
                 && let Some(ts) = &mut self.threads
@@ -6333,9 +6354,7 @@ impl State {
             Some(MessageAction::JumpTo(id)) => self.jump_to(channel_id.clone(), id),
             Some(MessageAction::Invite(a)) => self.invite_action(a, &ctx, config),
             Some(MessageAction::CreateThread(id, content)) => {
-                if let Some(ts) = &mut self.threads {
-                    ts.dialog = Some(ThreadDialog::from_message(&channel_id, &id, &content));
-                }
+                self.open_thread_dialog(&channel_id, Some((&id, &content)));
             }
             Some(MessageAction::React(id, a)) => {
                 let now = ctx.input(|i| i.time);

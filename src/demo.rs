@@ -740,6 +740,28 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                     joined: true,
                 });
             }
+            ToBackend::Threads(crate::threads::ThreadAction::CreateThread {
+                channel_id,
+                name,
+                private,
+                auto_archive_minutes,
+                ..
+            }) => {
+                // Only after the dialog’s Create was clicked.
+                next_id += 1;
+                let thread = crate::threads::Thread::from_json(
+                    &json!({
+                        "id": next_id.to_string(), "type": if private { 12 } else { 11 },
+                        "name": name, "parent_id": channel_id, "owner_id": ME,
+                        "member": { "id": next_id.to_string(), "flags": 1 },
+                        "thread_metadata": {
+                            "archived": false, "auto_archive_duration": auto_archive_minutes
+                        }
+                    }),
+                    Some(TEST_GUILD),
+                );
+                send(ToUi::ThreadCreated(thread));
+            }
             ToBackend::Threads(crate::threads::ThreadAction::LeaveThread { thread_id }) => {
                 send(ToUi::ThreadJoined {
                     thread_id,

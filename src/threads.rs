@@ -1564,29 +1564,57 @@ impl ThreadDialog {
         }
     }
 
+    /// The form, styled like the Add an account dialog. `Submit` only when
+    /// the user clicks Create (or presses Enter in the name box).
     pub fn show(&mut self, ctx: &egui::Context, pal: &Palette) -> DialogOutcome {
         let mut out = DialogOutcome::Open;
         let modal = egui::Modal::new(egui::Id::unique(("create_thread", &self.channel_id)))
-            .frame(
-                egui::Frame::new()
-                    .fill(pal.chat)
-                    .corner_radius(8)
-                    .inner_margin(16),
-            )
+            .frame(crate::widgets::menu_frame(pal).inner_margin(24))
             .show(ctx, |ui| {
                 ui.set_width(420.0);
-                ui.label(RichText::new("Create Thread").heading().color(pal.strong));
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(crate::icons::CHATS)
+                            .size(20.0)
+                            .color(pal.muted),
+                    );
+                    ui.label(
+                        RichText::new("Create Thread")
+                            .size(20.0)
+                            .bold()
+                            .color(pal.strong),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let x = crate::widgets::icon_button(
+                            ui,
+                            crate::icons::X,
+                            "Close",
+                            false,
+                            true,
+                            pal,
+                        );
+                        if x.clicked() {
+                            out = DialogOutcome::Cancelled;
+                        }
+                    });
+                });
                 if let Some(s) = &self.starter {
-                    ui.add_space(6.0);
+                    ui.add_space(8.0);
                     egui::Frame::new()
                         .fill(pal.sidebar)
-                        .corner_radius(4)
-                        .inner_margin(8)
+                        .stroke(Stroke::new(1.0, pal.divider))
+                        .corner_radius(theme::corner(4))
+                        .inner_margin(10)
                         .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
                             ui.add(egui::Label::new(RichText::new(s).color(pal.muted)).wrap());
                         });
+                } else {
+                    ui.label(
+                        RichText::new("A side conversation in this channel.").color(pal.muted),
+                    );
                 }
-                ui.add_space(10.0);
+                ui.add_space(12.0);
                 ui.label(pal.section_label("Thread name"));
                 let edit = ui.add(
                     egui::TextEdit::singleline(&mut self.name)
@@ -1597,7 +1625,7 @@ impl ThreadDialog {
                 if self.name.is_empty() && !edit.has_focus() {
                     edit.request_focus();
                 }
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 ui.label(pal.section_label("Hide after inactivity"));
                 ui.horizontal(|ui| {
                     for m in AUTO_ARCHIVE_MINUTES {
@@ -1609,18 +1637,17 @@ impl ThreadDialog {
                     ui.checkbox(&mut self.private, "Private thread")
                         .on_hover_text("Only people you invite and moderators can see it");
                 }
-                ui.add_space(14.0);
+                ui.add_space(16.0);
                 let valid = !self.name.trim().is_empty();
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        out = DialogOutcome::Cancelled;
-                    }
-                    let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let create = ui.add_enabled(valid, pal.primary_button("Create Thread"));
-                    if valid && (create.clicked() || enter) {
-                        out = DialogOutcome::Submit(self.action());
-                    }
-                });
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let width = ui.available_width();
+                let create = ui.add_enabled(
+                    valid,
+                    pal.primary_button("Create").min_size(vec2(width, 36.0)),
+                );
+                if valid && (create.clicked() || enter) {
+                    out = DialogOutcome::Submit(self.action());
+                }
             });
         if out == DialogOutcome::Open && modal.should_close() {
             out = DialogOutcome::Cancelled;
