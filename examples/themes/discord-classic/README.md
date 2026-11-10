@@ -1,7 +1,8 @@
 # Discord Classic
 
 RustCord's old default look: Discord Dark with flat panes that touch each
-other (no borders, gaps or pane labels) and Discord's rounded corners.
+other (no borders, gaps or pane labels), Discord's rounded corners and the
+Noto Sans font instead of the monospace one.
 RustCord's built-in look is now the bordered "blocky" one; this theme
 brings the classic look back.
 

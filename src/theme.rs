@@ -1,18 +1,21 @@
 //! Discord-style colours and fonts. Each panel gets its own background like
 //! Discord (darkest server list, slightly lighter channel list, lightest chat).
 //!
-//! Fonts: Noto Sans (SIL OFL 1.1, `assets/fonts/`) is bundled as the main
-//! font, close to Discord's gg sans. Names and headers use its SemiBold
-//! weight through the `bold` font family (`RichText::new(..).bold()` via the
-//! `Bold` trait). Scripts Noto Sans lacks (CJK, Arabic, Devanagari…) still
-//! fall back to system fonts.
+//! Fonts (`assets/fonts/`, SIL OFL 1.1): Cascadia Mono is the default UI
+//! font (the blocky look is monospace everywhere); a theme can pick Noto
+//! Sans instead (`font_family = "sans"`, close to Discord's gg sans). Names
+//! and headers use the SemiBold weight through the `bold` font family
+//! (`RichText::new(..).bold()` via the `Bold` trait); Cascadia Mono is a
+//! variable font, so its SemiBold is the same file at `wght` 600. Noto Sans
+//! and the symbol fonts stay fallbacks; scripts neither has (CJK, Arabic,
+//! Devanagari…) fall back to system fonts.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use eframe::egui::{
-    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, RichText, Stroke,
-    TextStyle, Visuals,
+    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, FontTweak,
+    RichText, Stroke, TextStyle, Visuals, epaint::text::VariationCoords,
 };
 use serde::{Deserialize, Serialize};
 
@@ -176,36 +179,75 @@ const SYMBOL_FONTS: [(&str, &[u8]); 4] = [
     ),
 ];
 
-/// Install Noto Sans as the main font, the Phosphor icon font (see
-/// `icons.rs`) and the symbol fallbacks, keeping egui's fonts as fallbacks
-/// (and the system font fallback eframe adds for other scripts).
-pub fn install_fonts(ctx: &egui::Context) {
-    ctx.set_fonts(font_definitions());
+/// The UI font a theme uses (`[style] font_family` in `.rctheme`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum UiFont {
+    /// Cascadia Mono everywhere (the default look).
+    #[default]
+    Mono,
+    /// Noto Sans (the classic Discord-like look); code stays monospace.
+    Sans,
 }
 
-/// The font set `install_fonts` installs.
-fn font_definitions() -> FontDefinitions {
+/// Cascadia Mono (variable: `wght` 200–700, default 400).
+const CASCADIA_MONO: &[u8] = include_bytes!("../assets/fonts/CascadiaMono.ttf");
+
+/// The font installed last (`set_fonts` rebuilds the font atlas, so only
+/// when it changes). 0 = none yet, 1 = mono, 2 = sans.
+static INSTALLED_FONT: AtomicU32 = AtomicU32::new(0);
+
+/// Install the default fonts (Cascadia Mono). See [`install_ui_font`].
+pub fn install_fonts(ctx: &egui::Context) {
+    install_ui_font(ctx, UiFont::Mono);
+}
+
+/// Install `font` as the main font, with the Phosphor icon font (see
+/// `icons.rs`), Noto Sans and the symbol fallbacks behind it, then egui's
+/// fonts (and the system font fallback eframe adds for other scripts).
+/// Does nothing when `font` is already installed.
+pub fn install_ui_font(ctx: &egui::Context, font: UiFont) {
+    let key = match font {
+        UiFont::Mono => 1,
+        UiFont::Sans => 2,
+    };
+    if INSTALLED_FONT.swap(key, Ordering::Relaxed) != key {
+        ctx.set_fonts(font_definitions(font));
+    }
+}
+
+/// The font set `install_ui_font` installs.
+fn font_definitions(font: UiFont) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
-    let mut add = |name: &str, bytes: &'static [u8]| {
-        fonts
-            .font_data
-            .insert(name.into(), Arc::new(FontData::from_static(bytes)));
+    let mut add = |name: &str, data: FontData| {
+        fonts.font_data.insert(name.into(), Arc::new(data));
     };
     add(
         "NotoSans-Regular",
-        include_bytes!("../assets/fonts/NotoSans-Regular.ttf"),
+        FontData::from_static(include_bytes!("../assets/fonts/NotoSans-Regular.ttf")),
     );
     add(
         "NotoSans-SemiBold",
-        include_bytes!("../assets/fonts/NotoSans-SemiBold.ttf"),
+        FontData::from_static(include_bytes!("../assets/fonts/NotoSans-SemiBold.ttf")),
     );
-    add("Phosphor", include_bytes!("../assets/fonts/Phosphor.ttf"));
+    add("CascadiaMono", FontData::from_static(CASCADIA_MONO));
+    // The same variable font file at SemiBold weight (no second file).
+    add(
+        "CascadiaMono-SemiBold",
+        FontData::from_static(CASCADIA_MONO).tweak(FontTweak {
+            coords: VariationCoords::new([(b"wght", 600.0)]),
+            ..Default::default()
+        }),
+    );
+    add(
+        "Phosphor",
+        FontData::from_static(include_bytes!("../assets/fonts/Phosphor.ttf")),
+    );
     add(
         "Phosphor-Fill",
-        include_bytes!("../assets/fonts/Phosphor-Fill.ttf"),
+        FontData::from_static(include_bytes!("../assets/fonts/Phosphor-Fill.ttf")),
     );
     for (name, bytes) in SYMBOL_FONTS {
-        add(name, bytes);
+        add(name, FontData::from_static(bytes));
     }
     let symbols: Vec<String> = SYMBOL_FONTS.iter().map(|(n, _)| n.to_string()).collect();
 
@@ -215,31 +257,43 @@ fn font_definitions() -> FontDefinitions {
         .get(&FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
-    let chain = |first: &str| {
+    // `first`, the icons, Noto Sans (Regular or SemiBold) for what the
+    // first font lacks, the symbol fonts, egui's fonts.
+    let chain = |first: &str, noto: &str| {
         let mut v = vec![first.to_string(), "Phosphor".into()];
-        if first != "NotoSans-Regular" {
-            v.push("NotoSans-Regular".into());
+        for n in [noto, "NotoSans-Regular"] {
+            if !v.iter().any(|x| x == n) {
+                v.push(n.into());
+            }
         }
         v.extend(symbols.iter().cloned());
         v.extend(egui_fonts.iter().cloned());
         v
     };
+    let (regular, bold) = match font {
+        UiFont::Mono => ("CascadiaMono", "CascadiaMono-SemiBold"),
+        UiFont::Sans => ("NotoSans-Regular", "NotoSans-SemiBold"),
+    };
     fonts
         .families
-        .insert(FontFamily::Proportional, chain("NotoSans-Regular"));
+        .insert(FontFamily::Proportional, chain(regular, "NotoSans-Regular"));
     fonts
         .families
-        .insert(bold_family(), chain("NotoSans-SemiBold"));
-    if let Some(m) = fonts.families.get_mut(&FontFamily::Monospace) {
-        // After Hack: arrows, symbols, accents Hack lacks.
-        m.insert(1, "NotoSans-Regular".into());
-        for (i, s) in symbols.iter().enumerate() {
-            m.insert(2 + i, s.clone());
+        .insert(bold_family(), chain(bold, "NotoSans-SemiBold"));
+    // Code blocks: Cascadia Mono in both looks (egui's Hack stays a
+    // fallback inside `egui_fonts`' list for the monospace family).
+    let mut mono = chain("CascadiaMono", "NotoSans-Regular");
+    if let Some(m) = fonts.families.get(&FontFamily::Monospace) {
+        for f in m {
+            if !mono.contains(f) {
+                mono.push(f.clone());
+            }
         }
     }
+    fonts.families.insert(FontFamily::Monospace, mono);
     fonts.families.insert(
         FontFamily::Name(crate::icons::FILL.into()),
-        vec!["Phosphor-Fill".into(), "NotoSans-Regular".into()],
+        vec!["Phosphor-Fill".into(), regular.into()],
     );
     fonts
 }
@@ -404,15 +458,48 @@ mod tests {
     /// (U+FE31, U+FE32 and U+FF5C are mapped into NotoSansMono-Box).
     #[test]
     fn bundled_fonts_cover_channel_separators() {
-        let mut fonts = egui::epaint::text::Fonts::new(Default::default(), font_definitions());
         let seps = [
             '\u{FE31}', '\u{FE32}', '\u{FF5C}', '\u{2502}', '\u{2503}', '|', '\u{00B7}',
             '\u{2022}', '\u{2013}', '\u{2014}',
         ];
-        for font in [egui::FontId::proportional(15.0), bold_font(15.0)] {
-            for c in seps {
-                assert!(fonts.has_glyph(&font, c), "no glyph for U+{:04X}", c as u32);
+        for ui_font in [UiFont::Mono, UiFont::Sans] {
+            let mut fonts =
+                egui::epaint::text::Fonts::new(Default::default(), font_definitions(ui_font));
+            for font in [
+                egui::FontId::proportional(15.0),
+                bold_font(15.0),
+                egui::FontId::monospace(13.0),
+            ] {
+                for c in seps {
+                    assert!(
+                        fonts.has_glyph(&font, c),
+                        "{ui_font:?}: no glyph for U+{:04X}",
+                        c as u32
+                    );
+                }
             }
         }
+    }
+
+    /// Cascadia Mono is a variable font: the default instance is Regular
+    /// and its `wght` axis reaches SemiBold (the `bold` family).
+    #[test]
+    fn cascadia_mono_is_variable_with_semibold() {
+        let data = FontData::from_static(CASCADIA_MONO);
+        let axes = data.variation_axes();
+        let wght = axes
+            .iter()
+            .find(|a| &a.tag.to_be_bytes() == b"wght")
+            .expect("wght axis");
+        assert!(wght.range.min <= 400.0 && wght.range.max >= 600.0);
+        let defs = font_definitions(UiFont::Mono);
+        assert_eq!(defs.families[&FontFamily::Proportional][0], "CascadiaMono");
+        assert_eq!(defs.families[&bold_family()][0], "CascadiaMono-SemiBold");
+        let sans = font_definitions(UiFont::Sans);
+        assert_eq!(
+            sans.families[&FontFamily::Proportional][0],
+            "NotoSans-Regular"
+        );
+        assert_eq!(sans.families[&FontFamily::Monospace][0], "CascadiaMono");
     }
 }

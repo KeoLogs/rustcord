@@ -1,6 +1,6 @@
 # Discord Classic: RustCord's old built-in look (Discord Dark). Flat panes
 # in Discord's colours, no borders, gaps or labels, Discord's rounded
-# corners. The built-in look is now the bordered "blocky" one; import this
+# corners and the Noto Sans font. The built-in look is now the bordered "blocky" one; import this
 # to go back to the classic look.
 format = 1
 
@@ -35,6 +35,7 @@ rail_icon = "#313338"
 
 [style]
 corner_scale = 1.0
+font_family = "sans"
 
 [style.frame]
 enabled = false

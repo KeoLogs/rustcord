@@ -26,6 +26,7 @@
 //! backdrop = { top = "#..", mid = "#..", bottom = "#.." }  # behind glass / inset panes
 //! accent_gradient = { top = "#..", bottom = "#.." }        # primary buttons
 //! corner_scale = 0.25             # 0 – 2, multiplies every corner radius
+//! font_family = "mono"            # "mono" (Cascadia Mono, default) or "sans" (Noto Sans)
 //!
 //! [style.frame]                   # bordered panes (the default look)
 //! enabled = true                  # false = flat panes, no borders or gaps
@@ -58,7 +59,7 @@ use eframe::egui::{Color32, Shadow};
 use serde::Deserialize;
 
 use crate::layout::Pane;
-use crate::theme::{Palette, ThemeChoice};
+use crate::theme::{Palette, ThemeChoice, UiFont};
 
 /// Theme format this build reads.
 pub const FORMAT: i64 = 1;
@@ -222,6 +223,8 @@ pub struct ThemeStyle {
     pub corner_scale: f32,
     /// Bordered panes with notched labels.
     pub frame: PaneFrame,
+    /// The UI font.
+    pub font: UiFont,
 }
 
 /// The blocky look: each pane is a box with a 1 px border, its name cut
@@ -272,6 +275,7 @@ impl Default for ThemeStyle {
             image: None,
             corner_scale: 0.25,
             frame: PaneFrame::default(),
+            font: UiFont::Mono,
         }
     }
 }
@@ -330,6 +334,7 @@ struct RawStyle {
     backdrop: Option<RawGradient>,
     accent_gradient: Option<RawGradient>,
     corner_scale: Option<f32>,
+    font_family: Option<String>,
     frame: Option<RawFrame>,
     #[serde(default)]
     panes: BTreeMap<String, RawPane>,
@@ -628,6 +633,11 @@ pub fn parse_theme(text: &str) -> Result<ThemeDef> {
     if let Some(v) = s.corner_scale {
         style.corner_scale = range("[style] corner_scale", v, 0.0, 2.0)?;
     }
+    style.font = match s.font_family.as_deref().map(str::trim) {
+        None | Some("mono") => UiFont::Mono,
+        Some("sans") => UiFont::Sans,
+        Some(f) => bail!("[style] font_family: \"{f}\" must be \"mono\" or \"sans\""),
+    };
     if let Some(f) = &s.frame {
         let d = PaneFrame::default();
         style.frame = PaneFrame {
@@ -902,14 +912,15 @@ fit = "tile"
         );
         assert!(d.corner_scale < 0.5, "and almost square");
         let t = parse_theme(&format!(
-            "{MIN}[style]
+            r##"{MIN}
+[style]
 corner_scale = 0
 [style.frame]
-border = \"#102030\"
-label = \"#405060\"
+border = "#102030"
+label = "#405060"
 labels = false
 gap = 12
-"
+"##
         ))
         .unwrap();
         let f = t.style.frame;
@@ -918,34 +929,27 @@ gap = 12
         assert_eq!(f.label, Some(Color32::from_rgb(0x40, 0x50, 0x60)));
         assert_eq!(f.gap, 12);
         assert_eq!(t.style.radius(8), 0);
-        let off = parse_theme(&format!(
-            "{MIN}[style]
-frame = {{ enabled = false }}
-"
-        ))
-        .unwrap();
+        let off = parse_theme(&format!("{MIN}[style]\nframe = {{ enabled = false }}\n")).unwrap();
         assert!(!off.style.frame.enabled);
         assert_eq!(off.style.frame.gap, PaneFrame::default().gap);
-        assert!(
-            err("[style.frame]
-gap = 40")
-            .contains("max 24")
+        assert!(err("[style.frame]\ngap = 40").contains("max 24"));
+        assert!(err("[style.frame]\nborder = \"red\"").contains("[style.frame] border"));
+        assert!(err("[style.frame]\nlable = true").contains("lable"));
+        assert!(err("[style]\ncorner_scale = 3.0").contains("corner_scale"));
+    }
+
+    #[test]
+    fn font_family_token() {
+        assert_eq!(
+            ThemeStyle::default().font,
+            UiFont::Mono,
+            "monospace by default"
         );
-        assert!(
-            err("[style.frame]
-border = \"red\"")
-            .contains("[style.frame] border")
-        );
-        assert!(
-            err("[style.frame]
-lable = true")
-            .contains("lable")
-        );
-        assert!(
-            err("[style]
-corner_scale = 3.0")
-            .contains("corner_scale")
-        );
+        let sans = parse_theme(&format!("{MIN}[style]\nfont_family = \"sans\"\n")).unwrap();
+        assert_eq!(sans.style.font, UiFont::Sans);
+        let mono = parse_theme(&format!("{MIN}[style]\nfont_family = \"mono\"\n")).unwrap();
+        assert_eq!(mono.style.font, UiFont::Mono);
+        assert!(err("[style]\nfont_family = \"serif\"").contains("font_family"));
     }
 
     #[test]
@@ -961,6 +965,7 @@ corner_scale = 3.0")
         );
         let classic = ThemeStyle {
             corner_scale: 1.0,
+            font: UiFont::Sans,
             frame: PaneFrame {
                 enabled: false,
                 ..PaneFrame::default()

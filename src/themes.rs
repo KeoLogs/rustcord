@@ -651,6 +651,7 @@ impl ActiveTheme {
     /// Set egui's visuals and text sizes. Call when the theme changes (and
     /// after anything else that calls `Palette::apply`).
     pub fn apply(&self, ctx: &egui::Context) {
+        crate::theme::install_ui_font(ctx, self.style.font);
         self.palette.apply(ctx);
         apply_style(ctx, &self.style);
     }
