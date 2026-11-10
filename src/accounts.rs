@@ -110,7 +110,6 @@ impl SavedAccount {
     }
 
     /// CDN URL of the avatar (64 px), for the switcher rows.
-    #[allow(dead_code)] // Used by the account switcher (PR2 part b).
     pub fn avatar_url(&self) -> String {
         crate::types::avatar_url(&self.user_id, self.avatar_hash.as_deref())
     }
@@ -127,10 +126,9 @@ fn avatar_hash_from_url(url: &str) -> Option<String> {
 /// Per-account local data, keyed by user id in `Config::per_account`.
 /// Discord-side things belong here (last channel, drafts, "Show as");
 /// RustCord settings, themes, mods, layout and modules stay shared in
-/// `Config`. Filled in by the switcher work.
+/// `Config`. Saved on a switch / exit, restored after READY.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-#[allow(dead_code)] // Read and written by the account switcher (PR2 part b).
 pub struct AccountData {
     /// Channel to reopen when switching back to this account.
     pub last_channel: Option<String>,

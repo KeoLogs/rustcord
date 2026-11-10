@@ -1,5 +1,6 @@
 //! RustCord — a native, customisable Discord client written in Rust.
 
+mod account_menu;
 mod accounts;
 mod api;
 mod app;

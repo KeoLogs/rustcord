@@ -13,6 +13,8 @@ pub struct LoginForm {
     pub remember: bool,
     pub show_token: bool,
     pub error: Option<String>,
+    /// Shown in the "Add an account" dialog: no welcome title, no demo link.
+    pub add_account: bool,
 }
 
 pub enum LoginAction {
@@ -55,13 +57,18 @@ impl LoginForm {
         action
     }
 
-    fn card(&mut self, ui: &mut egui::Ui, pal: &Palette) -> Option<LoginAction> {
+    /// The form itself (also used inside the "Add an account" dialog).
+    pub fn card(&mut self, ui: &mut egui::Ui, pal: &Palette) -> Option<LoginAction> {
         let mut action = None;
-        ui.vertical_centered(|ui| {
-            ui.label(RichText::new("Welcome back!").size(24.0).strong());
-            ui.label(RichText::new("Log in to RustCord with your Discord token").color(pal.muted));
-        });
-        ui.add_space(20.0);
+        if !self.add_account {
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("Welcome back!").size(24.0).strong());
+                ui.label(
+                    RichText::new("Log in to RustCord with your Discord token").color(pal.muted),
+                );
+            });
+            ui.add_space(20.0);
+        }
 
         ui.horizontal(|ui| {
             ui.label(
@@ -147,6 +154,9 @@ impl LoginForm {
             },
         );
 
+        if self.add_account {
+            return action;
+        }
         ui.add_space(6.0);
         ui.vertical_centered(|ui| {
             if ui

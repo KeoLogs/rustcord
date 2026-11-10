@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, RichText, vec2};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::accounts::{SavedAccount, Token, Vault};
+use crate::account_menu::{self, AccountAction, Confirm};
+use crate::accounts::{AccountData, AccountError, MAX_ACCOUNTS, SavedAccount, Token, Vault};
 use crate::autocomplete::{self, Autocomplete, Candidate, Trigger};
 use crate::config::{CONFIG_KEY, Config};
 use crate::embed;
@@ -88,6 +89,8 @@ pub struct RustCordApp {
     session: Option<Session>,
     /// Saved accounts' tokens (OS credential store; in memory in demo mode).
     vault: Vault,
+    /// "Add an account" dialog (the token login), while open.
+    add_account: Option<LoginForm>,
     /// Demo mode only (`RUSTCORD_DEMO_OPEN=view`): a view to open once the
     /// demo data is in, for screenshots.
     demo_open: Option<String>,
@@ -172,6 +175,7 @@ impl RustCordApp {
             ram: RamSampler::default(),
             session: None,
             vault,
+            add_account: None,
             demo_open: demo
                 .then(|| std::env::var("RUSTCORD_DEMO_OPEN").ok())
                 .flatten(),
@@ -217,6 +221,14 @@ impl RustCordApp {
         account: Option<String>,
     ) {
         crate::config::live::sync(&self.config.modules);
+        // "Show as" is per account: the config mirrors this account's choice.
+        let data = account
+            .as_ref()
+            .and_then(|id| self.config.per_account.get(id))
+            .cloned();
+        if let Some(identity) = data.as_ref().and_then(|d| d.client_identity) {
+            self.config.client_identity = identity;
+        }
         let (ui_tx, ui_rx) = mpsc::channel();
         let (be_tx, be_rx) = tokio::sync::mpsc::unbounded_channel();
         let options = crate::backend::Options {
@@ -237,7 +249,145 @@ impl RustCordApp {
             account,
             saved: false,
         });
-        self.screen = Screen::Main(Box::new(State::new(ui_rx, be_tx)));
+        let mut state = State::new(ui_rx, be_tx);
+        // Reopen this account's last channel (and its draft) once READY.
+        state.restore = data.map(|d| (d, None));
+        self.screen = Screen::Main(Box::new(state));
+    }
+
+    /// Log in with a token from the login screen or the "Add an account"
+    /// dialog. Saved to the credential store at READY, once the account's
+    /// user id is known (`save_account`).
+    fn login_with(&mut self, ctx: &egui::Context, token: Token, remember: bool) {
+        if remember {
+            self.config.remember_login = true;
+        }
+        self.start_session(ctx, token, false, None);
+        if let Some(s) = &mut self.session {
+            // Not remembered: never written anywhere.
+            s.saved = !remember;
+        }
+    }
+
+    /// Keep the running account's last channel and draft (per-account
+    /// data in `Config::per_account`), for a switch back or the next start.
+    fn stash_account_data(&mut self) {
+        let (Some(session), Screen::Main(state)) = (&self.session, &self.screen) else {
+            return;
+        };
+        let Some(id) = &session.account else {
+            return;
+        };
+        if !self.config.accounts.iter().any(|a| &a.user_id == id) {
+            return;
+        }
+        stash_view(
+            self.config.per_account.entry(id.clone()).or_default(),
+            state,
+        );
+    }
+
+    /// Left-click on another saved account: disconnect this one (the old
+    /// backend thread ends, the gateway closes with 1000) and connect the
+    /// other with its stored token. Nothing else is sent to Discord.
+    fn switch_account(&mut self, ctx: &egui::Context, user_id: &str) {
+        let token = match self.vault.token(user_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                self.toast("That account's saved login is gone. Add it again with its token.");
+                return;
+            }
+            Err(e) => {
+                self.toast(&format!("Couldn't read the saved login: {e}"));
+                return;
+            }
+        };
+        self.log_out(None, false);
+        self.start_session(ctx, token, false, Some(user_id.to_string()));
+    }
+
+    /// A short notice in the main window.
+    fn toast(&mut self, text: &str) {
+        if let Screen::Main(state) = &mut self.screen {
+            state.toast = Some((text.to_string(), Instant::now()));
+        }
+    }
+
+    /// Something picked in the account menu (user panel).
+    fn account_action(&mut self, ctx: &egui::Context, action: AccountAction) {
+        let current = self.session.as_ref().and_then(|s| s.account.clone());
+        match action {
+            AccountAction::Switch(id) => self.switch_account(ctx, &id),
+            AccountAction::Add => {
+                let mut form = LoginForm::new(true, None);
+                form.add_account = true;
+                self.add_account = Some(form);
+            }
+            AccountAction::LogOut => self.log_out(None, true),
+            AccountAction::Remove(id) if current.as_deref() == Some(id.as_str()) => {
+                self.log_out(None, true)
+            }
+            AccountAction::Remove(id) => {
+                let name = account_name(&self.config, &id);
+                match self.vault.forget(&mut self.config, &id) {
+                    Ok(()) => self.toast(&format!("Removed {name}.")),
+                    Err(e) => self.toast(&format!("Couldn't remove {name}: {e}")),
+                }
+            }
+            AccountAction::OpenWindow(_) | AccountAction::CloseWindow => {}
+        }
+    }
+
+    /// The "Add an account" dialog: the token login in a modal. Logging in
+    /// switches this window to the new account.
+    fn add_account_dialog(&mut self, ctx: &egui::Context, pal: &Palette) {
+        let Some(form) = &mut self.add_account else {
+            return;
+        };
+        let mut close = false;
+        let mut login = None;
+        let modal = egui::Modal::new(egui::Id::unique("rc_add_account"))
+            .frame(widgets::menu_frame(pal).inner_margin(24))
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Add an account").size(20.0).bold());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::icon_button(ui, icons::X, "Close", false, true, pal).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                ui.label(
+                    RichText::new(
+                        "Log in with another Discord token. This window switches to it; \
+                         the current account is disconnected.",
+                    )
+                    .color(pal.muted),
+                );
+                ui.add_space(12.0);
+                if let Some(LoginAction::Login { token, remember }) = form.card(ui, pal) {
+                    login = Some((token, remember));
+                }
+            });
+        if let Some((token, remember)) = login {
+            if remember && self.config.accounts.len() >= MAX_ACCOUNTS {
+                // Might be an account that's already saved, but we only know
+                // that at READY; ask to remove one first to be safe.
+                form.error = Some(format!(
+                    "{} Or untick \"Remember me\" to log in without saving.",
+                    AccountError::Full
+                ));
+                return;
+            }
+            self.add_account = None;
+            self.log_out(None, false);
+            self.login_with(ctx, token, remember);
+            return;
+        }
+        if close || modal.should_close() {
+            self.add_account = None;
+        }
     }
 
     /// Demo mode only: open the `RUSTCORD_DEMO_OPEN` view (`view` or
@@ -322,6 +472,8 @@ impl RustCordApp {
     /// `forget_token` removes only this session's account from the
     /// credential store (and a pending, not yet re-keyed token).
     fn log_out(&mut self, error: Option<String>, forget_token: bool) {
+        self.stash_account_data();
+        self.add_account = None;
         if forget_token && let Some(session) = &self.session {
             if let Some(id) = session.account.clone() {
                 let _ = self.vault.forget(&mut self.config, &id);
@@ -487,6 +639,7 @@ impl eframe::App for RustCordApp {
                 .prune(ctx.input(|i| i.time), reactions::PENDING_MAX_AGE);
         }
         state.drain_events(ctx, &self.config);
+        state.restore_view(ctx, &self.config);
         apply_config_updates(&mut self.config, state);
         save_account(&self.vault, &mut self.config, &mut self.session, state);
         if let Some(path) = state.picked_theme.take() {
@@ -536,6 +689,7 @@ impl eframe::App for RustCordApp {
         if self.demo_shot {
             return;
         }
+        self.stash_account_data();
         eframe::set_value(storage, CONFIG_KEY, &self.config);
         eframe::set_value(storage, LAYOUT_KEY, &self.tree);
     }
@@ -554,16 +708,7 @@ impl RustCordApp {
         if let Screen::Login(form) = &mut self.screen {
             match form.ui(ui, &pal) {
                 Some(LoginAction::Login { token, remember }) => {
-                    // Saved to the credential store at READY, once the
-                    // account's user id is known (`save_account`).
-                    if remember {
-                        self.config.remember_login = true;
-                    }
-                    self.start_session(&ctx, token, false, None);
-                    if let Some(s) = &mut self.session {
-                        // Not remembered: never written anywhere.
-                        s.saved = !remember;
-                    }
+                    self.login_with(&ctx, token, remember);
                 }
                 Some(LoginAction::Demo) => {
                     self.start_session(&ctx, Token::new(""), true, None);
@@ -613,6 +758,14 @@ impl RustCordApp {
                     let reconnect = config.client_identity != self.config.client_identity;
                     let forget_logins = self.config.remember_login && !config.remember_login;
                     let mut config = *config;
+                    // "Show as" is per account.
+                    if let Some(id) = self.session.as_ref().and_then(|s| s.account.as_ref()) {
+                        self.config
+                            .per_account
+                            .entry(id.clone())
+                            .or_default()
+                            .client_identity = Some(config.client_identity);
+                    }
                     // Saved accounts aren't edited on the settings page; keep
                     // the live list (READY may have saved one meanwhile).
                     config.accounts = std::mem::take(&mut self.config.accounts);
@@ -799,6 +952,34 @@ impl RustCordApp {
 
         state.overlays(ui, &self.config, &pal);
         apply_config_updates(&mut self.config, state);
+        let picked = state.account_action.take();
+        if let Some(action) = picked {
+            self.account_action(&ctx, action);
+        }
+        self.add_account_dialog(&ctx, &pal);
+    }
+}
+
+/// A saved account's display name for messages ("this account" if unknown).
+fn account_name(config: &Config, user_id: &str) -> String {
+    config
+        .accounts
+        .iter()
+        .find(|a| a.user_id == user_id)
+        .map(|a| a.display_name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "this account".into())
+}
+
+/// Write a window's last channel and draft into its account's data.
+fn stash_view(data: &mut AccountData, state: &State) {
+    data.last_channel = state.selected_channel.clone();
+    // One message box per window: keep its text under the open channel.
+    data.drafts.clear();
+    if let Some(cid) = &state.selected_channel
+        && !state.draft.trim().is_empty()
+    {
+        data.drafts.insert(cid.clone(), state.draft.clone());
     }
 }
 
@@ -1196,6 +1377,15 @@ pub struct State {
     slow_down_until: Option<Instant>,
     /// Config changes for the app to apply.
     pub config_updates: Vec<ConfigUpdate>,
+    /// Picked in the account menu (user panel), for the app to do.
+    account_action: Option<AccountAction>,
+    /// Remove account / Log Out waiting for a confirm.
+    confirm_account: Option<Confirm>,
+    /// This State runs in an extra account window (no switching there).
+    in_window: bool,
+    /// Per-account data to restore once READY is in (last channel and its
+    /// draft), with when we started looking.
+    restore: Option<(AccountData, Option<Instant>)>,
 }
 
 impl State {
@@ -1280,6 +1470,10 @@ impl State {
             toast: None,
             slow_down_until: None,
             config_updates: Vec::new(),
+            account_action: None,
+            confirm_account: None,
+            in_window: false,
+            restore: None,
         }
     }
 
@@ -3687,6 +3881,36 @@ impl State {
         self.selected_channel = Some(channel_id);
     }
 
+    /// After a switch: reopen the account's last channel and its draft
+    /// once READY has brought the channel in (gives up after 15 s).
+    fn restore_view(&mut self, ctx: &egui::Context, config: &Config) {
+        let Some((data, since)) = &mut self.restore else {
+            return;
+        };
+        if self.me.is_none() {
+            return;
+        }
+        let since = *since.get_or_insert_with(Instant::now);
+        let Some(cid) = data.last_channel.clone() else {
+            self.restore = None;
+            return;
+        };
+        let draft = data.drafts.get(&cid).cloned();
+        if self.find_channel(&cid).is_some() {
+            self.restore = None;
+            if self.selected_channel.is_none() {
+                self.go_to_channel(&cid, ctx, config);
+                if let Some(d) = draft
+                    && self.draft.is_empty()
+                {
+                    self.draft = d;
+                }
+            }
+        } else if since.elapsed() > Duration::from_secs(15) {
+            self.restore = None;
+        }
+    }
+
     fn channel_title(&self) -> Option<String> {
         let cid = self.selected_channel.as_deref()?;
         self.current_guild()?.channel(cid).map(|c| c.label())
@@ -4049,7 +4273,7 @@ impl State {
         };
 
         let resp = ui.interact(hit, ui.scope_id().with("me_panel"), egui::Sense::click());
-        if resp.hovered() && can_pick {
+        if resp.hovered() {
             ui.painter().rect_filled(hit, 4, pal.hover);
         }
         let av = egui::Rect::from_center_size(
@@ -4063,11 +4287,7 @@ impl State {
         };
         paint_avatar(ui, av, &uid, &name, &url, config, pal);
         // Status dot with a ring in the panel colour (Discord's cut-out).
-        let ring = if resp.hovered() && can_pick {
-            pal.hover
-        } else {
-            bg
-        };
+        let ring = if resp.hovered() { pal.hover } else { bg };
         let c = av.right_bottom() - vec2(3.0, 3.0);
         ui.painter().circle_filled(c, 7.0, ring);
         ui.painter().circle_filled(c, 5.0, dot);
@@ -4089,21 +4309,23 @@ impl State {
             ui.painter()
                 .galley(egui::pos2(x, top + nh - 2.0), l2, pal.muted);
         }
-        let resp = if can_pick {
-            resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-        } else {
-            resp
-        };
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         let resp = resp.on_hover_text(if can_pick {
-            format!("{name} · {status_text} · click to set your status")
+            format!("{name} · {status_text} · click for status and accounts")
         } else {
-            format!("{name} · {status_text}")
+            format!("{name} · {status_text} · click for accounts")
         });
-        if can_pick {
-            egui::Popup::menu(&resp)
-                .align(egui::RectAlign::TOP_START)
-                .frame(widgets::menu_frame(pal))
-                .show(|ui| {
+        // Status picker (once connected) and the account switcher.
+        let mut account = None;
+        let in_window = self.in_window;
+        let confirm = &mut self.confirm_account;
+        egui::Popup::menu(&resp)
+            .align(egui::RectAlign::TOP_START)
+            .frame(widgets::menu_frame(pal))
+            // Right-clicking an account opens its own menu inside this one.
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                if can_pick {
                     if let Some(a) = status::menu(
                         ui,
                         my_status.unwrap_or(sp::Status::Online),
@@ -4113,7 +4335,13 @@ impl State {
                         picked = Some(a);
                         ui.close();
                     }
-                });
+                    widgets::menu_separator(ui, pal);
+                }
+                let current = (!uid.is_empty()).then_some(uid.as_str());
+                account = account_menu::section(ui, config, current, in_window, confirm, pal);
+            });
+        if account.is_some() {
+            self.account_action = account;
         }
         let mut gear_ui = ui.new_child(egui::UiBuilder::new().max_rect(gear));
         let size = gear.width();
@@ -6671,6 +6899,10 @@ impl State {
             if close || modal.should_close() {
                 self.confirm_leave = None;
             }
+        }
+
+        if let Some(a) = account_menu::confirm_dialog(ctx, &mut self.confirm_account, pal) {
+            self.account_action = Some(a);
         }
 
         if self.switcher.is_some() {
