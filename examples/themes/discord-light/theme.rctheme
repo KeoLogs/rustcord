@@ -1,0 +1,33 @@
+# Discord Light: Discord's light look. It used to be a built-in choice in
+# Settings; RustCord now has one built-in look (Discord Dark) and this is
+# an example theme you import.
+format = 1
+
+[meta]
+name = "Discord Light"
+author = "RustCord"
+version = "1.0"
+description = "Discord's light look."
+base = "light"
+
+[colors]
+servers = "#e3e5e8"
+sidebar = "#f2f3f5"
+chat = "#ffffff"
+input = "#ebedef"
+hover = "#e0e1e5"
+selected = "#d4d7dc"
+text = "#313338"
+muted = "#5c5e66"
+accent = "#5865f2"
+online = "#23a55a"
+idle = "#f0b232"
+dnd = "#f23f43"
+offline = "#80848e"
+danger = "#da373c"
+mention = "#f23f43"
+unread = "#060607"
+strong = "#060607"
+msg_hover = "#f7f7f8"
+divider = "#e1e2e4"
+rail_icon = "#ffffff"

@@ -579,7 +579,7 @@ mod tests {
     #[test]
     fn presets_and_alt_resolve_from_1600_to_480() {
         for p in Preset::ALL {
-            sweep(&layout_presets::build(p), p.name());
+            sweep(&layout_presets::build(p), &format!("{p:?}"));
         }
         sweep(&crate::layout::alt_tree(), "alt");
     }

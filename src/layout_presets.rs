@@ -1,35 +1,29 @@
-//! Layout presets for the panel layout (Settings → Layout), plus sharing a
-//! layout as text.
+//! The built-in panel arrangements and sharing a layout as text.
 //!
-//! - [`Preset`] / [`PRESETS`]: ready-made arrangements of the six panels,
-//!   built by [`build`] as an `egui_tiles::Tree<Pane>` in the same shape
-//!   `layout::default_tree()` uses (every pane wrapped in a `Tabs`
-//!   container, shares on the linear containers).
-//! - [`preset_picker`]: a row of cards with a small vector schematic of each
-//!   preset. Returns the preset the user clicked; the caller replaces the
-//!   tree. [`paint_preview`] draws the same schematic for any tree (e.g. an
+//! There is no preset picker: RustCord has one default look
+//! (`layout::default_tree()`, Settings -> Layout -> Reset to default) and the
+//! free tile editor. The arrangements here are internal only:
+//!
+//! - [`Preset`] / [`build`]: the default arrangement plus the older ones that
+//!   saved v2 trees are migrated from (`layout_v3::from_v2`), built as an
+//!   `egui_tiles::Tree<Pane>` (every pane wrapped in a `Tabs` container,
+//!   shares on the linear containers).
+//! - [`detect`]: which arrangement (if any) a tree still is (migration).
+//! - [`paint_preview`]: a small vector schematic of any tree (e.g. an
 //!   imported one).
-//! - [`detect`]: which preset (if any) a tree still is, so the picker can
-//!   highlight it. Hidden panels are ignored (the Members button only hides
-//!   the panel); resizing a divider makes the layout "custom" (`None`).
 //! - [`export`] / [`import`]: a small JSON document users can paste to each
 //!   other. [`import`] goes through [`sanitize`], which rejects anything that
 //!   isn't a well-formed tree with every panel exactly once.
-//!
-//! The "Discord Messenger (classic)" preset follows the arrangement of
-//! Discord Messenger (MIT, by iProgramInCpp): narrow server column, channel
-//! tree with the profile box under it, chat with the message box under it,
-//! member list on the right.
 
 use std::collections::HashSet;
 
 use anyhow::{Context as _, Result, bail};
-use eframe::egui::{self, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use eframe::egui::{self, Color32, Rect, Stroke, StrokeKind, pos2, vec2};
 use egui_tiles::{Container, LinearDir, Tile, TileId, Tiles, Tree};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::Pane;
-use crate::theme::{Palette, bold_font};
+use crate::theme::Palette;
 
 /// The tree id `layout::default_tree()` uses. Every tree built or imported
 /// here gets it, so swapping trees keeps egui state keyed the same way.
@@ -37,7 +31,7 @@ pub fn tree_id() -> egui::Id {
     egui::Id::unique("rustcord_layout")
 }
 
-/// A ready-made layout.
+/// A built-in arrangement (internal: the default and migration sources).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Preset {
     Discord,
@@ -47,41 +41,6 @@ pub enum Preset {
     WideChat,
 }
 
-/// Name and one-line description of a preset, for the picker.
-pub struct PresetInfo {
-    pub preset: Preset,
-    pub name: &'static str,
-    pub description: &'static str,
-}
-
-pub const PRESETS: [PresetInfo; 5] = [
-    PresetInfo {
-        preset: Preset::Discord,
-        name: "Discord",
-        description: "Server rail and channels, profile underneath, members on the right.",
-    },
-    PresetInfo {
-        preset: Preset::Messenger,
-        name: "Discord Messenger",
-        description: "Classic: full-height server column, profile under the channel tree.",
-    },
-    PresetInfo {
-        preset: Preset::Sketch,
-        name: "Leo's sketch",
-        description: "Profile under the server rail, channels in their own column.",
-    },
-    PresetInfo {
-        preset: Preset::Compact,
-        name: "Compact",
-        description: "Narrow channels and no member list (the members button brings it back).",
-    },
-    PresetInfo {
-        preset: Preset::WideChat,
-        name: "Wide chat",
-        description: "Channels and servers stacked as tabs, so the chat gets the room.",
-    },
-];
-
 impl Preset {
     pub const ALL: [Preset; 5] = [
         Preset::Discord,
@@ -90,22 +49,6 @@ impl Preset {
         Preset::Compact,
         Preset::WideChat,
     ];
-
-    pub fn info(self) -> &'static PresetInfo {
-        PRESETS
-            .iter()
-            .find(|i| i.preset == self)
-            .unwrap_or(&PRESETS[0])
-    }
-
-    pub fn name(self) -> &'static str {
-        self.info().name
-    }
-
-    #[cfg(test)]
-    pub fn description(self) -> &'static str {
-        self.info().description
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -285,41 +228,10 @@ pub fn detect(tree: &Tree<Pane>) -> Option<Preset> {
     })
 }
 
-/// The presets `tree` has the arrangement of (panes, containers, order),
-/// ignoring divider positions. The tile host rewrites shares as pixel sizes
-/// for the window every frame, so Settings → Layout highlights a preset by
-/// its arrangement (Discord and Compact share one; the app picks).
-pub fn detect_arrangement(tree: &Tree<Pane>) -> Vec<Preset> {
-    let Some(root) = tree.root else {
-        return Vec::new();
-    };
-    Preset::ALL
-        .into_iter()
-        .filter(|&p| {
-            let preset = build(p);
-            preset
-                .root
-                .is_some_and(|proot| same_shape_with(tree, root, &preset, proot, 0, false))
-        })
-        .collect()
-}
-
 const MAX_DEPTH: usize = 32;
 const SHARE_TOLERANCE: f32 = 0.01;
 
 fn same_shape(a: &Tree<Pane>, a_id: TileId, b: &Tree<Pane>, b_id: TileId, depth: usize) -> bool {
-    same_shape_with(a, a_id, b, b_id, depth, true)
-}
-
-fn same_shape_with(
-    a: &Tree<Pane>,
-    a_id: TileId,
-    b: &Tree<Pane>,
-    b_id: TileId,
-    depth: usize,
-    shares: bool,
-) -> bool {
-    let same_shape = |a, x, b, y, d| same_shape_with(a, x, b, y, d, shares);
     if depth > MAX_DEPTH {
         return false;
     }
@@ -345,11 +257,9 @@ fn same_shape_with(
             }
             let fa = fractions(&la.shares, &la.children);
             let fb = fractions(&lb.shares, &lb.children);
-            (!shares
-                || fa
-                    .iter()
-                    .zip(&fb)
-                    .all(|(x, y)| (x - y).abs() <= SHARE_TOLERANCE))
+            fa.iter()
+                .zip(&fb)
+                .all(|(x, y)| (x - y).abs() <= SHARE_TOLERANCE)
                 && la
                     .children
                     .iter()
@@ -861,99 +771,6 @@ fn header_strip(painter: &egui::Painter, pal: &Palette, r: Rect) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Picker widget
-
-const CARD_W: f32 = 196.0;
-const CARD_PAD: f32 = 10.0;
-const PREVIEW_H: f32 = 104.0;
-const CARD_H: f32 = 208.0;
-
-/// A wrapping row of preset cards with schematic previews. `current` is
-/// highlighted (use [`detect`] on the live tree). Returns the preset the
-/// user clicked; the caller swaps in [`build`]`(preset)` and saves it.
-pub fn preset_picker(ui: &mut egui::Ui, pal: &Palette, current: Option<Preset>) -> Option<Preset> {
-    let mut picked = None;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
-        for info in &PRESETS {
-            if preset_card(ui, pal, info, current == Some(info.preset)).clicked() {
-                picked = Some(info.preset);
-            }
-        }
-    });
-    picked
-}
-
-fn preset_card(
-    ui: &mut egui::Ui,
-    pal: &Palette,
-    info: &PresetInfo,
-    selected: bool,
-) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(CARD_W, CARD_H), Sense::click());
-    resp.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::RadioButton, true, selected, info.name)
-    });
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    if !ui.is_rect_visible(rect) {
-        return resp;
-    }
-
-    let painter = ui.painter_at(rect);
-    let fill = if selected {
-        pal.selected
-    } else if resp.hovered() {
-        pal.hover
-    } else {
-        pal.sidebar
-    };
-    painter.rect_filled(rect, 8, fill);
-    let stroke = if selected {
-        Stroke::new(2.0, pal.accent)
-    } else if resp.has_focus() {
-        Stroke::new(1.0, pal.accent)
-    } else {
-        Stroke::new(1.0, pal.divider)
-    };
-    painter.rect_stroke(rect, 8, stroke, StrokeKind::Inside);
-
-    let preview = Rect::from_min_size(
-        rect.min + vec2(CARD_PAD, CARD_PAD),
-        vec2(CARD_W - 2.0 * CARD_PAD, PREVIEW_H),
-    );
-    paint_preview(&painter, pal, &build(info.preset), preview);
-
-    let text_w = CARD_W - 2.0 * CARD_PAD;
-    let mut y = preview.bottom() + 8.0;
-    let name = painter.layout_no_wrap(info.name.to_owned(), bold_font(15.0), pal.strong);
-    painter.galley(pos2(rect.left() + CARD_PAD, y), name.clone(), pal.strong);
-    if selected {
-        // A small check mark at the end of the name (vector, no emoji).
-        let c = pos2(rect.right() - CARD_PAD - 7.0, y + name.size().y / 2.0);
-        painter.circle_filled(c, 7.0, pal.accent);
-        painter.line_segment(
-            [c + vec2(-3.5, 0.0), c + vec2(-1.0, 2.5)],
-            Stroke::new(1.6, Color32::WHITE),
-        );
-        painter.line_segment(
-            [c + vec2(-1.0, 2.5), c + vec2(3.5, -2.5)],
-            Stroke::new(1.6, Color32::WHITE),
-        );
-    }
-    y += name.size().y + 2.0;
-    let desc = painter.layout(
-        info.description.to_owned(),
-        egui::FontId::proportional(13.0),
-        pal.muted,
-        text_w,
-    );
-    painter.galley(pos2(rect.left() + CARD_PAD, y), desc, pal.muted);
-    resp
-}
-
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -998,16 +815,6 @@ mod tests {
             }
             assert!(crate::layout::is_complete(&tree));
             assert!(sanitize(&tree).is_ok(), "{p:?} must pass sanitize");
-        }
-    }
-
-    #[test]
-    fn presets_metadata_matches_all() {
-        assert_eq!(PRESETS.len(), Preset::ALL.len());
-        for (info, p) in PRESETS.iter().zip(Preset::ALL) {
-            assert_eq!(info.preset, p);
-            assert_eq!(p.name(), info.name);
-            assert!(!p.description().is_empty());
         }
     }
 

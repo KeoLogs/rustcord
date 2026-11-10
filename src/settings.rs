@@ -7,7 +7,7 @@ use eframe::egui::{self, RichText, vec2};
 use crate::config::{ClientIdentity, Config, MODULES, ModuleCategory, ModuleInfo, Modules};
 use crate::icons;
 use crate::settings_proto::{ExplicitFilter, UserSettings};
-use crate::theme::{Bold, Palette, ThemeChoice};
+use crate::theme::{Bold, Palette};
 use crate::types::User;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -57,8 +57,6 @@ pub enum SettingsAction {
     Close,
     EditLayout,
     ResetLayout,
-    /// Settings → Layout: replace the layout with a preset.
-    ApplyPreset(crate::layout_presets::Preset),
     /// Copy the current layout to the clipboard as text.
     CopyLayout,
     /// Use a pasted layout (already checked by `layout_presets::import`).
@@ -110,8 +108,6 @@ pub struct SettingsPage {
     synced: SyncedDraft,
     /// When the unsaved-changes bar started shaking (tried to leave).
     shake_at: Option<f64>,
-    /// Which preset the current layout still is (set by the app each frame).
-    pub layout_preset: Option<crate::layout_presets::Preset>,
     /// Settings → Layout → Import: pasted text, its checked tree or error.
     import_text: String,
     import: Option<Result<egui_tiles::Tree<crate::layout::Pane>, String>>,
@@ -127,7 +123,6 @@ impl SettingsPage {
             base: config.clone(),
             synced: SyncedDraft::default(),
             shake_at: None,
-            layout_preset: None,
             import_text: String::new(),
             import: None,
             themes_read: false,
@@ -446,14 +441,32 @@ impl SettingsPage {
             Section::Account => account(ui, me, pal),
             Section::Appearance => {
                 label(ui, pal, "THEME");
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 16.0;
-                    for t in ThemeChoice::ALL {
-                        if theme_swatch(ui, t, config.theme == t, pal).clicked() {
-                            config.theme = t;
-                        }
+                ui.horizontal_wrapped(|ui| {
+                    let name = match &config.custom_theme {
+                        Some(id) if config.modules.custom_themes => themes
+                            .get(id)
+                            .map(|t| t.meta.name.clone())
+                            .unwrap_or_else(|| id.clone()),
+                        _ => "Discord Dark (default)".to_owned(),
+                    };
+                    ui.label(RichText::new(name).bold().color(pal.strong));
+                    ui.add_space(8.0);
+                    if ui
+                        .add_enabled(
+                            config.custom_theme.is_some(),
+                            egui::Button::new(icons::label(icons::RESET, "Reset to default")),
+                        )
+                        .on_hover_text("Back to the default look (Discord Dark)")
+                        .clicked()
+                    {
+                        config.custom_theme = None;
                     }
                 });
+                hint(
+                    ui,
+                    pal,
+                    "Import and apply other themes in Settings → Themes.",
+                );
                 ui.add_space(12.0);
                 label(ui, pal, "UI SCALE");
                 ui.horizontal(|ui| {
@@ -592,15 +605,7 @@ impl SettingsPage {
                         "Turn on the Layout editor module to edit the layout.",
                     );
                 }
-                if config.modules.layout_presets {
-                    ui.add_space(16.0);
-                    ui.label(pal.section_label("Presets"));
-                    ui.add_space(6.0);
-                    if let Some(p) =
-                        crate::layout_presets::preset_picker(ui, pal, self.layout_preset)
-                    {
-                        action = Some(SettingsAction::ApplyPreset(p));
-                    }
+                if config.modules.layout_sharing {
                     ui.add_space(16.0);
                     ui.label(pal.section_label("Share a layout"));
                     ui.add_space(6.0);
@@ -663,10 +668,7 @@ impl SettingsPage {
                     themes.refresh();
                 }
                 match ThemesPage::show(ui, themes, pal) {
-                    Some(ThemesAction::ApplyBuiltin(t)) => {
-                        config.theme = t;
-                        config.custom_theme = None;
-                    }
+                    Some(ThemesAction::ResetDefault) => config.custom_theme = None,
                     Some(ThemesAction::Apply(id)) => config.custom_theme = Some(id),
                     Some(ThemesAction::Delete(id)) => {
                         if themes.delete(&id).is_ok() && config.custom_theme.as_ref() == Some(&id) {
@@ -1117,51 +1119,6 @@ fn close_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
 
 fn hint(ui: &mut egui::Ui, pal: &Palette, text: &str) {
     ui.label(RichText::new(text).size(13.0).color(pal.muted));
-}
-
-/// A theme choice: a round swatch of the theme's colours, its name under
-/// it, an accent ring and check when selected (Discord's theme picker).
-fn theme_swatch(
-    ui: &mut egui::Ui,
-    t: ThemeChoice,
-    selected: bool,
-    pal: &Palette,
-) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(64.0, 86.0), egui::Sense::click());
-    let c = egui::pos2(rect.center().x, rect.top() + 30.0);
-    let tp = t.palette();
-    if selected {
-        ui.painter().circle_filled(c, 30.0, pal.accent);
-    } else if resp.hovered() {
-        ui.painter().circle_filled(c, 30.0, pal.muted);
-    }
-    ui.painter().circle_filled(c, 27.0, tp.chat);
-    ui.painter()
-        .circle_stroke(c, 27.0, egui::Stroke::new(1.0, pal.divider));
-    // Half moon of the sidebar colour, like a mini preview.
-    ui.painter()
-        .circle_filled(c + vec2(-8.0, 0.0), 12.0, tp.sidebar);
-    ui.painter()
-        .circle_filled(c + vec2(10.0, 0.0), 7.0, tp.accent);
-    if selected {
-        let b = c + vec2(20.0, -20.0);
-        ui.painter().circle_filled(b, 9.0, pal.accent);
-        ui.painter().text(
-            b,
-            egui::Align2::CENTER_CENTER,
-            icons::CHECK,
-            icons::font(12.0),
-            egui::Color32::WHITE,
-        );
-    }
-    ui.painter().text(
-        egui::pos2(rect.center().x, rect.bottom() - 8.0),
-        egui::Align2::CENTER_CENTER,
-        t.label(),
-        egui::FontId::proportional(13.0),
-        if selected { pal.strong } else { pal.muted },
-    );
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// iOS/Discord-style on/off switch.

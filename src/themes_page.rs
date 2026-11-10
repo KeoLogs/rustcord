@@ -1,5 +1,8 @@
-//! Settings → Themes: a grid of theme cards (mini preview, name, author,
-//! Active badge, Apply / Delete), "Import theme…" and "Open themes folder".
+//! Settings → Themes: a grid of installed theme cards (mini preview, name,
+//! author, Active badge, Apply / Delete), "Import theme…", "Open themes
+//! folder" and "Reset to default". RustCord has one built-in look (Discord
+//! Dark); every other theme, Discord Light included, is imported from a
+//! `.rctheme` file (examples in `examples/themes/`).
 //!
 //! Pure UI: it returns a `ThemesAction`; the app applies themes, deletes
 //! (after the confirmation shown here) and asks the backend for the file
@@ -8,15 +11,15 @@
 use crate::icons;
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke, vec2};
 
-use crate::theme::{Bold, Palette, ThemeChoice};
-use crate::theme_file::{ThemeDef, ThemeStyle};
+use crate::theme::{Bold, Palette};
+use crate::theme_file::ThemeDef;
 use crate::themes::{Notice, ThemeStore, paint_preview};
 
 /// What the user asked for on the Themes page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ThemesAction {
-    /// Use a built-in theme (set `Config::theme`, clear `custom_theme`).
-    ApplyBuiltin(ThemeChoice),
+    /// Back to the default look (clear `Config::custom_theme`).
+    ResetDefault,
     /// Use an installed theme (set `Config::custom_theme`).
     Apply(String),
     /// Delete an installed theme. Already confirmed by the user.
@@ -40,15 +43,16 @@ impl ThemesPage {
 
         ui.label(
             RichText::new(
-                "Themes change RustCord's colours and look. Import a .rctheme file, a theme \
-                 folder or a .zip — RustCord doesn't ship any.",
+                "Themes change RustCord's colours and look. The default look is Discord Dark. \
+                 Import a .rctheme file, a theme folder or a .zip; Discord Light and other \
+                 example themes are in the examples/themes folder of RustCord's source.",
             )
             .color(pal.muted),
         );
         ui.add_space(8.0);
 
-        if store.enabled() {
-            ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            if store.enabled() {
                 if ui
                     .add(pal.primary_button("Import theme…"))
                     .on_hover_text("A .rctheme file or a .zip")
@@ -73,11 +77,27 @@ impl ThemesPage {
                 {
                     store.refresh();
                 }
-            });
-        } else {
+            }
+            // A custom theme is only ever applied while the module is on,
+            // so with it off the default look is already active.
+            if ui
+                .add_enabled(
+                    store.active_custom.is_some(),
+                    egui::Button::new(icons::label(icons::RESET, "Reset to default")),
+                )
+                .on_hover_text("Back to the default look (Discord Dark)")
+                .on_disabled_hover_text("The default look is already applied")
+                .clicked()
+            {
+                action = Some(ThemesAction::ResetDefault);
+            }
+        });
+        if !store.enabled() {
             ui.label(
-                RichText::new("Custom themes are off (Settings → Modules). Only the built-in themes are available.")
-                    .color(pal.muted),
+                RichText::new(
+                    "Custom themes are off (Settings → Modules). Only the default look is used.",
+                )
+                .color(pal.muted),
             );
         }
         match &store.notice {
@@ -91,44 +111,12 @@ impl ThemesPage {
         }
         ui.add_space(12.0);
 
-        // ---- Built-in
-        ui.label(pal.section_label("Built-in"));
-        ui.add_space(4.0);
         // Rows of cards (frames can't wrap themselves in egui).
         let per_row = cards_per_row(ui);
         ui.spacing_mut().item_spacing.y = 12.0;
-        for row in ThemeChoice::ALL.chunks(per_row) {
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
-                for &choice in row {
-                    let active = store.active_custom.is_none() && store.active_builtin == choice;
-                    let def = ThemeDef {
-                        meta: crate::theme_file::ThemeMeta {
-                            name: format!("Discord {}", choice.label()),
-                            author: "RustCord".into(),
-                            version: String::new(),
-                            description: match choice {
-                                ThemeChoice::DiscordDark => "Discord's dark look (default).".into(),
-                                ThemeChoice::DiscordLight => "Discord's light look.".into(),
-                            },
-                            base: choice,
-                        },
-                        palette: choice.palette(),
-                        style: ThemeStyle::default(),
-                    };
-                    if let Some(a) = card(ui, pal, Ok(&def), active, false) {
-                        match a {
-                            CardAction::Apply => action = Some(ThemesAction::ApplyBuiltin(choice)),
-                            CardAction::Delete => {}
-                        }
-                    }
-                }
-            });
-        }
 
         // ---- Installed
         if store.enabled() {
-            ui.add_space(14.0);
             ui.label(pal.section_label(&format!("Installed — {}", store.entries.len())));
             ui.add_space(4.0);
             if store.entries.is_empty() {

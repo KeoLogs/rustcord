@@ -42,7 +42,7 @@ pub const LAYOUT_V3_KEY: &str = "layout_v3";
 pub const LAYOUT_V2_KEY: &str = "layout_v2";
 /// Shown once after a v2 layout was migrated.
 pub const MIGRATION_TOAST: &str =
-    "Your layout was updated for resizing. Pick a preset in Settings \u{2192} Layout.";
+    "Your layout was updated for resizing. Reset it in Settings \u{2192} Layout if it looks off.";
 
 /// What hosts the columns.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

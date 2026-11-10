@@ -794,7 +794,7 @@ fit = "tile"
     #[test]
     fn example_themes_parse() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/themes");
-        for name in ["2000s-messenger", "frutiger-aero"] {
+        for name in ["discord-light", "2000s-messenger", "frutiger-aero"] {
             let dir = root.join(name);
             let text = std::fs::read_to_string(dir.join(THEME_FILE)).unwrap();
             let t = parse_theme(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -805,5 +805,18 @@ fit = "tile"
                 assert!(len <= 300 * 1024, "{name}: image is {len} bytes");
             }
         }
+    }
+
+    #[test]
+    fn discord_light_example_is_the_old_built_in() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/themes/discord-light")
+            .join(THEME_FILE);
+        let t = parse_theme(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(t.meta.base, ThemeChoice::DiscordLight);
+        assert_eq!(
+            format!("{:?}", t.palette),
+            format!("{:?}", ThemeChoice::DiscordLight.palette())
+        );
     }
 }

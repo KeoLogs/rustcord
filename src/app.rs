@@ -41,7 +41,7 @@ use crate::search::{SearchAction, SearchCtx, SearchPanel, SearchScope, Suggestio
 use crate::settings::{SettingsAction, SettingsPage, SyncChange};
 use crate::settings_proto::{self as sp, RailItem, UserSettings};
 use crate::status::{self, CustomStatusDialog, DialogResult};
-use crate::theme::{self, Bold, Palette, ThemeChoice};
+use crate::theme::{self, Bold, Palette};
 use crate::threads::{self, DialogOutcome, Thread, ThreadAction, ThreadDialog, ThreadStore};
 use crate::timefmt;
 use crate::types::{Attachment, CHANNEL_DM, DM_GUILD_ID, Guild, Message, ToBackend, ToUi, User};
@@ -69,9 +69,6 @@ pub struct RustCordApp {
     config: Config,
     screen: Screen,
     tree: egui_tiles::Tree<Pane>,
-    /// The preset last picked in Settings (to tell Discord from Compact,
-    /// which share an arrangement).
-    applied_preset: Option<crate::layout_presets::Preset>,
     editing_layout: bool,
     settings: Option<SettingsPage>,
     /// Zoom currently applied (with the active theme's visuals), to
@@ -81,8 +78,8 @@ pub struct RustCordApp {
     theme_store: crate::themes::ThemeStore,
     /// The theme the UI draws with.
     active_theme: crate::themes::ActiveTheme,
-    /// (built-in, custom id, module on) the active theme was built for.
-    theme_key: Option<(ThemeChoice, Option<String>, bool)>,
+    /// (custom id, module on) the active theme was built for.
+    theme_key: Option<(Option<String>, bool)>,
     /// Status bar module's RAM reading.
     ram: RamSampler,
     /// The running session's token and demo flag (in memory only), to
@@ -113,10 +110,6 @@ impl RustCordApp {
             .and_then(|s| eframe::get_value(s, CONFIG_KEY))
             .unwrap_or_default();
         if shot {
-            // `RUSTCORD_DEMO_THEME=light`: Discord Light.
-            if std::env::var("RUSTCORD_DEMO_THEME").as_deref() == Ok("light") {
-                config.theme = ThemeChoice::DiscordLight;
-            }
             // `RUSTCORD_DEMO_SCALE=1.25`: zoom (like a Windows display scale).
             if let Some(z) = std::env::var("RUSTCORD_DEMO_SCALE")
                 .ok()
@@ -132,19 +125,11 @@ impl RustCordApp {
             .and_then(|t| crate::layout_presets::sanitize(&t).ok())
             .unwrap_or_else(layout::default_tree);
         if demo {
-            // `RUSTCORD_DEMO_LAYOUT=alt | leo5 | <preset>`: other layouts.
+            // `RUSTCORD_DEMO_LAYOUT=alt | leo5`: other layouts.
             match std::env::var("RUSTCORD_DEMO_LAYOUT").as_deref() {
                 Ok("alt") => tree = layout::alt_tree(),
                 Ok("leo5") => tree = layout::leo5_tree(),
-                Ok(name) => {
-                    if let Some(p) = crate::layout_presets::Preset::ALL
-                        .into_iter()
-                        .find(|p| format!("{p:?}").eq_ignore_ascii_case(name))
-                    {
-                        tree = crate::layout_presets::build(p);
-                    }
-                }
-                Err(_) => {}
+                _ => {}
             }
         }
 
@@ -159,7 +144,7 @@ impl RustCordApp {
             crate::themes::default_dir(demo)
         };
         let theme_store = crate::themes::ThemeStore::new(themes_dir, config.modules.custom_themes);
-        let active_theme = crate::themes::ActiveTheme::builtin(config.theme);
+        let active_theme = crate::themes::ActiveTheme::default_theme();
         let mut app = Self {
             screen: Screen::Login(LoginForm::new(config.remember_login, None)),
             theme_store,
@@ -167,7 +152,6 @@ impl RustCordApp {
             theme_key: None,
             config,
             tree,
-            applied_preset: None,
             editing_layout: false,
             settings: None,
             applied: None,
@@ -309,7 +293,7 @@ impl RustCordApp {
             .custom_theme
             .clone()
             .filter(|_| cfg.modules.custom_themes);
-        let key = (cfg.theme, custom, cfg.modules.custom_themes);
+        let key = (custom, cfg.modules.custom_themes);
         if self.theme_key.as_ref() != Some(&key) {
             self.theme_store.set_enabled(cfg.modules.custom_themes);
             let (active, error) =
@@ -531,22 +515,6 @@ impl eframe::App for RustCordApp {
             let Screen::Main(state) = &mut self.screen else {
                 return;
             };
-            // Highlight the preset with this arrangement (divider positions
-            // are pixel sizes now, so they don't count); between Discord
-            // and Compact, the one last applied, else by the member list.
-            let matches = crate::layout_presets::detect_arrangement(&self.tree);
-            page.layout_preset =
-                self.applied_preset
-                    .filter(|p| matches.contains(p))
-                    .or_else(|| {
-                        let compact = crate::layout_presets::Preset::Compact;
-                        let hidden = !layout::pane_visible(&self.tree, Pane::Members);
-                        if hidden && matches.contains(&compact) {
-                            Some(compact)
-                        } else {
-                            matches.first().copied()
-                        }
-                    });
             let action = page.ui(
                 ui,
                 &self.config,
@@ -581,11 +549,6 @@ impl eframe::App for RustCordApp {
                     self.editing_layout = true;
                 }
                 Some(SettingsAction::ResetLayout) => self.tree = layout::default_tree(),
-                Some(SettingsAction::ApplyPreset(p)) => {
-                    self.tree = crate::layout_presets::build(p);
-                    self.applied_preset = Some(p);
-                    state.toast = Some((format!("Layout: {}", p.name()), Instant::now()));
-                }
                 Some(SettingsAction::CopyLayout) => {
                     ctx.copy_text(crate::layout_presets::export(&self.tree));
                 }
@@ -3421,7 +3384,7 @@ impl State {
                     ts.dialog = Some(ThreadDialog::from_message(
                         "201",
                         "1",
-                        "has anyone tried the new layout presets? the compact one is great",
+                        "has anyone tried the layout editor? dragging panels around is great",
                     ));
                 }
             }

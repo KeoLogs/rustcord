@@ -5,16 +5,15 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::theme::ThemeChoice;
-
 pub const CONFIG_KEY: &str = "config_v1";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub theme: ThemeChoice,
     /// Id (folder name) of the applied custom theme, if any; it overrides
-    /// `theme` while the Custom themes module is on.
+    /// the default look (Discord Dark) while the Custom themes module is on.
+    /// Older configs also carry a `theme` key (the removed Dark / Light
+    /// picker); it is ignored, so they load with the default look.
     #[serde(default)]
     pub custom_theme: Option<String>,
     /// UI scale (1.0 = 100%).
@@ -80,7 +79,6 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            theme: ThemeChoice::default(),
             custom_theme: None,
             zoom: 1.0,
             modules: Modules::default(),
@@ -225,9 +223,9 @@ pub struct Modules {
     /// Invite cards, Join a Server, rules screening and onboarding.
     #[serde(default = "on")]
     pub invites: bool,
-    /// Settings, Layout: preset picker and layout copy / import.
-    #[serde(default = "on")]
-    pub layout_presets: bool,
+    /// Settings, Layout: copy / import a layout as text.
+    #[serde(default = "on", alias = "layout_presets")]
+    pub layout_sharing: bool,
     /// Themes imported from .rctheme files.
     #[serde(default = "on")]
     pub custom_themes: bool,
@@ -251,7 +249,7 @@ impl Default for Modules {
             friends: true,
             threads: true,
             invites: true,
-            layout_presets: true,
+            layout_sharing: true,
             custom_themes: true,
         }
     }
@@ -273,7 +271,7 @@ pub mod live {
     pub static FRIENDS: AtomicBool = AtomicBool::new(true);
     pub static THREADS: AtomicBool = AtomicBool::new(true);
     pub static INVITES: AtomicBool = AtomicBool::new(true);
-    pub static LAYOUT_PRESETS: AtomicBool = AtomicBool::new(true);
+    pub static LAYOUT_SHARING: AtomicBool = AtomicBool::new(true);
     pub static CUSTOM_THEMES: AtomicBool = AtomicBool::new(true);
     // (end of flags)
 
@@ -283,7 +281,7 @@ pub mod live {
         FRIENDS.store(m.friends, Relaxed);
         THREADS.store(m.threads, Relaxed);
         INVITES.store(m.invites, Relaxed);
-        LAYOUT_PRESETS.store(m.layout_presets, Relaxed);
+        LAYOUT_SHARING.store(m.layout_sharing, Relaxed);
         CUSTOM_THEMES.store(m.custom_themes, Relaxed);
     }
 
@@ -420,15 +418,15 @@ pub const MODULES: &[ModuleInfo] = &[
         get: |m| &mut m.invites,
     },
     ModuleInfo {
-        name: "Layout presets",
+        name: "Layout sharing",
         category: ModuleCategory::Appearance,
-        description: "Ready-made panel layouts and copying / importing a layout as text in Settings, Layout. Off = only Edit layout and Reset.",
-        get: |m| &mut m.layout_presets,
+        description: "Copying / importing a layout as text in Settings, Layout. Off = only Edit layout and Reset to default.",
+        get: |m| &mut m.layout_sharing,
     },
     ModuleInfo {
         name: "Custom themes",
         category: ModuleCategory::Appearance,
-        description: "Import and apply your own themes (Settings, Themes). Off = only the built-in Dark and Light themes, and no theme files are read.",
+        description: "Import and apply your own themes (Settings, Themes). Off = only the default theme, and no theme files are read.",
         get: |m| &mut m.custom_themes,
     },
 ];
@@ -469,6 +467,17 @@ mod tests {
         assert!(c.modules.custom_themes);
         // Favourite GIFs came later: none yet.
         assert!(c.favourite_gifs.is_empty());
+    }
+
+    #[test]
+    fn removed_theme_picker_and_preset_module_still_load() {
+        // A config saved with the old Light choice and the old module name.
+        let c: Config = serde_json::from_str(
+            r#"{ "theme": "DiscordLight", "modules": { "layout_presets": false } }"#,
+        )
+        .expect("old config loads");
+        assert_eq!(c.custom_theme, None);
+        assert!(!c.modules.layout_sharing);
     }
 
     #[test]

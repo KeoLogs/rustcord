@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::layout::Pane;
 
+/// The base palette of a theme: Discord Dark is RustCord's one built-in look;
+/// Light is only the `base = "light"` of a `.rctheme` file (e.g. the Discord
+/// Light example in `examples/themes/`). There is no picker for these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ThemeChoice {
     #[default]
@@ -25,15 +28,6 @@ pub enum ThemeChoice {
 }
 
 impl ThemeChoice {
-    pub const ALL: [ThemeChoice; 2] = [ThemeChoice::DiscordDark, ThemeChoice::DiscordLight];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            ThemeChoice::DiscordDark => "Dark",
-            ThemeChoice::DiscordLight => "Light",
-        }
-    }
-
     pub fn palette(self) -> Palette {
         match self {
             ThemeChoice::DiscordDark => Palette {

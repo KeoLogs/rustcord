@@ -164,10 +164,13 @@ optional background image. The format is documented at the top of
 RustCord's data folder under `themes/<id>/` (Settings → Themes → *Open
 themes folder*).
 
-`examples/themes/` holds two **test themes** — `2000s-messenger` and
-`frutiger-aero`. They are only for trying the theme system: they aren't
-installed by default, aren't compiled into the binary and aren't part of
-release builds. Import one with Settings → Themes → *Import folder…*.
+RustCord has one built-in look, Discord Dark (Settings → Themes →
+*Reset to default* goes back to it). Every other theme is a file you
+import. `examples/themes/` holds `discord-light` (Discord's light look) and
+the **test themes** `2000s-messenger`, `frosted-glass` and `frutiger-aero`.
+They aren't installed by default, aren't compiled into the binary and aren't
+part of release builds. Import one with Settings → Themes → *Import
+folder…* (or *Import theme…* and pick its `theme.rctheme`).
 
 ## Layout of the code
 

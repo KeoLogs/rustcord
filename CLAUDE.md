@@ -28,7 +28,7 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   back to the default if they fail to deserialize).
 - `src/layout_v3.rs` (saved column layout: `mode`, column order, user
   panel dock, rail style, stacked rail+sidebar, pixel widths; v2 tree
-  migration, presets, export/import, `load`/`save`) and `src/responsive.rs`
+  migration, export/import, `load`/`save`) and `src/responsive.rs`
   (§3.2 size tables, §3.3 breakpoints with ±16 px hysteresis, `compute`
   width → docked/drawer/hidden columns) are pure and tested. Panes draw
   through `layout::draw_pane` / `draw_column` (clipped, container-agnostic).
@@ -44,6 +44,10 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
 - `src/settings.rs` is the settings page, `src/login.rs` the login screen,
   `src/theme.rs` the Discord palette (use `Palette` colours, not hard-coded
   ones) and fonts, `src/emoji.rs` text/emoji segmentation (has unit tests).
+- No preset pickers: one default look (Discord Dark + `default_tree`) with
+  "Reset to default" for layout and theme. Other themes (Discord Light
+  included) are `.rctheme` files in `examples/themes/`, imported by the
+  user; `layout_presets::Preset` is internal (default tree, v2 migration).
 - Fonts: Noto Sans Regular + SemiBold are bundled (`assets/fonts/`, OFL) and
   installed by `theme::install_fonts`; system fonts remain the fallback for
   other scripts. egui's `strong()` only changes colour — for real bold use

@@ -3,9 +3,10 @@
 //! painting helpers panes use for gradients, glass and the chat background.
 //!
 //! Themes live in `<data dir>/themes/<id>/theme.rctheme` (+ an optional
-//! background image). None are bundled into the binary; the built-in Discord
-//! Dark / Light are always available. With the "Custom themes" module off,
-//! nothing is read from disk.
+//! background image). None are bundled into the binary; the default look
+//! (Discord Dark) is always available, and example themes (Discord Light,
+//! test themes) live in `examples/themes/` for Import. With the "Custom
+//! themes" module off, nothing is read from disk.
 //!
 //! Memory: only the active theme's background image is decoded, downscaled
 //! to at most `MAX_IMAGE_SIDE` and uploaded once; dropping the `ActiveTheme`
@@ -68,7 +69,6 @@ pub struct ThemeStore {
     pub entries: Vec<ThemeEntry>,
     /// What's applied now (mirror of `Config`; see `sync_with`).
     pub active_custom: Option<String>,
-    pub active_builtin: ThemeChoice,
     pub notice: Option<Notice>,
 }
 
@@ -80,7 +80,6 @@ impl ThemeStore {
             enabled,
             entries: Vec::new(),
             active_custom: None,
-            active_builtin: ThemeChoice::default(),
             notice: None,
         };
         s.refresh();
@@ -105,7 +104,6 @@ impl ThemeStore {
 
     /// Mirror the applied theme from `Config` (for the "Active" badge).
     pub fn sync_with(&mut self, config: &Config) {
-        self.active_builtin = config.theme;
         self.active_custom = if config.modules.custom_themes {
             config.custom_theme.clone()
         } else {
@@ -605,9 +603,10 @@ pub struct ActiveTheme {
 }
 
 impl ActiveTheme {
-    pub fn builtin(choice: ThemeChoice) -> Self {
+    /// The default look (Discord Dark), used when no custom theme applies.
+    pub fn default_theme() -> Self {
         Self {
-            palette: choice.palette(),
+            palette: ThemeChoice::DiscordDark.palette(),
             style: ThemeStyle::default(),
             bg: None,
         }
@@ -630,7 +629,7 @@ impl ActiveTheme {
     }
 
     /// The theme `config` asks for: the custom one if the module is on and it
-    /// loads, else the built-in. The error says why a custom theme didn't load.
+    /// loads, else the default look. The error says why a custom theme didn't load.
     pub fn from_config(
         ctx: &egui::Context,
         config: &Config,
@@ -641,10 +640,10 @@ impl ActiveTheme {
         {
             match store.load(id) {
                 Ok(t) => return (Self::from_loaded(ctx, t), None),
-                Err(e) => return (Self::builtin(config.theme), Some(format!("{e:#}"))),
+                Err(e) => return (Self::default_theme(), Some(format!("{e:#}"))),
             }
         }
-        (Self::builtin(config.theme), None)
+        (Self::default_theme(), None)
     }
 
     /// Set egui's visuals and text sizes. Call when the theme changes (and
