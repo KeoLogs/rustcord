@@ -6,6 +6,15 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## 0.6.0: Taskbar unread badge
+- A red count over RustCord's taskbar icon: your mentions plus unread DMs,
+  "9+" past nine. Muted servers and channels don't count; it is always the
+  sum of the red badges on the server rail.
+- Each account window shows its own account's count on its own icon.
+- Turn it off in Settings → Notifications ("Show unread badge on taskbar
+  icon"). Off means nothing is created or called.
+- Only Windows shows it for now; other systems do nothing yet.
+
 ## 0.5.0: Threads (PR1c)
 - A thread start is one card in the chat: the thread name, a preview of the
   last message (or the message count) and a › to open it.
