@@ -907,6 +907,9 @@ fn apply_update(config: &mut Config, u: ConfigUpdate) {
         ConfigUpdate::FavouriteGif(g) => {
             crate::gif_picker::toggle_favourite(&mut config.favourite_gifs, &g)
         }
+        ConfigUpdate::UpdateChecked(at) => config.last_update_check = at,
+        ConfigUpdate::LatestRelease(tag) => config.latest_release = Some(tag),
+        ConfigUpdate::DismissUpdate(tag) => config.dismissed_update = Some(tag),
     }
 }
 
@@ -1748,6 +1751,12 @@ pub enum ConfigUpdate {
     SkinTone(u8),
     /// Clicked a GIF's star: add to / remove from Favourites.
     FavouriteGif(Gif),
+    /// An update check was just asked for (unix time): not again today.
+    UpdateChecked(u64),
+    /// The update check's answer: the latest release tag.
+    LatestRelease(String),
+    /// "Dismiss" on the "Update available" notice for this release.
+    DismissUpdate(String),
 }
 
 // --- reactions ---
@@ -2068,6 +2077,8 @@ pub struct State {
     ac: Autocomplete,
     /// Short notice at the bottom of the chat ("Saved …").
     toast: Option<(String, Instant)>,
+    /// An update check was already asked for in this session.
+    update_asked: bool,
     /// A write action was rate limited: user write controls stay disabled
     /// and the toast counts down until then (never auto-retried).
     slow_down_until: Option<Instant>,
@@ -2177,6 +2188,7 @@ impl State {
             visited: VecDeque::new(),
             ac: Autocomplete::default(),
             toast: None,
+            update_asked: false,
             slow_down_until: None,
             config_updates: Vec::new(),
             account_action: None,
@@ -2206,6 +2218,14 @@ impl State {
                 self.status = s;
             }
             ToUi::Fatal(reason) => self.fatal = Some(reason),
+            ToUi::Ready { .. } if self.update_check_due(config) => {
+                // Once a day at most, and only GitHub's releases API.
+                let _ = self.tx.send(ToBackend::CheckUpdate);
+                self.update_asked = true;
+                self.config_updates
+                    .push(ConfigUpdate::UpdateChecked(crate::update_check::now_unix()));
+                self.handle_event(ev, ctx, config, focused);
+            }
             ToUi::Ready {
                 me,
                 premium_type,
@@ -2743,6 +2763,9 @@ impl State {
                 }
             }
             ToUi::Notice(text) => self.toast = Some((text, Instant::now())),
+            ToUi::LatestRelease(tag) => {
+                self.config_updates.push(ConfigUpdate::LatestRelease(tag));
+            }
             ToUi::RateLimited(rl) => self.rate_limited(rl),
             ToUi::GuildEmojis { guild_id, emojis } => {
                 if let Some(g) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
@@ -8457,6 +8480,50 @@ impl State {
     }
 
     /// Profile card, pins, dialogs and the "drop files here" overlay.
+    fn update_check_due(&self, config: &Config) -> bool {
+        !self.update_asked
+            && crate::update_check::due(
+                config.check_for_updates,
+                config.last_update_check,
+                crate::update_check::now_unix(),
+            )
+    }
+
+    /// Bottom-right notice cards ("Update available"). Buttons only.
+    fn corner_notices(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let current = env!("CARGO_PKG_VERSION");
+        if let Some(tag) = crate::update_check::notice(
+            config.check_for_updates,
+            config.latest_release.as_deref(),
+            config.dismissed_update.as_deref(),
+            current,
+        ) {
+            let text = format!(
+                "RustCord {} is out (you have {current}). Nothing is downloaded or \
+                 installed for you.",
+                tag.trim_start_matches(['v', 'V'])
+            );
+            match crate::notices::card(
+                ctx,
+                pal,
+                0,
+                icons::DOWNLOAD,
+                "Update available",
+                &text,
+                &[
+                    (icons::ARROW_SQUARE_OUT, "Open release page"),
+                    (icons::X, "Dismiss"),
+                ],
+            ) {
+                Some(0) => self.open_link(crate::update_check::RELEASES_PAGE, ctx, config),
+                Some(_) => self
+                    .config_updates
+                    .push(ConfigUpdate::DismissUpdate(tag.to_owned())),
+                None => {}
+            }
+        }
+    }
+
     fn overlays(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let ctx = ui.ctx().clone();
         self.thread_modal(&ctx, config, pal);
@@ -8464,6 +8531,7 @@ impl State {
         self.popout_overlay(&ctx, config, pal);
         self.pins_overlay(&ctx, config, pal);
         self.dialogs(&ctx, config, pal);
+        self.corner_notices(&ctx, config, pal);
 
         // Drag-and-drop hint
         let hovering_files = ui.input(|i| !i.raw.hovered_files.is_empty());

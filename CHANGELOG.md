@@ -7,6 +7,10 @@ Settings → About). Version x.y.z:
 - z: bug and issue fixes
 
 ## Unreleased
+- Update check: once a day at most, RustCord asks GitHub whether a newer
+  release exists and shows a small "Update available" notice with
+  "Open release page" and "Dismiss". Nothing is downloaded or installed.
+  Settings → About → "Check for updates" turns it off.
 - Disk image cache: pictures you've already seen are kept on this PC (up to
   200 MB, least recently used deleted first) so they aren't downloaded
   again. Settings → Performance has the size (0 = off) and a

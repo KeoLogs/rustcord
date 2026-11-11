@@ -762,6 +762,10 @@ async fn run(
                 }
                 // QR login runs before any session, in remote_auth.rs.
                 ToBackend::StartQrLogin | ToBackend::CancelQrLogin => Ok(None),
+                // GitHub only, with its own client (no Discord token).
+                ToBackend::CheckUpdate => Ok(crate::update_check::fetch_latest()
+                    .await
+                    .map(ToUi::LatestRelease)),
             };
             match result {
                 Ok(Some(ev)) => {
@@ -813,6 +817,7 @@ fn read_only_ok(req: &ToBackend) -> bool {
             | ToBackend::LoadAround { .. }
             | ToBackend::CopyImage { .. }
             | ToBackend::Reconnect
+            | ToBackend::CheckUpdate
             | ToBackend::LoadPins { .. }
             | ToBackend::LoadGifs { .. }
             | ToBackend::LoadProfile { .. }

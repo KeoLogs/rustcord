@@ -1004,6 +1004,8 @@ pub enum ToUi {
     UserSettingsUpdate(serde_json::Value),
     /// A short message for the user (shown briefly), e.g. "Saved …".
     Notice(String),
+    /// Update check: the latest release tag on GitHub (may not be newer).
+    LatestRelease(String),
     /// A user action hit Discord's rate limit (it is not retried): show
     /// "Slow down, try again in Ns" and hold write controls until then.
     RateLimited(crate::ratelimit::RateLimited),
@@ -1178,6 +1180,9 @@ pub enum ToBackend {
     /// Manual "Reconnect" in the connection status: drop the gateway
     /// connection and connect again now (resuming if possible).
     Reconnect,
+    /// Ask GitHub for the latest RustCord release (at most once a day;
+    /// `update_check.rs`). Nothing is downloaded.
+    CheckUpdate,
     /// "Copy Image" in an image's menu: download it (CDN, no token) and
     /// hand it back as `ToUi::CopyImage`.
     CopyImage {

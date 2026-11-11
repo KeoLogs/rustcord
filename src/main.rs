@@ -33,6 +33,7 @@ mod login;
 mod markdown;
 mod members;
 mod memstats;
+mod notices;
 mod notify;
 mod onboarding;
 mod paste;
@@ -66,6 +67,7 @@ mod tile_fit;
 mod timefmt;
 mod types;
 mod unicode_symbols;
+mod update_check;
 mod widgets;
 mod window_frame;
 

@@ -957,6 +957,15 @@ impl SettingsPage {
                     "https://github.com/KeoLogs/rustcord",
                 );
                 ui.add_space(8.0);
+                switch_row(
+                    ui,
+                    &mut config.check_for_updates,
+                    "Check for updates",
+                    "Once a day at most, ask GitHub whether a newer RustCord is out and \
+                     show a small notice. Nothing is ever downloaded or installed for you.",
+                    pal,
+                );
+                ui.add_space(8.0);
                 // Discord Messenger credit (MIT): RustCord ports its features.
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Many features are ported from");

@@ -101,6 +101,15 @@ pub struct Config {
     pub favourite_gifs: Vec<crate::gif_picker::Gif>,
     /// Disk image cache size in MB (`image_cache.rs`); 0 turns it off.
     pub image_cache_mb: u32,
+    /// Ask GitHub once a day whether a newer RustCord exists
+    /// (`update_check.rs`). Never downloads anything.
+    pub check_for_updates: bool,
+    /// Unix time of the last update check.
+    pub last_update_check: u64,
+    /// The latest release tag the check found.
+    pub latest_release: Option<String>,
+    /// The release whose "Update available" notice was dismissed.
+    pub dismissed_update: Option<String>,
 }
 
 impl Default for Config {
@@ -137,6 +146,10 @@ impl Default for Config {
             skin_tone: 0,
             favourite_gifs: Vec::new(),
             image_cache_mb: crate::image_cache::DEFAULT_MB,
+            check_for_updates: true,
+            last_update_check: 0,
+            latest_release: None,
+            dismissed_update: None,
         }
     }
 }

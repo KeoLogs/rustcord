@@ -727,6 +727,8 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                 "demo: mark unread #{channel_id} after {message_id} ({mention_count} mentions)"
             ),
             ToBackend::AckBulk(acks) => eprintln!("demo: ack-bulk {acks:?}"),
+            // A made-up newer version, so the "Update available" notice shows.
+            ToBackend::CheckUpdate => send(ToUi::LatestRelease("v99.0.0".into())),
             ToBackend::Notify { title, body } => {
                 eprintln!("demo: notification \"{title}\": {body}");
                 tokio::task::spawn_blocking(move || crate::notify::show_desktop(&title, &body));
