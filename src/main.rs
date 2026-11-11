@@ -19,6 +19,7 @@ mod frametimes;
 mod friends;
 mod gateway;
 mod gif_picker;
+mod group_dm;
 mod history;
 mod home;
 mod http_error;

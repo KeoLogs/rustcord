@@ -82,6 +82,7 @@ pub const X: &str = "\u{E4F6}";
 // Window controls (`window_frame`)
 pub const MINUS: &str = "\u{E32A}";
 pub const SQUARE: &str = "\u{E45E}";
+pub const CHECK_SQUARE: &str = "\u{E186}";
 pub const QR_CODE: &str = "\u{E3E6}";
 pub const ARROW_CLOCKWISE: &str = "\u{E036}";
 pub const DEVICE_MOBILE: &str = "\u{E1E0}";

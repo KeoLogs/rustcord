@@ -947,6 +947,14 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                         "id": "403", "type": 1, "last_message_id": "1",
                         "recipients": [user(id, "Friend", None)]
                     }))),
+                    FriendsAction::CreateGroup(ids) => Ok(Outcome::DmOpened(json!({
+                        "id": "404", "type": 3, "last_message_id": "1",
+                        "recipients": ids
+                            .iter()
+                            .enumerate()
+                            .map(|(i, id)| user(id, &format!("Friend {}", i + 1), None))
+                            .collect::<Vec<_>>()
+                    }))),
                     FriendsAction::SendRequest(name) => Ok(Outcome::RequestSent(name.clone())),
                     _ => Ok(Outcome::Done),
                 };

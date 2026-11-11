@@ -1847,6 +1847,8 @@ struct FriendsState {
     page: HomeSelected,
     friends_page: FriendsPage,
     requests_page: MessageRequestsPage,
+    /// The New Group DM friend picker, while it is open.
+    group_dm: Option<crate::group_dm::GroupDmDialog>,
 }
 
 // --- search ---
@@ -3991,6 +3993,11 @@ impl State {
             HomeAction::Requests => self.set_home_page(HomeSelected::Requests),
             HomeAction::Dm(user_id) => {
                 self.friends_action(FriendsAction::Message(user_id), ctx, config)
+            }
+            HomeAction::NewGroup => {
+                if let Some(fs) = &mut self.friends {
+                    fs.group_dm = Some(Default::default());
+                }
             }
         }
     }
@@ -8530,6 +8537,28 @@ impl State {
     }
 
     /// Profile card, pins, dialogs and the "drop files here" overlay.
+    /// The New Group DM friend picker. The group is created only by its
+    /// Create button.
+    fn group_dm_dialog(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let Some(fs) = &mut self.friends else {
+            return;
+        };
+        let Some(dialog) = &mut fs.group_dm else {
+            return;
+        };
+        let avatar = |ui: &egui::Ui, r: egui::Rect, u: &User| {
+            paint_avatar(ui, r, &u.id, &u.name, &u.avatar_url, config, pal);
+        };
+        match dialog.show(ctx, pal, &fs.rels, &avatar) {
+            Some(crate::group_dm::GroupDmEvent::Close) => fs.group_dm = None,
+            Some(crate::group_dm::GroupDmEvent::Create(action)) => {
+                fs.group_dm = None;
+                self.friends_action(action, ctx, config);
+            }
+            None => {}
+        }
+    }
+
     fn update_check_due(&self, config: &Config) -> bool {
         !self.update_asked
             && crate::update_check::due(
@@ -8582,6 +8611,7 @@ impl State {
         self.pins_overlay(&ctx, config, pal);
         self.dialogs(&ctx, config, pal);
         self.corner_notices(&ctx, config, pal);
+        self.group_dm_dialog(&ctx, config, pal);
 
         // Drag-and-drop hint
         let hovering_files = ui.input(|i| !i.raw.hovered_files.is_empty());

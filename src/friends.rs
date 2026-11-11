@@ -571,6 +571,8 @@ pub enum FriendsAction {
     Unblock(String),
     /// "Send Friend Request" on the Add Friend tab (normalised username).
     SendRequest(String),
+    /// "Create Group DM" in the New Group DM dialog (2-9 friends' ids).
+    CreateGroup(Vec<String>),
 }
 
 /// What the user clicked on the Message Requests page.
@@ -596,6 +598,9 @@ pub enum Outcome {
 pub async fn execute(api: &Api, action: &FriendsAction) -> Result<Outcome> {
     match action {
         FriendsAction::Message(id) => return Ok(Outcome::DmOpened(api.open_dm(id).await?)),
+        FriendsAction::CreateGroup(ids) => {
+            return Ok(Outcome::DmOpened(api.create_group_dm(ids).await?));
+        }
         FriendsAction::Accept(id) => api.add_friend(id).await?,
         FriendsAction::Ignore(id)
         | FriendsAction::Cancel(id)

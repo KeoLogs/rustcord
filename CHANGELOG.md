@@ -7,6 +7,9 @@ Settings → About). Version x.y.z:
 - z: bug and issue fixes
 
 ## Unreleased
+- New Group DM (Friends module): "New Group DM" in the DM list opens a
+  friend picker (up to 9 friends, with a filter). The group is created
+  only when you press Create; one friend opens the ordinary DM.
 - Upload progress: a message with attachments shows a progress bar per
   file while it uploads, and a Cancel link. A cancelled upload shows as
   not sent with Retry and Delete. Files are now streamed from disk instead

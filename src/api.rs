@@ -749,6 +749,21 @@ impl Api {
         Ok(Self::check(resp, "Opening DM").await?.json().await?)
     }
 
+    /// POST users/@me/channels with several recipients: a new group DM.
+    /// Only ever called from the New Group DM dialog's Create click.
+    pub async fn create_group_dm(&self, user_ids: &[String]) -> Result<Value> {
+        let resp = self
+            .send(
+                self.http
+                    .post(format!("{API_BASE}/users/@me/channels"))
+                    .header("Authorization", &self.auth)
+                    .json(&json!({ "recipients": user_ids })),
+            )
+            .await
+            .context("create group DM request failed")?;
+        Ok(Self::check(resp, "Creating group DM").await?.json().await?)
+    }
+
     /// Accept a message request.
     ///
     /// Unofficial (user API): PUT channels/{id}/recipients/@me with
