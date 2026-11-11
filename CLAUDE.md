@@ -202,6 +202,8 @@ Every update pushed for Leo bumps `version` in `Cargo.toml` (x.y.z) and
 adds a `CHANGELOG.md` entry. Leo's scheme: x = big update, y = add-ons and
 improvements, z = bug and issue fixes. y resets to 0 when x goes up; z
 resets to 0 when x or y goes up. Settings → About shows it.
+Each update also refreshes `README.md` (Status list, code table, What's
+next) so it matches what the app does.
 - Default look (PR1b): blocky bordered panes with notch labels
   (`[style.frame]` in .rctheme), no OS title bar: – □ X live in the
   top-right pane header (`src/window_frame.rs`); "Use system title bar"

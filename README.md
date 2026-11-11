@@ -10,15 +10,41 @@ entirely ours to change.
 
 ## Status
 
-Usable day to day. It has:
+Usable day to day. Current version: see `Cargo.toml` and
+[CHANGELOG.md](CHANGELOG.md) (x.y.z: x big update, y add-ons and
+improvements, z fixes). It has:
 
-- **Login screen** (token, user or bot), optional "remember me"
+- **Login screen**: paste a token (user or bot) or **scan a QR code** with the
+  Discord app on your phone; optional "remember me" (kept in the OS
+  credential store, see [below](#where-your-login-is-kept))
+- **Several accounts** (up to 5 saved): click the user panel to switch;
+  right-click an account → *Open in new window* to keep both live (each window
+  is one more connection, ~15 MB + caches)
+- **Blocky default look**: every pane is a bordered box with its name cut into
+  the top border (nav, channels, chat, input, members, user), near-square
+  corners and the bundled **Cascadia Mono** font. The old flat Discord look
+  is an example theme (`examples/themes/discord-classic`)
+- **No OS title bar**: – □ X sit in the top-right pane's header and follow
+  when you move panes; drag empty header space to move the window,
+  double-click to maximise, drag the edges to resize. Settings → Appearance →
+  *Use system title bar* brings the normal bar back (macOS always keeps it)
+- **Layout that never crops**: only the chat stretches; lists fold into
+  drawers on narrow windows and the window can't shrink below what the layout
+  needs
+- **Threads**: a thread start is one card with a preview and a › button;
+  threads open in a side panel next to the chat (or pop out into a big
+  panel); the Threads popup has search, active and archived lists; you only
+  join or create a thread when you click
+- **Taskbar unread badge** (Windows): mentions + unread DMs as a red count on
+  the taskbar icon, capped at 9+; muted servers don't count
+- **Paste media** (Ctrl+V images or copied files into the upload cards; never
+  sent until you press Enter) and **favourite GIFs** (star a GIF, Favourites
+  tab); both are modules
 - **Discord-style UI**: servers + profile bar on the left, channels, chat with
-  message box, member list on the right; Discord dark/light theme with the
-  bundled **Noto Sans** font (close to Discord's gg sans)
-  - server rail: round icons that turn into rounded squares on hover, the
-    white pill (unread / hover / selected), tooltips; drag it wider to show
-    server names
+  message box, member list on the right
+  - server rail: icons that widen smoothly into pills with the server name
+    when you drag the rail wider, the white pill (unread / hover / selected),
+    tooltips
   - channel list: collapsible categories (▾ / ▸), hover and selected rows,
     DMs with avatars and status; voice / stage channels listed (greyed out,
     joining comes later)
@@ -28,13 +54,15 @@ Usable day to day. It has:
     button to hide / show the member list; « / » collapses the channel list
     (from Discord Messenger)
   - user panel like Discord's: avatar with status ring, name and custom
-    status, gear; collapses to avatar + gear when narrow
+    status, gear; collapses to avatar + gear when narrow; click it for the
+    status picker and the account switcher
   - messages: local-time timestamps ("Today at 19:05"), date lines between
     days, hover highlight, a floating Reply / Edit / ⋯ bar, Discord-style
     reply previews, mentions of you highlighted
-  - message box with ⊕ upload button, GIF and emoji buttons and an animated
-    "is typing…" row; files to upload show as cards with a spoiler toggle
-    (`SPOILER_` file names) and remove button; the message text is the comment
+  - message box: one flat row with + upload, GIF and emoji buttons; the
+    "Replying to …" bar, "is typing…" line and upload cards float above it;
+    files to upload show as cards with a spoiler toggle (`SPOILER_` file
+    names) and remove button; the message text is the comment
   - stickers, forwarded messages, polls and system messages (joins, pins,
     calls, boosts, threads…) in Discord's style; anything RustCord can't
     draw yet says so instead of showing a blank message
@@ -65,7 +93,9 @@ Usable day to day. It has:
 - **role colours** for names in chat, server nicknames, status dots in the DM list
 - **profile popouts**: click an avatar or name for a Discord-style card with
   banner colour, status, about me, account/server join dates, roles and your
-  **note** (editable; saved only when you press Save)
+  **note** (editable; saved only when you press Save); people's Nitro profile
+  colours and avatar decorations show too (Settings → Appearance → *Show
+  profile themes*)
 - gateway **resume**: short disconnects pick up where they left off instead of
   reloading everything
 - **Settings** (gear in the profile bar, or Ctrl+,): account, appearance,
@@ -76,8 +106,10 @@ Usable day to day. It has:
 - **keyboard shortcuts** (Ctrl+/ lists them): Alt+↑/↓ channels,
   Alt+Shift+↑/↓ unread channels, Ctrl+Alt+↑/↓ servers, Ctrl+K, Ctrl+,
 - **Layout editor** (Settings → Layout → Edit layout): panels glow on hover,
-  hold and drag to move (they grow as you pick them up), drag gaps to resize.
-  Saved between runs.
+  hold and drag anywhere to move (they grow as you pick them up), drag gaps
+  to resize. Saved between runs; *Reset to default* and copy / import of a
+  layout. There are no preset pickers: one default look, everything else is
+  yours.
 - **Modules**: switch optional parts off to save memory (Settings → Modules),
   or on: e.g. the **Status bar** (connection, channel, typing, RAM; off by
   default)
@@ -116,8 +148,13 @@ Usable day to day. It has:
   shadows, gradients, glass panels, a chat background image. See
   [Themes](#themes) for the format
 
-What's left: see [docs/PORTING.md](docs/PORTING.md) — reactions, search,
-threads / forums, voice (comes last).
+What's next: lower memory use (modules that are off cost almost nothing),
+the four built-in themes (RustCord Dark / Light, Discord Dark / Light), GIF
+autoplay, square avatars, server settings and roles, the rest of the
+[Discord Messenger](https://github.com/DiscordMessenger/dm) features
+([docs/PORTING.md](docs/PORTING.md)), theme frames and detached panels, a
+mini chat overlay, and **mods** (`.rcmod`, with permission prompts and no
+access to your token). Voice comes last.
 
 ## Running
 
@@ -231,6 +268,16 @@ folder…* (or *Import theme…* and pick its `theme.rctheme`).
 | `src/widgets.rs` | Shared Discord-style widgets: menu rows, icon buttons, menu frame |
 | `src/sysmsg.rs` | System messages, stickers and forwarded messages |
 | `src/gif_picker.rs` | GIF picker popup and Discord's GIF endpoints' parsing |
+| `src/accounts.rs` | Saved accounts, tokens in the OS credential store (redacted `Token`), migration |
+| `src/account_menu.rs` | Account switcher menu in the user panel |
+| `src/remote_auth.rs`, `src/qr_login.rs` | QR code login (Discord remote auth) and its panel |
+| `src/window_frame.rs` | – □ X in the top-right pane header, window drag and edge resize |
+| `src/tile_fit.rs`, `src/responsive.rs` | Pane sizes, breakpoints, drawers, the window's minimum size |
+| `src/threads.rs`, `src/forum.rs` | Threads store, thread cards and popup, the thread side panel; forums |
+| `src/paste.rs` | Ctrl+V images / files into the upload cards |
+| `src/badge.rs`, `src/taskbar.rs` | Unread counts shared by the rail and the Windows taskbar badge |
+| `src/http_error.rs`, `src/ratelimit.rs` | Typed REST errors and the 429 "Slow down" handling |
+| `src/storage.rs` | Storage ids (demo runs never touch your real settings) |
 
 The UI and the network never block each other: the backend sends `ToUi`
 events over a channel and calls `request_repaint()`, and the UI sends
@@ -238,18 +285,20 @@ events over a channel and calls `request_repaint()`, and the UI sends
 
 ## Roadmap ideas
 
-- Group channels by category, DMs list
-- Markdown, embeds, images, custom emoji
-- Theme fonts and layout presets
+- Mods (`.rcmod`): community add-ons such as a music controller, asking for
+  permission before they do anything and never seeing your token
+- Theme frames, ornaments and panels detached into their own windows
+- Mini chat: one chat in a small always-on-top window
 - Claude features: summarise a channel, explain a message, draft a reply
   (drafts are always sent by you, never automatically)
-- Plugin system
 
 ## Credits
 
 Feature reference: [Discord Messenger](https://github.com/DiscordMessenger/dm)
 by iProgramInCpp (MIT). Emoji graphics: [Twemoji](https://github.com/jdecked/twemoji)
-(CC-BY 4.0). Fonts: [Noto Sans](https://github.com/notofonts/latin-greek-cyrillic)
+(CC-BY 4.0). Fonts: [Cascadia Mono](https://github.com/microsoft/cascadia-code)
+by Microsoft (SIL Open Font License 1.1, `assets/fonts/CascadiaMono-OFL.txt`),
+[Noto Sans](https://github.com/notofonts/latin-greek-cyrillic)
 and subsets of Noto Sans Symbols, Symbols 2, Math and Mono by the Noto Project
 Authors, under the SIL Open Font License 1.1 (`assets/fonts/OFL.txt`). Icons:
 [Phosphor Icons](https://phosphoricons.com) (MIT, `assets/fonts/Phosphor-LICENSE.txt`).
