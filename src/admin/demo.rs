@@ -154,6 +154,18 @@ fn load(r: &Request) -> Value {
               "format_type": 1, "user": { "id": "460000000000000001", "username": "you" } },
         ]),
         Kind::LoadAudit | Kind::LoadAuditMore => audit(&r.path),
+        Kind::LoadRules => json!([
+            { "id": "700", "name": "No scam links", "enabled": true, "event_type": 1,
+              "trigger_type": 1,
+              "trigger_metadata": { "keyword_filter": ["free nitro", "*.scam.example*"],
+                                    "allow_list": ["nitro boost"] },
+              "actions": [{ "type": 1, "metadata": { "custom_message": "That looks like a scam link." } },
+                          { "type": 2, "metadata": { "channel_id": "203" } }],
+              "exempt_roles": ["501"], "exempt_channels": [] },
+            { "id": "701", "name": "Block suspected spam", "enabled": false, "event_type": 1,
+              "trigger_type": 3, "trigger_metadata": {},
+              "actions": [{ "type": 1 }], "exempt_roles": [], "exempt_channels": [] },
+        ]),
         _ => Value::Null,
     }
 }
@@ -173,7 +185,7 @@ fn audit(path: &str) -> Value {
         "460000000000000001",
         "950000000000000010",
     );
-    // Ids are snowflakes a few hours apart (November 2026).
+    // Ids are snowflakes a few hours apart.
     let all = [
         json!({ "id": "1437000000000000000", "user_id": alex, "target_id": troll,
                 "action_type": 22, "reason": "Spam after two warnings" }),

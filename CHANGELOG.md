@@ -30,6 +30,9 @@ Settings → About). Version x.y.z:
     delete, with Discord's size limits checked before anything is sent.
   - Audit log: who changed what, with the changes and reason on each entry,
     filters by user and by action, and "Load more".
+  - AutoMod: list, create, edit and delete keyword, spam and mention-spam
+    rules, with their actions (block, alert channel, timeout) and exempt
+    roles and channels.
 
 ## 0.10.0: DM core (history paging, first unread, optimistic send)
 - Chat history like Discord's (Brief A): scrolling near the top loads 50

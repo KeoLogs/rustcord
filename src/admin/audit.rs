@@ -201,6 +201,10 @@ impl State {
     fn target_name(&self, cx: &Cx, e: &Value) -> String {
         let id = s(e, "target_id");
         let kind = n(e, "action_type");
+        // Server-wide actions have no target worth naming.
+        if matches!(kind, 1 | 21 | 26 | 27 | 166 | 167) {
+            return String::new();
+        }
         if matches!(kind, 20..=28 | 72 | 74 | 75 | 143..=145)
             && self.users.iter().any(|u| s(u, "id") == id)
         {
@@ -220,10 +224,7 @@ impl State {
                 }
             }
         }
-        match kind {
-            1 | 21 | 26 | 27 | 166 | 167 => String::new(),
-            _ => id.to_string(),
-        }
+        id.to_string()
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, cx: &Cx, out: &mut Out) {

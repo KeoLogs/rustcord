@@ -27,6 +27,7 @@ use crate::theme::{Bold, Palette};
 use crate::types::Guild;
 
 pub mod audit;
+pub mod automod;
 pub mod channels;
 pub mod demo;
 pub mod emojis;
@@ -54,6 +55,10 @@ pub enum Method {
 pub enum Kind {
     LoadGuild,
     SaveGuild,
+    LoadRules,
+    CreateRule,
+    SaveRule,
+    DeleteRule,
     LoadAudit,
     LoadAuditMore,
     LoadEmojis,
@@ -99,6 +104,10 @@ impl Kind {
         match self {
             Kind::LoadGuild => "Loading the server settings",
             Kind::SaveGuild => "Saving the server settings",
+            Kind::LoadRules => "Loading AutoMod rules",
+            Kind::CreateRule => "Creating the rule",
+            Kind::SaveRule => "Saving the rule",
+            Kind::DeleteRule => "Deleting the rule",
             Kind::LoadAudit => "Loading the audit log",
             Kind::LoadAuditMore => "Loading the audit log",
             Kind::LoadEmojis => "Loading emoji",
@@ -142,6 +151,7 @@ impl Kind {
     fn tab(self) -> Tab {
         match self {
             Kind::LoadGuild | Kind::SaveGuild => Tab::Overview,
+            Kind::LoadRules | Kind::CreateRule | Kind::SaveRule | Kind::DeleteRule => Tab::AutoMod,
             Kind::LoadAudit | Kind::LoadAuditMore => Tab::AuditLog,
             Kind::LoadStickers | Kind::CreateSticker | Kind::SaveSticker | Kind::DeleteSticker => {
                 Tab::Stickers
@@ -399,6 +409,7 @@ pub fn id_or_null(id: &str) -> Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,
+    AutoMod,
     AuditLog,
     Stickers,
     Emoji,
@@ -414,13 +425,14 @@ const NAV: &[(&str, &[Tab])] = &[
     ("Server", &[Tab::Overview, Tab::Roles, Tab::Channels]),
     ("Expressions", &[Tab::Emoji, Tab::Stickers]),
     ("People", &[Tab::Members, Tab::Invites, Tab::Bans]),
-    ("Moderation", &[Tab::AuditLog]),
+    ("Moderation", &[Tab::AuditLog, Tab::AutoMod]),
 ];
 
 impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
+            Tab::AutoMod => "AutoMod",
             Tab::AuditLog => "Audit Log",
             Tab::Stickers => "Stickers",
             Tab::Emoji => "Emoji",
@@ -435,6 +447,7 @@ impl Tab {
     fn icon(self) -> &'static str {
         match self {
             Tab::Overview => icons::GEAR,
+            Tab::AutoMod => icons::SHIELD,
             Tab::AuditLog => icons::FILE_TEXT,
             Tab::Stickers => icons::STICKER,
             Tab::Emoji => icons::SMILEY,
@@ -453,6 +466,7 @@ impl Tab {
         let any = |bits: u64| perms & bits != 0;
         match self {
             Tab::Overview => any(perms::MANAGE_GUILD),
+            Tab::AutoMod => any(perms::MANAGE_GUILD),
             Tab::AuditLog => any(perms::VIEW_AUDIT_LOG),
             Tab::Stickers => any(perms::MANAGE_EXPRESSIONS | (1 << 43)),
             Tab::Emoji => any(perms::MANAGE_EXPRESSIONS | (1 << 43)),
@@ -671,6 +685,7 @@ pub struct AdminPage {
     /// tab's first editor once its data is in.
     pub demo_detail: bool,
     overview: overview::State,
+    automod: automod::State,
     audit: audit::State,
     emojis: emojis::State,
     invites: invites::State,
@@ -692,6 +707,7 @@ impl AdminPage {
             confirm: None,
             demo_detail: false,
             overview: Default::default(),
+            automod: Default::default(),
             audit: Default::default(),
             emojis: Default::default(),
             invites: Default::default(),
@@ -721,6 +737,7 @@ impl AdminPage {
         let g = &self.guild_id;
         match tab {
             Tab::Overview => vec![overview::load(g)],
+            Tab::AutoMod => vec![automod::load(g)],
             Tab::AuditLog => vec![audit::load(g, "", 0, None)],
             Tab::Stickers => vec![emojis::load_stickers(g)],
             Tab::Emoji => vec![emojis::load_emojis(g)],
@@ -757,6 +774,7 @@ impl AdminPage {
         };
         match r.kind.tab() {
             Tab::Overview => self.overview.on_response(r.kind, &r.key, &v),
+            Tab::AutoMod => self.automod.on_response(r.kind, &r.key, &v),
             Tab::AuditLog => self.audit.on_response(r.kind, &r.key, &v),
             Tab::Emoji | Tab::Stickers => self.emojis.on_response(r.kind, &r.key, &v),
             Tab::Invites => self.invites.on_response(r.kind, &r.key, &v),
@@ -941,6 +959,7 @@ impl AdminPage {
                         let before = out.send.len();
                         match self.tab {
                             Tab::Overview => self.overview.ui(ui, cx, &mut out),
+                            Tab::AutoMod => self.automod.ui(ui, cx, &mut out),
                             Tab::AuditLog => self.audit.ui(ui, cx, &mut out),
                             Tab::Stickers => self.emojis.sticker_ui(ui, cx, &mut out),
                             Tab::Emoji => self.emojis.emoji_ui(ui, cx, &mut out),
