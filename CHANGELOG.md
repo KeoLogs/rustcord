@@ -36,6 +36,16 @@ Settings → About). Version x.y.z:
 - The window buttons now stay in a narrow Members header instead of
   floating over it.
 
+## 0.7.0: Memory measuring tools
+- Settings → Performance has a memory details panel.
+- `scripts/memprobe.ps1` measures memory (Task Manager numbers) and
+  frame-time p95, with module profiles and a live read-only mode.
+- `RUSTCORD_DEMO_BIG=1` loads a big synthetic account through the real
+  READY path; `RUSTCORD_START_MINIMIZED` / `RUSTCORD_START_OFFSCREEN` for
+  test launches.
+- Release builds use `panic = "abort"` (about 10 MB less RAM, smaller exe).
+  A crash in a background task now closes the app.
+
 ## 0.6.1: Composer and user panel match the blocky look
 - The message box has no bubble any more: one flat row with a plain +,
   the message field, and GIF and emoji icons on the right.

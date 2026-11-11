@@ -113,6 +113,11 @@ pub struct SettingsPage {
     import: Option<Result<egui_tiles::Tree<crate::layout::Pane>, String>>,
     /// The themes folder was re-read since this page opened.
     themes_read: bool,
+    /// Cache sizes for the memory panel, set by the app each frame while
+    /// Performance is open (`None` otherwise).
+    pub mem: Option<crate::memstats::MemCounts>,
+    /// Last process memory reading (once a second) for the panel.
+    mem_sample: Option<(std::time::Instant, crate::memstats::ProcMem)>,
 }
 
 impl SettingsPage {
@@ -126,6 +131,8 @@ impl SettingsPage {
             import_text: String::new(),
             import: None,
             themes_read: false,
+            mem: None,
+            mem_sample: None,
         }
     }
 
@@ -721,11 +728,20 @@ impl SettingsPage {
                 }
             }
             Section::Performance => {
-                if let Some(usage) = memory_stats::memory_stats() {
+                let stale = self
+                    .mem_sample
+                    .is_none_or(|(at, _)| at.elapsed() >= std::time::Duration::from_secs(1));
+                if stale {
+                    self.mem_sample =
+                        crate::memstats::sample().map(|m| (std::time::Instant::now(), m));
+                }
+                if let Some((_, usage)) = self.mem_sample {
+                    // Task Manager's "Memory" column where we can read it.
+                    let shown = usage.private_ws.unwrap_or(usage.working_set);
                     ui.label(
                         RichText::new(format!(
                             "RustCord is using {:.0} MB of RAM",
-                            usage.physical_mem as f64 / 1_048_576.0
+                            shown as f64 / 1_048_576.0
                         ))
                         .bold(),
                     );
@@ -758,6 +774,7 @@ impl SettingsPage {
                     pal,
                     "Tip: turning off the Images module (Modules page) saves the most memory.",
                 );
+                memory_panel(ui, pal, self.mem_sample.map(|(_, m)| m), self.mem.as_ref());
             }
             Section::About => {
                 ui.label(
@@ -791,6 +808,42 @@ impl SettingsPage {
         }
         action
     }
+}
+
+/// Settings → Performance, MEMORY DETAILS: process numbers and what the
+/// caches hold (for measuring; nothing here changes anything).
+fn memory_panel(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    usage: Option<crate::memstats::ProcMem>,
+    counts: Option<&crate::memstats::MemCounts>,
+) {
+    use crate::memstats::mb;
+    ui.add_space(14.0);
+    label(ui, pal, "MEMORY DETAILS");
+    let mut rows: Vec<(&str, String)> = Vec::new();
+    if let Some(u) = usage {
+        if let Some(p) = u.private_ws {
+            rows.push(("Private working set (Task Manager)", mb(p)));
+        }
+        rows.push(("Working set", mb(u.working_set)));
+        if let Some(p) = u.private_bytes {
+            rows.push(("Private bytes", mb(p)));
+        }
+    }
+    if let Some(c) = counts {
+        rows.extend(c.rows());
+    }
+    egui::Grid::new("memory_details")
+        .num_columns(2)
+        .spacing([24.0, 4.0])
+        .show(ui, |ui| {
+            for (k, v) in rows {
+                ui.label(RichText::new(k).color(pal.muted));
+                ui.label(RichText::new(v).color(pal.text));
+                ui.end_row();
+            }
+        });
 }
 
 /// Settings → Chat (Discord Messenger's DisableFormatting, ShowEmbedContent,

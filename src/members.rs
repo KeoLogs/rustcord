@@ -264,7 +264,6 @@ impl MemberCache {
         self.guilds.get(guild_id).into_iter().flatten()
     }
 
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.len
     }
