@@ -9,6 +9,18 @@ use std::path::PathBuf;
 pub const APP_ID: &str = "RustCord";
 /// eframe app id of every demo run.
 pub const DEMO_APP_ID: &str = "RustCord-Demo";
+/// eframe app id of a `RUSTCORD_TEST_ACCOUNT` run (memprobe live mode).
+pub const TEST_APP_ID: &str = "RustCord-Test";
+
+/// `RUSTCORD_TEST_ACCOUNT=<user id>`: log in as that saved account (token
+/// from the OS credential store, never from the environment), with its own
+/// storage, read-only. Ignored in demo runs.
+pub fn test_account_from_env() -> Option<String> {
+    std::env::var("RUSTCORD_TEST_ACCOUNT")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+}
 
 /// `RUSTCORD_START_MINIMIZED=1` (memprobe and other test launches): the
 /// window starts hidden and unfocused, then minimises itself on the first

@@ -13,6 +13,7 @@ mod embed;
 mod emoji;
 mod emoji_picker;
 mod forum;
+mod frametimes;
 mod friends;
 mod gateway;
 mod gif_picker;
@@ -71,6 +72,13 @@ fn main() -> eframe::Result {
     // Optional: skip the login screen with DISCORD_TOKEN, or run offline with
     // RUSTCORD_DEMO=1.
     let demo = storage::demo_from_env();
+    // memprobe live runs: a saved account, own storage id, read-only.
+    let test_account = storage::test_account_from_env().filter(|_| !demo);
+    let app_id = match (demo, &test_account) {
+        (true, _) => storage::DEMO_APP_ID,
+        (false, Some(_)) => storage::TEST_APP_ID,
+        (false, None) => storage::APP_ID,
+    };
     let env_token = std::env::var("DISCORD_TOKEN")
         .ok()
         .filter(|t| !t.trim().is_empty());
@@ -83,9 +91,10 @@ fn main() -> eframe::Result {
             .with_visible(!start_minimized)
             .with_active(!start_minimized)
             .with_title("RustCord")
-            // Demo runs save under their own app id (storage folder), so
-            // they never read or write the real config, layout or window.
-            .with_app_id(storage::app_id(demo))
+            // Demo and test-account runs save under their own app id
+            // (storage folder), so they never read or write the real config,
+            // layout or window.
+            .with_app_id(app_id)
             .with_inner_size([1200.0, 760.0])
             // Doc §3.2: drawers take over below 700 px.
             .with_min_inner_size(responsive::WINDOW_MIN)
@@ -105,7 +114,7 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        storage::app_id(demo),
+        app_id,
         options,
         Box::new(move |cc| {
             // Images (avatars, server icons, attachments, emoji) load
@@ -114,7 +123,12 @@ fn main() -> eframe::Result {
             // Cascadia Mono (bundled) as the UI font, Noto Sans for "sans"
             // themes; system fonts stay the fallback for other scripts.
             theme::install_fonts(&cc.egui_ctx);
-            Ok(Box::new(app::RustCordApp::new(cc, env_token, demo)))
+            Ok(Box::new(app::RustCordApp::new(
+                cc,
+                env_token,
+                demo,
+                test_account,
+            )))
         }),
     )
 }

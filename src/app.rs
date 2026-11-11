@@ -109,8 +109,9 @@ pub struct RustCordApp {
     /// Demo mode only (`RUSTCORD_DEMO_OPEN=view`): a view to open once the
     /// demo data is in, for screenshots.
     demo_open: Option<String>,
-    /// A `RUSTCORD_DEMO_OPEN` run: nothing is saved (the view may change
-    /// the config, e.g. a theme, only for the screenshot).
+    /// A `RUSTCORD_DEMO_OPEN` / `_SHOT` or `RUSTCORD_MODULES` (memprobe)
+    /// run: nothing is saved (the view may change the config, e.g. a theme,
+    /// only for the screenshot).
     demo_shot: bool,
     /// Demo mode only (`RUSTCORD_DEMO_SHOT=file.png`): save a screenshot of
     /// the window after a few seconds, then quit. Works while the desktop
@@ -119,19 +120,50 @@ pub struct RustCordApp {
     demo_shot_asked: bool,
     /// `RUSTCORD_START_MINIMIZED=1`: minimise and show on the first frame.
     start_minimized: bool,
+    /// `RUSTCORD_FRAMETIMES=<file>` (memprobe): per-frame CPU time log.
+    /// `None` otherwise, so it costs nothing.
+    frametimes: Option<crate::frametimes::FrameRecorder>,
 }
 
 impl RustCordApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, env_token: Option<String>, demo: bool) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        env_token: Option<String>,
+        demo: bool,
+        test_account: Option<String>,
+    ) -> Self {
+        // `RUSTCORD_TEST_ACCOUNT` (memprobe live runs): that saved
+        // account's token straight from the OS credential store. The run
+        // has its own storage id (main.rs) and a memory-only vault, so it
+        // never saves or removes accounts, and the backend is read-only.
+        let test_token = test_account
+            .as_ref()
+            .filter(|_| !demo)
+            .map(|id| Vault::os().token(id).ok().flatten().ok_or(id.clone()));
+        if test_token.is_some() {
+            crate::config::live::READ_ONLY.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         // Demo screenshots (`RUSTCORD_DEMO_OPEN` / `_SHOT`) start from the
         // defaults, never from what an earlier demo run saved.
+        // `RUSTCORD_MODULES` (memprobe, demo only) is a measuring run: it
+        // also starts from the defaults and saves nothing.
+        let modules_override = demo
+            .then(|| std::env::var("RUSTCORD_MODULES").ok())
+            .flatten()
+            .map(|spec| crate::config::Modules::from_override(&spec));
         let shot = demo
             && (std::env::var("RUSTCORD_DEMO_OPEN").is_ok()
-                || std::env::var("RUSTCORD_DEMO_SHOT").is_ok());
+                || std::env::var("RUSTCORD_DEMO_SHOT").is_ok()
+                || modules_override.is_some());
         let storage = cc.storage.filter(|_| !shot);
         let mut config: Config = storage
             .and_then(|s| eframe::get_value(s, CONFIG_KEY))
             .unwrap_or_default();
+        match modules_override {
+            Some(Ok(modules)) => config.modules = modules,
+            Some(Err(e)) => eprintln!("RUSTCORD_MODULES ignored: {e}"),
+            None => {}
+        }
         if shot {
             // `RUSTCORD_DEMO_SCALE=1.25`: zoom (like a Windows display scale).
             if let Some(z) = std::env::var("RUSTCORD_DEMO_SCALE")
@@ -142,7 +174,11 @@ impl RustCordApp {
             }
         }
         // Tokens live in the OS credential store; demo runs never touch it.
-        let vault = if demo { Vault::memory() } else { Vault::os() };
+        let vault = if demo || test_token.is_some() {
+            Vault::memory()
+        } else {
+            Vault::os()
+        };
         // One-time move of the old plaintext `saved_token` into the store.
         // If the store fails, still log in with it this once; it is never
         // written back to the config file.
@@ -177,10 +213,8 @@ impl RustCordApp {
 
         // Demo screenshots (`RUSTCORD_DEMO_OPEN` / `_SHOT`) use a scratch
         // themes folder so they never touch the user's installed themes.
-        let demo_shot = demo
-            && (std::env::var("RUSTCORD_DEMO_OPEN").is_ok()
-                || std::env::var("RUSTCORD_DEMO_SHOT").is_ok());
-        let themes_dir = if demo_shot {
+        let demo_shot = shot;
+        let themes_dir = if demo_shot || test_token.is_some() {
             Some(std::env::temp_dir().join("rustcord-demo-themes"))
         } else {
             crate::themes::default_dir(demo)
@@ -214,12 +248,28 @@ impl RustCordApp {
                 .flatten(),
             demo_shot_asked: false,
             start_minimized: crate::storage::start_minimized_from_env(),
+            frametimes: crate::frametimes::FrameRecorder::from_env(),
         };
 
         // Log in straight away if we can: demo, DISCORD_TOKEN, or a saved
         // account (DISCORD_TOKEN is never saved).
         if demo {
             app.start_session(&cc.egui_ctx, Token::new(""), true, None);
+        } else if let Some(test) = test_token {
+            match test {
+                Ok(token) => {
+                    app.start_session(&cc.egui_ctx, token, false, None);
+                    if let Some(s) = &mut app.session {
+                        s.saved = true;
+                    }
+                }
+                Err(id) => {
+                    app.screen = Screen::Login(LoginForm::new(
+                        false,
+                        Some(format!("Test account {id} isn't in the credential store.")),
+                    ));
+                }
+            }
         } else if let Some(token) = env_token {
             app.start_session(&cc.egui_ctx, Token::new(token), false, None);
             if let Some(s) = &mut app.session {
@@ -835,6 +885,10 @@ impl RamSampler {
 
 impl eframe::App for RustCordApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(rec) = &mut self.frametimes {
+            // The previous frame's CPU time (eframe measures it).
+            rec.push(frame.info().cpu_usage);
+        }
         // Test launches start hidden: minimise first, then show, so the
         // window sits in the taskbar and keeps rendering (realistic RAM).
         if std::mem::take(&mut self.start_minimized) {
