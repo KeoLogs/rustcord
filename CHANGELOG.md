@@ -6,6 +6,17 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## 0.6.2: Fixes
+- "Try the offline demo" on the login screen now opens the demo as its own
+  RustCord window (the login window closes). The demo can no longer touch
+  your real settings, saved accounts or saved logins.
+- Saved accounts that dropped out of the account list come back on the next
+  start (Windows): logins still in Credential Manager are looked up and put
+  back in the switcher, up to 5.
+- Dragging the server list's edge wider makes the chat narrower; the channel
+  list keeps its width. Dragging the channel list's edge only resizes it
+  against the chat.
+
 ## 0.6.1: Composer and user panel match the blocky look
 - The message box has no bubble any more: one flat row with a plain +,
   the message field, and GIF and emoji icons on the right.
