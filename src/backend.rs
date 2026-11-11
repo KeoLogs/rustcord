@@ -1,6 +1,7 @@
 //! The async side of RustCord. Runs on its own Tokio runtime thread so the
 //! UI thread never blocks on the network.
 
+use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
@@ -129,8 +130,10 @@ async fn thread_request(
 }
 
 /// Options read from the config at login.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct Options {
+    /// Developer options: custom API base URL (`None` = Discord's).
+    pub api_base: Option<String>,
     /// Bots: ask for the Server Members + Presence intents.
     pub bot_member_intents: bool,
     /// "Show as" (IDENTIFY properties; user accounts).
@@ -195,7 +198,7 @@ async fn run(
     };
 
     let api = match Api::new(auth) {
-        Ok(api) => api,
+        Ok(api) => api.with_base(options.api_base.clone()),
         Err(e) => {
             let _ = tx.send(ToUi::Status(format!("HTTP client error: {e}")));
             return;
@@ -262,8 +265,17 @@ async fn run(
         })
     };
 
+    // Uploads in flight, by nonce: "Cancel" drops the request.
+    let cancels = Cancels::default();
+
     // Handle requests from the UI.
     while let Some(req) = rx.recv().await {
+        if let ToBackend::CancelSend { nonce } = &req {
+            if let Some(cancel) = lock(&cancels).remove(nonce) {
+                let _ = cancel.send(());
+            }
+            continue;
+        }
         // RUSTCORD_TEST_ACCOUNT (memprobe live runs): reads only.
         if crate::config::live::on(&crate::config::live::READ_ONLY) && !read_only_ok(&req) {
             eprintln!("read-only test run: dropped a write request");
@@ -304,6 +316,7 @@ async fn run(
         let api = api.clone();
         let tx = tx.clone();
         let ctx = egui_ctx.clone();
+        let cancels = cancels.clone();
         tokio::spawn(async move {
             let result = match req {
                 ToBackend::LoadHistory { channel_id } => {
@@ -371,8 +384,11 @@ async fn run(
                     reply_ping,
                     files,
                     spoilers,
-                } => match api
-                    .send_message(
+                } => match send_cancellable(
+                    &cancels,
+                    &nonce,
+                    !files.is_empty(),
+                    api.send_message(
                         &channel_id,
                         &nonce,
                         &content,
@@ -380,8 +396,11 @@ async fn run(
                         reply_ping,
                         &files,
                         &spoilers,
-                    )
-                    .await
+                        (!files.is_empty())
+                            .then(|| upload_progress(&tx, &ctx, &channel_id, &nonce)),
+                    ),
+                )
+                .await
                 {
                     Ok(message) => Ok(Some(ToUi::Sent {
                         channel_id,
@@ -762,6 +781,40 @@ async fn run(
                 }
                 // QR login runs before any session, in remote_auth.rs.
                 ToBackend::StartQrLogin | ToBackend::CancelQrLogin => Ok(None),
+                // Handled before the spawn.
+                ToBackend::CancelSend { .. } => Ok(None),
+                ToBackend::OpenCrashFolder(report) => {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::crash_report::open_folder(&report)
+                    })
+                    .await;
+                    Ok(None)
+                }
+                // Bots have no notification settings.
+                ToBackend::PatchGuildSettings { .. } if is_bot => Ok(None),
+                ToBackend::PatchGuildSettings { guild_id, body } => {
+                    api.patch_guild_settings(&guild_id, &body).await.map(|v| {
+                        Some(ToUi::GuildSettingsUpdated(
+                            crate::notif_settings::parse_response(&v, &guild_id),
+                        ))
+                    })
+                }
+                ToBackend::PlaySound { custom, volume } => {
+                    let played = tokio::task::spawn_blocking(move || {
+                        crate::sound::play(custom.as_deref(), volume)
+                    })
+                    .await;
+                    // A custom file that can't be used: say why (the ping
+                    // played instead).
+                    Ok(played.ok().and_then(Result::err).map(ToUi::Notice))
+                }
+                ToBackend::PickSound => {
+                    Ok(Some(ToUi::SoundPicked(crate::sound::pick_file().await)))
+                }
+                // GitHub only, with its own client (no Discord token).
+                ToBackend::CheckUpdate => Ok(crate::update_check::fetch_latest()
+                    .await
+                    .map(ToUi::LatestRelease)),
             };
             match result {
                 Ok(Some(ev)) => {
@@ -789,6 +842,68 @@ async fn run(
     let _ = tokio::time::timeout(Duration::from_secs(3), gateway).await;
 }
 
+/// Uploads that can still be cancelled, by nonce.
+type Cancels = std::sync::Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>;
+
+fn lock(
+    cancels: &Cancels,
+) -> std::sync::MutexGuard<'_, HashMap<String, tokio::sync::oneshot::Sender<()>>> {
+    cancels.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Run a send; with `cancellable` (it has attachments) a
+/// `ToBackend::CancelSend` for its nonce drops the request and the send
+/// fails with "Upload cancelled".
+async fn send_cancellable<T>(
+    cancels: &Cancels,
+    nonce: &str,
+    cancellable: bool,
+    send: impl Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    if !cancellable {
+        return send.await;
+    }
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    lock(cancels).insert(nonce.to_owned(), cancel_tx);
+    let result = tokio::select! {
+        r = send => r,
+        Ok(()) = cancel_rx => Err(anyhow::anyhow!(crate::upload::CANCELLED)),
+    };
+    lock(cancels).remove(nonce);
+    result
+}
+
+/// The upload stream's progress callback: throttled `ToUi::UploadProgress`.
+fn upload_progress(
+    tx: &Sender<ToUi>,
+    ctx: &Repaint,
+    channel_id: &str,
+    nonce: &str,
+) -> crate::upload::OnProgress {
+    let (tx, ctx) = (tx.clone(), ctx.clone());
+    let (channel_id, nonce) = (channel_id.to_owned(), nonce.to_owned());
+    let throttles = std::sync::Mutex::new(Vec::<crate::upload::Throttle>::new());
+    std::sync::Arc::new(move |file, sent, total| {
+        let report = {
+            let mut t = throttles.lock().unwrap_or_else(|e| e.into_inner());
+            if t.len() <= file {
+                t.resize_with(file + 1, Default::default);
+            }
+            t[file].should_report(sent, total)
+        };
+        if report {
+            let _ = tx.send(ToUi::UploadProgress {
+                channel_id: channel_id.clone(),
+                nonce: nonce.clone(),
+                file,
+                sent,
+                total,
+            });
+            ctx.request_repaint();
+        }
+    })
+}
+
 /// Messages per history page (Discord's maximum).
 const PAGE_LIMIT: u8 = crate::history::PAGE_SIZE as u8;
 
@@ -813,6 +928,10 @@ fn read_only_ok(req: &ToBackend) -> bool {
             | ToBackend::LoadAround { .. }
             | ToBackend::CopyImage { .. }
             | ToBackend::Reconnect
+            | ToBackend::CheckUpdate
+            | ToBackend::PlaySound { .. }
+            | ToBackend::PickSound
+            | ToBackend::OpenCrashFolder(_)
             | ToBackend::LoadPins { .. }
             | ToBackend::LoadGifs { .. }
             | ToBackend::LoadProfile { .. }

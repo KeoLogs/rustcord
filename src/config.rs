@@ -99,6 +99,29 @@ pub struct Config {
     /// clicking a GIF's star.
     #[serde(default)]
     pub favourite_gifs: Vec<crate::gif_picker::Gif>,
+    /// Disk image cache size in MB (`image_cache.rs`); 0 turns it off.
+    pub image_cache_mb: u32,
+    /// Developer options: custom REST API base URL (empty = Discord's).
+    /// Used from the next login (`endpoints.rs`).
+    pub api_base_url: String,
+    /// Developer options: custom CDN base URL (empty = Discord's).
+    pub cdn_base_url: String,
+    /// Play a sound with each notification (Notifications module).
+    pub notification_sound: bool,
+    /// The user's own sound file (wav / ogg / mp3, 1 MB at most) instead of
+    /// RustCord's ping.
+    pub notification_sound_file: Option<std::path::PathBuf>,
+    /// Notification sound volume, 0-100.
+    pub notification_volume: u8,
+    /// Ask GitHub once a day whether a newer RustCord exists
+    /// (`update_check.rs`). Never downloads anything.
+    pub check_for_updates: bool,
+    /// Unix time of the last update check.
+    pub last_update_check: u64,
+    /// The latest release tag the check found.
+    pub latest_release: Option<String>,
+    /// The release whose "Update available" notice was dismissed.
+    pub dismissed_update: Option<String>,
 }
 
 impl Default for Config {
@@ -134,6 +157,16 @@ impl Default for Config {
             recent_emoji: Default::default(),
             skin_tone: 0,
             favourite_gifs: Vec::new(),
+            image_cache_mb: crate::image_cache::DEFAULT_MB,
+            api_base_url: String::new(),
+            cdn_base_url: String::new(),
+            notification_sound: true,
+            notification_sound_file: None,
+            notification_volume: crate::sound::DEFAULT_VOLUME,
+            check_for_updates: true,
+            last_update_check: 0,
+            latest_release: None,
+            dismissed_update: None,
         }
     }
 }

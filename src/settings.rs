@@ -23,6 +23,7 @@ pub enum Section {
     Themes,
     Presets,
     Performance,
+    Developer,
     About,
 }
 
@@ -50,6 +51,7 @@ const SECTIONS: &[(&str, &[NavItem])] = &[
             (Section::Themes, "Themes", icons::PALETTE),
             (Section::Presets, "Presets", icons::SQUARES_FOUR),
             (Section::Performance, "Performance", icons::GAUGE),
+            (Section::Developer, "Developer", icons::CODE),
             (Section::About, "About", icons::INFO),
         ],
     ),
@@ -69,6 +71,13 @@ pub enum SettingsAction {
     },
     /// Settings → Presets → Import: open the file picker (backend).
     PickPreset,
+    /// Settings → Notifications → Browse…: pick a custom sound (backend).
+    PickSound,
+    /// Settings → Notifications → Test: play the sound as set in the draft.
+    TestSound {
+        custom: Option<std::path::PathBuf>,
+        volume: u8,
+    },
     /// Settings → Presets → Export: save dialog + write (backend).
     ExportPreset {
         file_name: String,
@@ -162,6 +171,15 @@ impl SettingsPage {
     }
 
     /// Unsaved changes?
+    /// The "Browse…" dialog picked a custom notification sound: check it and
+    /// put it in the draft (saved with Save Changes like everything else).
+    pub fn set_sound_file(&mut self, path: std::path::PathBuf) -> Result<(), String> {
+        let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        crate::sound::check_custom(&path, len)?;
+        self.draft.notification_sound_file = Some(path);
+        Ok(())
+    }
+
     pub fn dirty(&self) -> bool {
         self.draft != self.base || !self.synced.is_empty() || self.pending_layout.is_some()
     }
@@ -639,7 +657,12 @@ impl SettingsPage {
                 }
             }
             Section::Chat => chat(ui, config, pal),
-            Section::Notifications => notifications(ui, config, pal),
+            Section::Notifications => {
+                notifications(ui, config, pal);
+                if config.modules.notifications {
+                    action = sound_settings(ui, config, pal).or(action);
+                }
+            }
             Section::Privacy => {
                 privacy_synced(ui, synced, &mut self.synced, pal);
                 ui.add_space(12.0);
@@ -912,6 +935,31 @@ impl SettingsPage {
                      and images are freed. Lower = less RAM, more reloading.",
                 );
                 ui.add_space(8.0);
+                label(ui, pal, "IMAGE CACHE ON DISK");
+                ui.add(
+                    egui::Slider::new(&mut config.image_cache_mb, 0..=crate::image_cache::MAX_MB)
+                        .suffix(" MB"),
+                );
+                hint(
+                    ui,
+                    pal,
+                    "Pictures you've already seen are kept on this PC so they aren't                      downloaded again. The least recently used ones are deleted past this                      size. It uses disk space, not RAM; 0 turns it off.",
+                );
+                ui.add_space(4.0);
+                let used = crate::image_cache::used_bytes();
+                if ui
+                    .add_enabled(
+                        used > 0,
+                        egui::Button::new(icons::label(
+                            icons::TRASH,
+                            &format!("Clear cache ({:.0} MB)", used as f64 / 1_048_576.0),
+                        )),
+                    )
+                    .clicked()
+                {
+                    crate::image_cache::clear_async(ui.ctx());
+                }
+                ui.add_space(8.0);
                 hint(
                     ui,
                     pal,
@@ -919,6 +967,7 @@ impl SettingsPage {
                 );
                 memory_panel(ui, pal, self.mem_sample.map(|(_, m)| m), self.mem.as_ref());
             }
+            Section::Developer => developer(ui, config, pal),
             Section::About => {
                 ui.label(
                     RichText::new(format!("RustCord {}", env!("CARGO_PKG_VERSION")))
@@ -930,6 +979,15 @@ impl SettingsPage {
                 ui.hyperlink_to(
                     "GitHub: KeoLogs/rustcord",
                     "https://github.com/KeoLogs/rustcord",
+                );
+                ui.add_space(8.0);
+                switch_row(
+                    ui,
+                    &mut config.check_for_updates,
+                    "Check for updates",
+                    "Once a day at most, ask GitHub whether a newer RustCord is out and \
+                     show a small notice. Nothing is ever downloaded or installed for you.",
+                    pal,
                 );
                 ui.add_space(8.0);
                 // Discord Messenger credit (MIT): RustCord ports its features.
@@ -1262,8 +1320,167 @@ fn notifications(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
     hint(
         ui,
         pal,
-        "Notification levels and mutes come from your Discord account (set them in          the official client for now). Bot accounts only notify on mentions and DMs.          Recent mentions are listed under the bell in the chat header.",
+        "Notification levels and mutes come from your Discord account: right-click a \
+         server or channel and pick Notification Settings. Bot accounts only notify on mentions and DMs.          Recent mentions are listed under the bell in the chat header.",
     );
+}
+
+/// One base-URL field with its check result under it.
+fn base_url_field(ui: &mut egui::Ui, value: &mut String, default: &str, pal: &Palette) {
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .hint_text(default)
+            .desired_width(420.0),
+    );
+    match crate::endpoints::normalize(value) {
+        Ok(None) => hint(ui, pal, "Empty: Discord's own address is used."),
+        Ok(Some(url)) => hint(ui, pal, &format!("Will use {url}")),
+        Err(e) => {
+            ui.label(
+                RichText::new(format!(
+                    "{e} Discord's own address is used until this is fixed."
+                ))
+                .small()
+                .color(pal.danger),
+            );
+        }
+    }
+}
+
+/// Developer options: custom API / CDN base URLs and the crash log test.
+fn developer(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
+    ui.label(
+        RichText::new(icons::label(
+            icons::WARNING,
+            "For developers. Leave these empty unless you know you need them.",
+        ))
+        .color(pal.danger),
+    );
+    hint(
+        ui,
+        pal,
+        "A custom API address receives everything RustCord sends to Discord, including \
+         your login token. Only use a server you run yourself. It must be https:// \
+         (http:// works for localhost only); certificate checks always stay on.",
+    );
+    ui.add_space(10.0);
+    label(ui, pal, "API BASE URL");
+    base_url_field(
+        ui,
+        &mut config.api_base_url,
+        crate::endpoints::DEFAULT_API,
+        pal,
+    );
+    hint(ui, pal, "Applies the next time you log in.");
+    ui.add_space(10.0);
+    label(ui, pal, "CDN BASE URL");
+    base_url_field(
+        ui,
+        &mut config.cdn_base_url,
+        crate::endpoints::DEFAULT_CDN,
+        pal,
+    );
+    hint(
+        ui,
+        pal,
+        "Avatars, icons, emoji and attachments on cdn.discordapp.com load from here.",
+    );
+    ui.add_space(8.0);
+    if ui
+        .add_enabled(
+            !config.api_base_url.is_empty() || !config.cdn_base_url.is_empty(),
+            egui::Button::new(icons::label(icons::RESET, "Reset to Discord's")),
+        )
+        .clicked()
+    {
+        config.api_base_url.clear();
+        config.cdn_base_url.clear();
+    }
+    ui.add_space(14.0);
+    label(ui, pal, "CRASH LOG");
+    let note_id = egui::Id::unique("rc_dev_crash_note");
+    if ui
+        .button(icons::label(icons::BUG, "Write a test crash report"))
+        .on_hover_text("RustCord doesn't crash; it only writes a sample report")
+        .clicked()
+    {
+        let note = match crate::crash_report::write_test_report() {
+            Ok(path) => format!(
+                "Written to {}. Restart RustCord to see the notice.",
+                path.display()
+            ),
+            Err(e) => format!("Couldn't write it: {e}"),
+        };
+        ui.data_mut(|d| d.insert_temp(note_id, note));
+    }
+    let note = ui.data(|d| d.get_temp::<String>(note_id));
+    if let Some(note) = note {
+        hint(ui, pal, &note);
+    }
+    hint(
+        ui,
+        pal,
+        "Crash reports stay on this PC, with your token cut out. Nothing is uploaded.",
+    );
+}
+
+/// Notification sound: on/off, volume, a custom file and a Test button.
+fn sound_settings(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) -> Option<SettingsAction> {
+    let mut action = None;
+    ui.add_space(12.0);
+    label(ui, pal, "SOUND");
+    switch_row(
+        ui,
+        &mut config.notification_sound,
+        "Play a sound",
+        "A short ping with each notification. Off = no audio is loaded at all.",
+        pal,
+    );
+    if !config.notification_sound {
+        return None;
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(icons::SPEAKER).color(pal.muted));
+        ui.add(egui::Slider::new(&mut config.notification_volume, 0..=100).suffix("%"));
+        if ui
+            .button(icons::label(icons::PLAY, "Test"))
+            .on_hover_text("Play the sound once")
+            .clicked()
+        {
+            action = Some(SettingsAction::TestSound {
+                custom: config.notification_sound_file.clone(),
+                volume: config.notification_volume,
+            });
+        }
+    });
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        let name = config
+            .notification_sound_file
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        ui.label(
+            RichText::new(name.as_deref().unwrap_or("RustCord ping (built in)")).color(pal.strong),
+        );
+        if ui.button(icons::label(icons::FOLDER, "Browse…")).clicked() {
+            action = Some(SettingsAction::PickSound);
+        }
+        if name.is_some()
+            && ui
+                .button(icons::label(icons::RESET, "Use the built-in ping"))
+                .clicked()
+        {
+            config.notification_sound_file = None;
+        }
+    });
+    hint(
+        ui,
+        pal,
+        "Your own sound: a .wav, .ogg or .mp3 file, 1 MB at most. It stays on this PC.",
+    );
+    action
 }
 
 fn label(ui: &mut egui::Ui, pal: &Palette, text: &str) {

@@ -53,6 +53,8 @@ pub enum HomeAction {
     /// A friend without an open DM was picked from the search results:
     /// open/create the DM (`FriendsAction::Message`).
     Dm(String),
+    /// "New Group DM": open the friend picker (nothing is created yet).
+    NewGroup,
 }
 
 /// Most friend matches shown under the search field.
@@ -160,6 +162,9 @@ pub fn home_entries(ui: &mut egui::Ui, cx: &HomeCtx<'_>) -> Option<HomeAction> {
         cx.requests,
     ) {
         action = Some(HomeAction::Requests);
+    }
+    if entry(ui, cx.pal, icons::PLUS_CIRCLE, "New Group DM", false, 0) {
+        action = Some(HomeAction::NewGroup);
     }
     action
 }

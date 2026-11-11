@@ -10,19 +10,23 @@ mod backend;
 mod badge;
 mod builtin_themes;
 mod config;
+mod crash_report;
 mod demo;
 mod embed;
 mod emoji;
 mod emoji_picker;
+mod endpoints;
 mod forum;
 mod frametimes;
 mod friends;
 mod gateway;
 mod gif_picker;
+mod group_dm;
 mod history;
 mod home;
 mod http_error;
 mod icons;
+mod image_cache;
 mod invites;
 mod layout;
 mod layout_presets;
@@ -32,6 +36,8 @@ mod login;
 mod markdown;
 mod members;
 mod memstats;
+mod notices;
+mod notif_settings;
 mod notify;
 mod onboarding;
 mod paste;
@@ -52,6 +58,7 @@ mod screening;
 mod search;
 mod settings;
 mod settings_proto;
+mod sound;
 mod status;
 mod storage;
 mod sysmsg;
@@ -65,6 +72,8 @@ mod tile_fit;
 mod timefmt;
 mod types;
 mod unicode_symbols;
+mod update_check;
+mod upload;
 mod widgets;
 mod window_frame;
 
@@ -85,6 +94,9 @@ fn main() -> eframe::Result {
         (false, Some(_)) => storage::TEST_APP_ID,
         (false, None) => storage::APP_ID,
     };
+    // A panic writes a local report (token redacted) to this run's own data
+    // folder; the next start offers to copy it. Nothing is uploaded.
+    crash_report::install(eframe::storage_dir(app_id));
     let env_token = std::env::var("DISCORD_TOKEN")
         .ok()
         .filter(|t| !t.trim().is_empty());
@@ -134,6 +146,9 @@ fn main() -> eframe::Result {
             // Images (avatars, server icons, attachments, emoji) load
             // straight from Discord's CDN / Twemoji.
             egui_extras::install_image_loaders(&cc.egui_ctx);
+            // http(s) images go through the disk cache (asked before
+            // egui_extras' own http loader).
+            image_cache::install(&cc.egui_ctx, eframe::storage_dir(app_id));
             // Cascadia Mono (bundled) as the UI font, Noto Sans for "sans"
             // themes; system fonts stay the fallback for other scripts.
             theme::install_fonts(&cc.egui_ctx);

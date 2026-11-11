@@ -15,7 +15,7 @@ use crate::search::{SearchQuery, SearchResponse, SearchScope};
 use crate::threads::{CHANNEL_PRIVATE_THREAD, CHANNEL_PUBLIC_THREAD, Thread, ThreadPage};
 use crate::types::{Message, User};
 
-const API_BASE: &str = "https://discord.com/api/v10";
+const API_BASE: &str = crate::endpoints::DEFAULT_API;
 
 #[derive(Clone)]
 pub struct Api {
@@ -24,6 +24,9 @@ pub struct Api {
     auth: String,
     /// Shared 429 state (per-route buckets + global lock).
     limiter: Arc<Limiter>,
+    /// Developer options: a custom API base that replaces [`API_BASE`]
+    /// in every request (`endpoints.rs`).
+    base: Option<Arc<str>>,
 }
 
 impl Api {
@@ -35,7 +38,14 @@ impl Api {
             http,
             auth,
             limiter: Arc::default(),
+            base: None,
         })
+    }
+
+    /// Use a custom API base (already checked by `endpoints::usable`).
+    pub fn with_base(mut self, base: Option<String>) -> Self {
+        self.base = base.map(Arc::from);
+        self
     }
 
     /// Every Discord API request goes through here (the shared 429 layer).
@@ -43,9 +53,17 @@ impl Api {
     /// GETs wait for a known reset and retry once after a 429; writes are
     /// never retried and fail with a typed [`RateLimited`] instead.
     async fn send(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::Response> {
-        let req = rb.build()?;
+        let mut req = rb.build()?;
         let is_get = req.method() == reqwest::Method::GET;
         let (route, major) = ratelimit::route_key(req.method().as_str(), req.url().path());
+        // Developer options: send it to the custom API base instead.
+        if let Some(base) = &self.base
+            && let std::borrow::Cow::Owned(url) =
+                crate::endpoints::rewrite(req.url().as_str(), API_BASE, Some(base))
+            && let Ok(url) = url.parse()
+        {
+            *req.url_mut() = url;
+        }
         let max_wait = if is_get {
             ratelimit::MAX_GET_WAIT
         } else {
@@ -179,7 +197,13 @@ impl Api {
     /// Download a file from Discord's CDN (no auth header: CDN links are
     /// signed and the token must never go to other hosts).
     pub async fn download(&self, url: &str) -> Result<Vec<u8>> {
-        let resp = self.http.get(url).send().await.context("download failed")?;
+        let url = crate::endpoints::cdn_url(url);
+        let resp = self
+            .http
+            .get(url.as_ref())
+            .send()
+            .await
+            .context("download failed")?;
         Ok(Self::check(resp, "Downloading")
             .await?
             .bytes()
@@ -234,6 +258,7 @@ impl Api {
         reply_ping: bool,
         files: &[PathBuf],
         spoilers: &[bool],
+        progress: Option<crate::upload::OnProgress>,
     ) -> Result<Message> {
         let mut body = json!({ "content": content, "nonce": nonce, "enforce_nonce": true });
         if let Some(id) = reply_to {
@@ -256,7 +281,9 @@ impl Api {
             let mut parts = Vec::new();
             let mut meta = Vec::new();
             for (i, path) in files.iter().enumerate() {
-                let bytes = tokio::fs::read(path)
+                // Streamed from disk in chunks (never the whole file in
+                // memory); each chunk reports progress.
+                let (stream, len) = crate::upload::file_body(path, i, progress.clone())
                     .await
                     .with_context(|| format!("couldn't read {}", path.display()))?;
                 let mut name = path
@@ -269,7 +296,7 @@ impl Api {
                 }
                 meta.push(json!({ "id": i, "filename": name }));
                 let mime = mime_for(&name);
-                let part = reqwest::multipart::Part::bytes(bytes)
+                let part = reqwest::multipart::Part::stream_with_length(stream, len)
                     .file_name(name)
                     .mime_str(mime)?;
                 parts.push((format!("files[{i}]"), part));
@@ -744,6 +771,40 @@ impl Api {
             .await
             .context("open DM request failed")?;
         Ok(Self::check(resp, "Opening DM").await?.json().await?)
+    }
+
+    /// PATCH users/@me/guilds/<id>/settings: the user's own mute and
+    /// notification settings for a server (`@me` = DMs). Returns the new
+    /// settings object.
+    pub async fn patch_guild_settings(&self, guild_id: &str, body: &Value) -> Result<Value> {
+        let resp = self
+            .send(
+                self.http
+                    .patch(format!("{API_BASE}/users/@me/guilds/{guild_id}/settings"))
+                    .header("Authorization", &self.auth)
+                    .json(body),
+            )
+            .await
+            .context("notification settings request failed")?;
+        Ok(Self::check(resp, "Saving notification settings")
+            .await?
+            .json()
+            .await?)
+    }
+
+    /// POST users/@me/channels with several recipients: a new group DM.
+    /// Only ever called from the New Group DM dialog's Create click.
+    pub async fn create_group_dm(&self, user_ids: &[String]) -> Result<Value> {
+        let resp = self
+            .send(
+                self.http
+                    .post(format!("{API_BASE}/users/@me/channels"))
+                    .header("Authorization", &self.auth)
+                    .json(&json!({ "recipients": user_ids })),
+            )
+            .await
+            .context("create group DM request failed")?;
+        Ok(Self::check(resp, "Creating group DM").await?.json().await?)
     }
 
     /// Accept a message request.

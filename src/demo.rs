@@ -483,12 +483,18 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
     let script = [4u64, 6, 15, 25];
     let mut step = 0;
 
+    // Notification settings changed in the demo, by server id.
+    let mut notif_settings = std::collections::HashMap::<String, Value>::new();
+    // Requests that arrived while an upload was "in progress".
+    let mut backlog = std::collections::VecDeque::<ToBackend>::new();
+
     loop {
         let wait = script
             .get(step)
             .map(|s| start + Duration::from_secs(*s))
             .unwrap_or(start + Duration::from_secs(60 * 60 * 24 * 365));
         let req = tokio::select! {
+            Some(req) = std::future::ready(backlog.pop_front()) => req,
             req = rx.recv() => match req {
                 Some(r) => r,
                 None => return,
@@ -646,6 +652,42 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                 spoilers,
                 ..
             } => {
+                // Attachments "upload" for a few seconds (3 MB each if the
+                // file isn't real) so the progress bars and Cancel show.
+                let mut cancelled = false;
+                let sizes: Vec<u64> = files
+                    .iter()
+                    .map(|p| std::fs::metadata(p).map_or(3 << 20, |m| m.len().max(1)))
+                    .collect();
+                for step in 1..=12u64 {
+                    if files.is_empty() || cancelled {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    for (file, total) in sizes.iter().enumerate() {
+                        send(ToUi::UploadProgress {
+                            channel_id: channel_id.clone(),
+                            nonce: nonce.clone(),
+                            file,
+                            sent: total * step / 12,
+                            total: *total,
+                        });
+                    }
+                    while let Ok(r) = rx.try_recv() {
+                        match r {
+                            ToBackend::CancelSend { nonce: n } if n == nonce => cancelled = true,
+                            other => backlog.push_back(other),
+                        }
+                    }
+                }
+                if cancelled {
+                    send(ToUi::SendFailed {
+                        channel_id,
+                        nonce,
+                        error: crate::upload::CANCELLED.into(),
+                    });
+                    continue;
+                }
                 // Long enough to see the faded message.
                 tokio::time::sleep(Duration::from_millis(700)).await;
                 if content.to_lowercase().contains("fail") && failed_once.insert(nonce.clone()) {
@@ -727,6 +769,26 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                 "demo: mark unread #{channel_id} after {message_id} ({mention_count} mentions)"
             ),
             ToBackend::AckBulk(acks) => eprintln!("demo: ack-bulk {acks:?}"),
+            ToBackend::PatchGuildSettings { guild_id, body } => {
+                let stored = notif_settings
+                    .entry(guild_id.clone())
+                    .or_insert_with(|| json!({ "guild_id": guild_id }));
+                crate::notif_settings::apply_patch(stored, &body);
+                send(ToUi::GuildSettingsUpdated(
+                    crate::notif_settings::parse_response(stored, &guild_id),
+                ));
+            }
+            ToBackend::OpenCrashFolder(report) => {
+                tokio::task::spawn_blocking(move || crate::crash_report::open_folder(&report));
+            }
+            // Only matters while an upload is running (handled there).
+            ToBackend::CancelSend { .. } => {}
+            ToBackend::PlaySound { custom, volume } => {
+                tokio::task::spawn_blocking(move || crate::sound::play(custom.as_deref(), volume));
+            }
+            ToBackend::PickSound => send(ToUi::SoundPicked(crate::sound::pick_file().await)),
+            // A made-up newer version, so the "Update available" notice shows.
+            ToBackend::CheckUpdate => send(ToUi::LatestRelease("v99.0.0".into())),
             ToBackend::Notify { title, body } => {
                 eprintln!("demo: notification \"{title}\": {body}");
                 tokio::task::spawn_blocking(move || crate::notify::show_desktop(&title, &body));
@@ -898,6 +960,14 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                     FriendsAction::Message(id) => Ok(Outcome::DmOpened(json!({
                         "id": "403", "type": 1, "last_message_id": "1",
                         "recipients": [user(id, "Friend", None)]
+                    }))),
+                    FriendsAction::CreateGroup(ids) => Ok(Outcome::DmOpened(json!({
+                        "id": "404", "type": 3, "last_message_id": "1",
+                        "recipients": ids
+                            .iter()
+                            .enumerate()
+                            .map(|(i, id)| user(id, &format!("Friend {}", i + 1), None))
+                            .collect::<Vec<_>>()
                     }))),
                     FriendsAction::SendRequest(name) => Ok(Outcome::RequestSent(name.clone())),
                     _ => Ok(Outcome::Done),

@@ -593,6 +593,8 @@ pub struct LocalSend {
     pub error: Option<String>,
     /// Names of the files being uploaded with it.
     pub files: Vec<String>,
+    /// (sent, total) bytes per file, once the upload reports progress.
+    pub progress: Vec<(u64, u64)>,
 }
 
 /// The thread a message points at (`thread` on the message).
@@ -1004,6 +1006,18 @@ pub enum ToUi {
     UserSettingsUpdate(serde_json::Value),
     /// A short message for the user (shown briefly), e.g. "Saved …".
     Notice(String),
+    /// Bytes of one attachment handed to the network so far (throttled).
+    UploadProgress {
+        channel_id: String,
+        nonce: String,
+        file: usize,
+        sent: u64,
+        total: u64,
+    },
+    /// The "Browse…" dialog for the custom notification sound closed.
+    SoundPicked(Option<PathBuf>),
+    /// Update check: the latest release tag on GitHub (may not be newer).
+    LatestRelease(String),
     /// A user action hit Discord's rate limit (it is not retried): show
     /// "Slow down, try again in Ns" and hold write controls until then.
     RateLimited(crate::ratelimit::RateLimited),
@@ -1178,6 +1192,31 @@ pub enum ToBackend {
     /// Manual "Reconnect" in the connection status: drop the gateway
     /// connection and connect again now (resuming if possible).
     Reconnect,
+    /// "Open folder" on the crash notice: show that local folder in the
+    /// file manager.
+    OpenCrashFolder(PathBuf),
+    /// A click in the Notification Settings dialog: PATCH the user's own
+    /// settings for this server (`notif_settings.rs`; user accounts).
+    PatchGuildSettings {
+        guild_id: String,
+        body: serde_json::Value,
+    },
+    /// "Cancel" on an uploading message (nonce): drop the request. The
+    /// message then shows as not sent, with Retry / Delete.
+    CancelSend {
+        nonce: String,
+    },
+    /// Play the notification sound (`sound.rs`): the bundled ping, or the
+    /// user's file. Local only.
+    PlaySound {
+        custom: Option<PathBuf>,
+        volume: u8,
+    },
+    /// Open the file dialog for the custom notification sound.
+    PickSound,
+    /// Ask GitHub for the latest RustCord release (at most once a day;
+    /// `update_check.rs`). Nothing is downloaded.
+    CheckUpdate,
     /// "Copy Image" in an image's menu: download it (CDN, no token) and
     /// hand it back as `ToUi::CopyImage`.
     CopyImage {

@@ -907,6 +907,9 @@ fn apply_update(config: &mut Config, u: ConfigUpdate) {
         ConfigUpdate::FavouriteGif(g) => {
             crate::gif_picker::toggle_favourite(&mut config.favourite_gifs, &g)
         }
+        ConfigUpdate::UpdateChecked(at) => config.last_update_check = at,
+        ConfigUpdate::LatestRelease(tag) => config.latest_release = Some(tag),
+        ConfigUpdate::DismissUpdate(tag) => config.dismissed_update = Some(tag),
     }
 }
 
@@ -960,6 +963,12 @@ impl eframe::App for RustCordApp {
         apply_config_updates(&mut self.config, state);
         if let Some(session) = &mut self.session {
             save_account(&self.vault, &mut self.config, session, state);
+        }
+        if let Some(path) = state.picked_sound.take()
+            && let Some(page) = &mut self.settings
+            && let Err(e) = page.set_sound_file(path)
+        {
+            state.toast = Some((e, Instant::now()));
         }
         if let Some(path) = state.picked_theme.take() {
             // Small file copies; the picker itself ran in the backend.
@@ -1071,6 +1080,8 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
     app.sync_windows(&ctx);
     app.update_title(&ctx);
     timefmt::set_12_hour(app.config.use_12_hour_time);
+    crate::image_cache::set_limit_mb(app.config.image_cache_mb);
+    crate::endpoints::set_cdn(&app.config.cdn_base_url);
     let pal = app.active_theme.palette;
 
     // ---- Login screen
@@ -1199,6 +1210,12 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
             }
             Some(SettingsAction::PickPreset) => {
                 let _ = state.tx.send(ToBackend::PickPreset);
+            }
+            Some(SettingsAction::PickSound) => {
+                let _ = state.tx.send(ToBackend::PickSound);
+            }
+            Some(SettingsAction::TestSound { custom, volume }) => {
+                let _ = state.tx.send(ToBackend::PlaySound { custom, volume });
             }
             Some(SettingsAction::ExportPreset { file_name, text }) => {
                 let _ = state.tx.send(ToBackend::ExportPreset { file_name, text });
@@ -1389,6 +1406,12 @@ fn chat_screen(ui: &mut egui::Ui, state: &mut State, f: ChatFrame<'_>) {
     state.overlays(ui, f.config, &pal);
 }
 
+/// Where a menu's "Notification Settings" click leaves its target for the
+/// dialog (menus only have `&self`).
+fn notif_request_id() -> egui::Id {
+    egui::Id::unique("rc_notif_settings_request")
+}
+
 /// Each open account is one more gateway connection plus its caches.
 const RAM_NOTE: &str = "Each open account is one more connection + caches (~15 MB + caches)";
 
@@ -1414,7 +1437,10 @@ fn spawn_session(
 ) -> (Session, State) {
     let (ui_tx, ui_rx) = mpsc::channel();
     let (be_tx, be_rx) = tokio::sync::mpsc::unbounded_channel();
+    // A crash report must never contain this token.
+    crate::crash_report::register_secret(token.expose());
     let options = crate::backend::Options {
+        api_base: crate::endpoints::usable(&config.api_base_url),
         bot_member_intents: config.bot_member_intents,
         identity,
     };
@@ -1717,6 +1743,8 @@ enum MessageAction {
     RetrySend(String),
     /// Throw away a failed send (nonce).
     DiscardSend(String),
+    /// "Cancel" on an uploading message (nonce).
+    CancelSend(String),
     /// "Copy Image" on an image (url).
     CopyImage(String),
 }
@@ -1747,6 +1775,12 @@ pub enum ConfigUpdate {
     SkinTone(u8),
     /// Clicked a GIF's star: add to / remove from Favourites.
     FavouriteGif(Gif),
+    /// An update check was just asked for (unix time): not again today.
+    UpdateChecked(u64),
+    /// The update check's answer: the latest release tag.
+    LatestRelease(String),
+    /// "Dismiss" on the "Update available" notice for this release.
+    DismissUpdate(String),
 }
 
 // --- reactions ---
@@ -1819,6 +1853,8 @@ struct FriendsState {
     page: HomeSelected,
     friends_page: FriendsPage,
     requests_page: MessageRequestsPage,
+    /// The New Group DM friend picker, while it is open.
+    group_dm: Option<crate::group_dm::GroupDmDialog>,
 }
 
 // --- search ---
@@ -1967,6 +2003,9 @@ pub struct State {
     /// A theme file / folder picked in Settings → Themes, for the app to
     /// import.
     picked_theme: Option<PathBuf>,
+    /// A custom notification sound picked in Settings (the app hands it to
+    /// the settings page).
+    picked_sound: Option<PathBuf>,
     /// Settings → Presets file picker / export result (the app owns the store).
     preset_file: Option<crate::presets::FileEvent>,
     last_typing_sent: Option<(String, Instant)>,
@@ -2067,6 +2106,10 @@ pub struct State {
     ac: Autocomplete,
     /// Short notice at the bottom of the chat ("Saved …").
     toast: Option<(String, Instant)>,
+    /// An update check was already asked for in this session.
+    update_asked: bool,
+    /// The open Notification Settings dialog.
+    notif_dialog: Option<crate::notif_settings::Target>,
     /// A write action was rate limited: user write controls stay disabled
     /// and the toast counts down until then (never auto-retried).
     slow_down_until: Option<Instant>,
@@ -2127,6 +2170,7 @@ impl State {
             threads: None,
             invites: None,
             picked_theme: None,
+            picked_sound: None,
             preset_file: None,
             last_typing_sent: None,
             confirm_delete: None,
@@ -2176,6 +2220,8 @@ impl State {
             visited: VecDeque::new(),
             ac: Autocomplete::default(),
             toast: None,
+            update_asked: false,
+            notif_dialog: None,
             slow_down_until: None,
             config_updates: Vec::new(),
             account_action: None,
@@ -2205,6 +2251,14 @@ impl State {
                 self.status = s;
             }
             ToUi::Fatal(reason) => self.fatal = Some(reason),
+            ToUi::Ready { .. } if self.update_check_due(config) => {
+                // Once a day at most, and only GitHub's releases API.
+                let _ = self.tx.send(ToBackend::CheckUpdate);
+                self.update_asked = true;
+                self.config_updates
+                    .push(ConfigUpdate::UpdateChecked(crate::update_check::now_unix()));
+                self.handle_event(ev, ctx, config, focused);
+            }
             ToUi::Ready {
                 me,
                 premium_type,
@@ -2371,6 +2425,22 @@ impl State {
                     // Not on screen (channel dropped): say so instead.
                     self.outbox.remove(&nonce);
                     self.toast = Some((format!("Couldn't send: {error}"), Instant::now()));
+                }
+            }
+            ToUi::UploadProgress {
+                channel_id,
+                nonce,
+                file,
+                sent,
+                total,
+            } => {
+                if let Some(local) = self
+                    .messages
+                    .get_mut(&channel_id)
+                    .and_then(|list| list.iter_mut().rev().find(|m| m.id == nonce))
+                    .and_then(|m| m.local.as_mut())
+                {
+                    crate::upload::apply(&mut local.progress, file, sent, total);
                 }
             }
             ToUi::CopyImage(img) => {
@@ -2742,6 +2812,9 @@ impl State {
                 }
             }
             ToUi::Notice(text) => self.toast = Some((text, Instant::now())),
+            ToUi::LatestRelease(tag) => {
+                self.config_updates.push(ConfigUpdate::LatestRelease(tag));
+            }
             ToUi::RateLimited(rl) => self.rate_limited(rl),
             ToUi::GuildEmojis { guild_id, emojis } => {
                 if let Some(g) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
@@ -2751,6 +2824,7 @@ impl State {
             }
             // --- themes --- (the app imports it: it owns the ThemeStore)
             ToUi::ThemePicked(path) => self.picked_theme = path,
+            ToUi::SoundPicked(path) => self.picked_sound = path,
             ToUi::PresetFile(e) => self.preset_file = Some(e),
             // --- onboarding ---
             ToUi::InviteResolved { code, result } => {
@@ -3929,6 +4003,11 @@ impl State {
             HomeAction::Dm(user_id) => {
                 self.friends_action(FriendsAction::Message(user_id), ctx, config)
             }
+            HomeAction::NewGroup => {
+                if let Some(fs) = &mut self.friends {
+                    fs.group_dm = Some(Default::default());
+                }
+            }
         }
     }
 
@@ -4652,6 +4731,12 @@ impl State {
             let _ = self.tx.send(ToBackend::Notify {
                 title,
                 body: notify::preview(&plain, 200),
+            });
+        }
+        if config.notification_sound {
+            let _ = self.tx.send(ToBackend::PlaySound {
+                custom: config.notification_sound_file.clone(),
+                volume: config.notification_volume,
             });
         }
         if config.flash_taskbar && !focused {
@@ -5476,6 +5561,10 @@ impl State {
                 if badge.muted {
                     widgets::menu_note(ui, icons::BELL_SLASH, "Muted", pal);
                 }
+                self.notif_menu_item(ui, config, pal, || crate::notif_settings::Target::Guild {
+                    guild_id: g.id.clone(),
+                    name: g.name.clone(),
+                });
                 widgets::menu_separator(ui, pal);
                 if self.invites.is_some()
                     && g.features.iter().any(|f| f == crate::onboarding::FEATURE)
@@ -6004,6 +6093,13 @@ impl State {
                                         if muted {
                                             widgets::menu_note(ui, icons::BELL_SLASH, "Muted", pal);
                                         }
+                                        self.notif_menu_item(ui, config, pal, || {
+                                            crate::notif_settings::Target::Channel {
+                                                guild_id: guild.id.clone(),
+                                                channel_id: c.id.clone(),
+                                                name: c.label(),
+                                            }
+                                        });
                                         widgets::menu_separator(ui, pal);
                                         if c.is_dm()
                                             && widgets::menu_item(
@@ -6877,6 +6973,9 @@ impl State {
             }
             Some(MessageAction::OpenThread(_)) => {}
             Some(MessageAction::RetrySend(nonce)) => self.retry_send(&channel_id, &nonce, true),
+            Some(MessageAction::CancelSend(nonce)) => {
+                let _ = self.tx.send(ToBackend::CancelSend { nonce });
+            }
             Some(MessageAction::DiscardSend(nonce)) => {
                 self.retry_send(&channel_id, &nonce, false);
             }
@@ -8284,6 +8383,7 @@ impl State {
             m.nonce = Some(nonce.clone());
             m.local = Some(Box::new(crate::types::LocalSend {
                 error: None,
+                progress: Vec::new(),
                 files: out
                     .files
                     .iter()
@@ -8354,6 +8454,7 @@ impl State {
             .and_then(|m| m.local.as_mut())
         {
             l.error = None;
+            l.progress.clear();
         }
         if let Some(out) = self.outbox.get(nonce) {
             self.send_outgoing(nonce, out);
@@ -8456,6 +8557,172 @@ impl State {
     }
 
     /// Profile card, pins, dialogs and the "drop files here" overlay.
+    /// The New Group DM friend picker. The group is created only by its
+    /// Create button.
+    fn group_dm_dialog(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let Some(fs) = &mut self.friends else {
+            return;
+        };
+        let Some(dialog) = &mut fs.group_dm else {
+            return;
+        };
+        let avatar = |ui: &egui::Ui, r: egui::Rect, u: &User| {
+            paint_avatar(ui, r, &u.id, &u.name, &u.avatar_url, config, pal);
+        };
+        match dialog.show(ctx, pal, &fs.rels, &avatar) {
+            Some(crate::group_dm::GroupDmEvent::Close) => fs.group_dm = None,
+            Some(crate::group_dm::GroupDmEvent::Create(action)) => {
+                fs.group_dm = None;
+                self.friends_action(action, ctx, config);
+            }
+            None => {}
+        }
+    }
+
+    /// "Notification Settings" in a server / channel right-click menu
+    /// (Notifications module, user accounts). Opens the dialog; nothing
+    /// is sent here.
+    fn notif_menu_item(
+        &self,
+        ui: &mut egui::Ui,
+        config: &Config,
+        pal: &Palette,
+        target: impl FnOnce() -> crate::notif_settings::Target,
+    ) {
+        if !config.modules.notifications || self.is_bot_session() {
+            return;
+        }
+        if widgets::menu_item(
+            ui,
+            Some(icons::BELL),
+            "Notification Settings",
+            Tone::Normal,
+            pal,
+        )
+        .clicked()
+        {
+            let target = target();
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(notif_request_id(), Some(target)));
+        }
+    }
+
+    /// The Notification Settings dialog: each click is one PATCH of the
+    /// user's own settings; Discord's answer updates `mutes`.
+    fn notif_settings_dialog(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let asked = ctx.data_mut(|d| {
+            d.remove_temp::<Option<crate::notif_settings::Target>>(notif_request_id())
+        });
+        if let Some(Some(target)) = asked {
+            self.notif_dialog = Some(target);
+        }
+        if !config.modules.notifications {
+            self.notif_dialog = None;
+        }
+        let Some(target) = &self.notif_dialog else {
+            return;
+        };
+        let now = crate::update_check::now_unix();
+        let settings = self.mutes.get(target.guild_id());
+        match crate::notif_settings::show(ctx, pal, target, settings, now) {
+            Some(crate::notif_settings::Event::Close) => self.notif_dialog = None,
+            Some(crate::notif_settings::Event::Patch(body)) => {
+                if let Some(secs) = self.slow_down_secs() {
+                    self.toast = Some((format!("Slow down, try again in {secs}s"), Instant::now()));
+                } else {
+                    let _ = self.tx.send(ToBackend::PatchGuildSettings {
+                        guild_id: target.guild_id().to_owned(),
+                        body,
+                    });
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn update_check_due(&self, config: &Config) -> bool {
+        !self.update_asked
+            && crate::update_check::due(
+                config.check_for_updates,
+                config.last_update_check,
+                crate::update_check::now_unix(),
+            )
+    }
+
+    /// Bottom-right notice cards ("Update available", the crash report
+    /// from last time). Buttons only.
+    fn corner_notices(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let mut slot = 0;
+        if let Some(report) = crate::crash_report::pending() {
+            match crate::notices::card(
+                ctx,
+                pal,
+                slot,
+                icons::BUG,
+                "RustCord closed unexpectedly last time",
+                "A crash report was saved on this PC (your token is never in it). \
+                 Nothing is sent anywhere.",
+                &[
+                    (icons::COPY, "Copy report"),
+                    (icons::FOLDER, "Open folder"),
+                    (icons::X, "Dismiss"),
+                ],
+            ) {
+                Some(0) => {
+                    match crate::crash_report::read(&report) {
+                        Some(text) => {
+                            ctx.copy_text(text);
+                            self.toast = Some(("Crash report copied".into(), Instant::now()));
+                        }
+                        None => {
+                            self.toast =
+                                Some(("Couldn't read the crash report".into(), Instant::now()));
+                        }
+                    }
+                    crate::crash_report::mark_seen(&report);
+                }
+                Some(1) => {
+                    crate::crash_report::mark_seen(&report);
+                    let _ = self.tx.send(ToBackend::OpenCrashFolder(report));
+                }
+                Some(_) => crate::crash_report::dismiss(),
+                None => {}
+            }
+            slot += 1;
+        }
+        let current = env!("CARGO_PKG_VERSION");
+        if let Some(tag) = crate::update_check::notice(
+            config.check_for_updates,
+            config.latest_release.as_deref(),
+            config.dismissed_update.as_deref(),
+            current,
+        ) {
+            let text = format!(
+                "RustCord {} is out (you have {current}). Nothing is downloaded or \
+                 installed for you.",
+                tag.trim_start_matches(['v', 'V'])
+            );
+            match crate::notices::card(
+                ctx,
+                pal,
+                slot,
+                icons::DOWNLOAD,
+                "Update available",
+                &text,
+                &[
+                    (icons::ARROW_SQUARE_OUT, "Open release page"),
+                    (icons::X, "Dismiss"),
+                ],
+            ) {
+                Some(0) => self.open_link(crate::update_check::RELEASES_PAGE, ctx, config),
+                Some(_) => self
+                    .config_updates
+                    .push(ConfigUpdate::DismissUpdate(tag.to_owned())),
+                None => {}
+            }
+        }
+    }
+
     fn overlays(&mut self, ui: &mut egui::Ui, config: &Config, pal: &Palette) {
         let ctx = ui.ctx().clone();
         self.thread_modal(&ctx, config, pal);
@@ -8463,6 +8730,9 @@ impl State {
         self.popout_overlay(&ctx, config, pal);
         self.pins_overlay(&ctx, config, pal);
         self.dialogs(&ctx, config, pal);
+        self.corner_notices(&ctx, config, pal);
+        self.group_dm_dialog(&ctx, config, pal);
+        self.notif_settings_dialog(&ctx, config, pal);
 
         // Drag-and-drop hint
         let hovering_files = ui.input(|i| !i.raw.hovered_files.is_empty());
@@ -10549,15 +10819,43 @@ fn local_status(ui: &mut egui::Ui, m: &Message, pal: &Palette, action: &mut Opti
         return;
     };
     if !local.files.is_empty() && local.error.is_none() {
-        ui.label(
-            RichText::new(format!(
-                "{} Uploading {}…",
-                icons::PAPERCLIP,
-                local.files.join(", ")
-            ))
-            .size(12.0)
-            .color(pal.muted),
-        );
+        // One bar per attachment, then Cancel (only ever on the click).
+        for (i, name) in local.files.iter().enumerate() {
+            let (sent, total) = local.progress.get(i).copied().unwrap_or((0, 0));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(
+                    RichText::new(format!("{} {name}", icons::PAPERCLIP))
+                        .size(12.0)
+                        .color(pal.muted),
+                );
+                let started = total > 0;
+                let (rect, _) = ui.allocate_exact_size(vec2(120.0, 6.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 3.0, pal.divider);
+                if started {
+                    let mut done = rect;
+                    done.set_width(rect.width() * crate::upload::fraction(sent, total));
+                    ui.painter().rect_filled(done, 3.0, pal.accent);
+                }
+                ui.label(
+                    RichText::new(if started {
+                        crate::upload::label(sent, total)
+                    } else {
+                        "Waiting…".to_owned()
+                    })
+                    .size(12.0)
+                    .color(pal.muted),
+                );
+            });
+        }
+        if ui
+            .link(RichText::new("Cancel").size(12.0).color(pal.danger))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Stop this upload")
+            .clicked()
+        {
+            *action = Some(MessageAction::CancelSend(m.id.clone()));
+        }
     }
     let Some(error) = &local.error else {
         return;

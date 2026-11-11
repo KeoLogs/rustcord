@@ -82,6 +82,7 @@ pub const X: &str = "\u{E4F6}";
 // Window controls (`window_frame`)
 pub const MINUS: &str = "\u{E32A}";
 pub const SQUARE: &str = "\u{E45E}";
+pub const CHECK_SQUARE: &str = "\u{E186}";
 pub const QR_CODE: &str = "\u{E3E6}";
 pub const ARROW_CLOCKWISE: &str = "\u{E036}";
 pub const DEVICE_MOBILE: &str = "\u{E1E0}";
@@ -108,6 +109,9 @@ pub const INFO: &str = "\u{E2CE}";
 // Settings / misc
 pub const SIGN_OUT: &str = "\u{E42A}";
 pub const RESET: &str = "\u{E038}";
+pub const PLAY: &str = "\u{E3D0}";
+pub const CODE: &str = "\u{E1BC}";
+pub const BUG: &str = "\u{E5F4}";
 pub const MOVE: &str = "\u{E0A4}";
 pub const LAYOUT: &str = "\u{E6D6}";
 pub const PUZZLE: &str = "\u{E596}";

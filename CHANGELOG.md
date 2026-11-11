@@ -6,6 +6,41 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## Unreleased
+- Developer options (Settings → Developer): custom API and CDN base URLs
+  (https only, http for localhost; empty = Discord's). The API address
+  applies from the next login. Also a "Write a test crash report" button.
+  There is no switch to turn certificate checks off.
+- Local crash log: if RustCord crashes, a short report (version, where,
+  the error) is written to its data folder with your token cut out. The
+  next start shows "RustCord closed unexpectedly last time" with
+  Copy report / Open folder / Dismiss. Nothing is ever uploaded; the five
+  newest reports are kept.
+- Mute and notification settings (Notifications module, user accounts):
+  right-click a server or channel → "Notification Settings" to mute it
+  (15 minutes to 24 hours, or until you turn it back on), unmute it, or
+  pick All messages / Only @mentions / Nothing. Each click changes your
+  own Discord settings; nothing is sent without one.
+- New Group DM (Friends module): "New Group DM" in the DM list opens a
+  friend picker (up to 9 friends, with a filter). The group is created
+  only when you press Create; one friend opens the ordinary DM.
+- Upload progress: a message with attachments shows a progress bar per
+  file while it uploads, and a Cancel link. A cancelled upload shows as
+  not sent with Retry and Delete. Files are now streamed from disk instead
+  of being read into memory whole.
+- Notification sound: RustCord's own short ping plays with each
+  notification. Settings → Notifications has the on/off switch, a volume
+  slider, a Test button and "Browse…" for your own sound (wav, ogg or mp3,
+  1 MB at most). Audio is only loaded while a sound plays.
+- Update check: once a day at most, RustCord asks GitHub whether a newer
+  release exists and shows a small "Update available" notice with
+  "Open release page" and "Dismiss". Nothing is downloaded or installed.
+  Settings → About → "Check for updates" turns it off.
+- Disk image cache: pictures you've already seen are kept on this PC (up to
+  200 MB, least recently used deleted first) so they aren't downloaded
+  again. Settings → Performance has the size (0 = off) and a
+  "Clear cache (X MB)" button. It uses disk space, not RAM.
+
 ## 0.10.0: DM core (history paging, first unread, optimistic send)
 - Chat history like Discord's (Brief A): scrolling near the top loads 50
   older messages at a time and the view stays where it was; a "Load more"
