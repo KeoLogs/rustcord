@@ -181,6 +181,10 @@ Offline demo with fake data (no token, no Discord connection):
 RUSTCORD_DEMO=1 cargo run
 ```
 
+The login screen's "Try the offline demo" link starts the same demo as a
+separate RustCord process (the login window closes). A demo never reads or
+writes your real settings, saved accounts or credential store.
+
 On Windows Command Prompt use `set "DISCORD_TOKEN=Bot <token>"` then `cargo run`.
 On Windows PowerShell:
 

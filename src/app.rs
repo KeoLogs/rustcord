@@ -117,6 +117,14 @@ pub struct RustCordApp {
     /// is locked, unlike capturing the window from outside.
     demo_shot_path: Option<String>,
     demo_shot_asked: bool,
+    /// This process is a demo (`RUSTCORD_DEMO=1`: demo storage, in-memory
+    /// vault). Only then may a demo session run; the login screen's demo
+    /// link starts a separate demo process instead.
+    demo: bool,
+    /// Start-up recovery of saved accounts whose credential store entry
+    /// is missing from `Config::accounts` (`accounts::missing_accounts`):
+    /// their metadata, as the backend looks it up.
+    recovery: Option<Receiver<SavedAccount>>,
 }
 
 impl RustCordApp {
@@ -211,7 +219,14 @@ impl RustCordApp {
                 .then(|| std::env::var("RUSTCORD_DEMO_SHOT").ok())
                 .flatten(),
             demo_shot_asked: false,
+            demo,
+            recovery: None,
         };
+        // Saved logins whose entry survived in the credential store but
+        // dropped out of the config list come back (Windows; capped).
+        if !demo {
+            app.recovery = start_account_recovery(&app.vault, &app.config, &cc.egui_ctx);
+        }
 
         // Log in straight away if we can: demo, DISCORD_TOKEN, or a saved
         // account (DISCORD_TOKEN is never saved).
@@ -247,6 +262,11 @@ impl RustCordApp {
         demo: bool,
         account: Option<String>,
     ) {
+        // A demo session only runs in a demo process, never with the real
+        // config, accounts and credential store.
+        if demo && !self.demo {
+            return;
+        }
         crate::config::live::sync(&self.config.modules);
         // "Show as" is per account: the config mirrors this account's choice.
         let data = account
@@ -320,6 +340,45 @@ impl RustCordApp {
         };
         self.log_out(None, false);
         self.start_session(ctx, token, false, Some(user_id.to_string()));
+    }
+
+    /// Take recovered saved accounts (see `start_account_recovery`) into
+    /// the config. If the app is still on the login screen with nothing
+    /// running, log in to the start-up account, as a normal start would.
+    fn drain_recovery(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.recovery else {
+            return;
+        };
+        let mut added = Vec::new();
+        let done = loop {
+            match rx.try_recv() {
+                Ok(account) => {
+                    let name = account.display_name.clone();
+                    if crate::accounts::add_recovered(&mut self.config, account) {
+                        added.push(name);
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break false,
+                Err(mpsc::TryRecvError::Disconnected) => break true,
+            }
+        };
+        if done {
+            self.recovery = None;
+        }
+        if added.is_empty() {
+            return;
+        }
+        // Only an untouched login screen (nothing typed, no QR scan).
+        let idle_login = matches!(&self.screen, Screen::Login(f) if f.token.is_empty() && f.qr.is_none())
+            && self.session.is_none()
+            && self.add_account.is_none();
+        if idle_login
+            && self.config.remember_login
+            && let Some((token, account)) = self.vault.startup_token(&self.config)
+        {
+            self.start_session(ctx, token, false, account);
+        }
+        self.toast(&format!("Restored saved login: {}", added.join(", ")));
     }
 
     /// A short notice in the main window.
@@ -675,12 +734,7 @@ impl RustCordApp {
         self.stash_account_data();
         self.add_account = None;
         if forget_token && let Some(session) = &self.session {
-            if let Some(id) = session.account.clone() {
-                let _ = self.vault.forget(&mut self.config, &id);
-            } else if !session.saved {
-                // A migrated token that never reached READY.
-                let _ = self.vault.clear_pending();
-            }
+            forget_session_login(&self.vault, &mut self.config, session);
         }
         self.settings = None;
         self.editing_layout = false;
@@ -844,6 +898,7 @@ impl eframe::App for RustCordApp {
             self.config.taskbar_badge,
             crate::taskbar::rgb(self.active_theme.palette.danger),
         );
+        self.drain_recovery(ctx);
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
@@ -960,8 +1015,16 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
             Some(LoginAction::Login { token, remember }) => {
                 app.login_with(&ctx, token, remember);
             }
-            Some(LoginAction::Demo) => {
+            Some(LoginAction::Demo) if app.demo => {
                 app.start_session(&ctx, Token::new(""), true, None);
+            }
+            Some(LoginAction::Demo) => {
+                // A separate demo process (demo storage, in-memory vault);
+                // this window closes and keeps the real config untouched.
+                match crate::storage::launch_demo() {
+                    Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                    Err(e) => form.error = Some(format!("Couldn't start the demo: {e}")),
+                }
             }
             None => {}
         }
@@ -1452,6 +1515,40 @@ struct Session {
 /// After READY: store a remembered login under its user id (re-keying a
 /// migrated pending token) and refresh its name / avatar. Runs once per
 /// session; a failure only shows a toast.
+/// "Log Out" / a dead login: remove only this session's saved account
+/// (and a pending, not yet re-keyed token). A demo session has no saved
+/// account and never touches the store or the list.
+fn forget_session_login(vault: &Vault, config: &mut Config, session: &Session) {
+    if session.demo {
+        return;
+    }
+    if let Some(id) = &session.account {
+        let _ = vault.forget(config, id);
+    } else if !session.saved {
+        // A migrated token that never reached READY.
+        let _ = vault.clear_pending();
+    }
+}
+
+/// Start-up: stored `account:<id>` logins missing from `config.accounts`
+/// (`accounts::missing_accounts`, at most `MAX_ACCOUNTS`) are looked up by
+/// the backend (`GET users/@me`) so the switcher gets them back.
+fn start_account_recovery(
+    vault: &Vault,
+    config: &Config,
+    ctx: &egui::Context,
+) -> Option<Receiver<SavedAccount>> {
+    let ids = crate::accounts::missing_accounts(config, &crate::accounts::stored_account_ids());
+    let lookups: Vec<(String, Token)> = ids
+        .into_iter()
+        .filter_map(|id| match vault.token(&id) {
+            Ok(Some(t)) if !t.is_empty() => Some((id, t)),
+            _ => None,
+        })
+        .collect();
+    (!lookups.is_empty()).then(|| crate::backend::spawn_account_lookup(lookups, ctx.clone()))
+}
+
 fn save_account(vault: &Vault, config: &mut Config, session: &mut Session, state: &mut State) {
     if session.saved || session.demo {
         return;
@@ -10811,5 +10908,84 @@ fn human_size(bytes: u64) -> String {
         format!("{:.0} KB", b / 1024.0)
     } else {
         format!("{b} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn saved(id: &str) -> SavedAccount {
+        SavedAccount {
+            user_id: id.into(),
+            username: format!("user{id}"),
+            display_name: format!("User {id}"),
+            ..Default::default()
+        }
+    }
+
+    /// A real config with two saved accounts (tokens in the vault).
+    fn real() -> (Vault, Config) {
+        let vault = Vault::memory();
+        let mut config = Config {
+            remember_login: true,
+            ..Config::default()
+        };
+        for id in ["1", "2"] {
+            vault
+                .save(&mut config, saved(id), &Token::new(format!("tok{id}")))
+                .unwrap();
+        }
+        (vault, config)
+    }
+
+    /// The bug: a demo session ran on the real config and vault. Nothing a
+    /// demo session does at READY, on "Log Out" or on a dead login may
+    /// change the saved accounts.
+    #[test]
+    fn demo_session_never_changes_saved_accounts() {
+        let (vault, mut config) = real();
+        let before = config.clone();
+        let (_ui_tx, ui_rx) = mpsc::channel();
+        let (be_tx, _be_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(ui_rx, be_tx);
+        state.me = Some(crate::types::User {
+            id: "1".into(),
+            name: "Demo".into(),
+            username: "demo".into(),
+            ..Default::default()
+        });
+        let mut session = Session {
+            token: Token::new(""),
+            demo: true,
+            account: None,
+            saved: false,
+        };
+        save_account(&vault, &mut config, &mut session, &mut state);
+        forget_session_login(&vault, &mut config, &session);
+        // Even a demo session that claims an account id forgets nothing.
+        session.account = Some("1".into());
+        forget_session_login(&vault, &mut config, &session);
+        assert_eq!(config.accounts, before.accounts);
+        assert_eq!(config.last_account, before.last_account);
+        assert!(vault.token("1").unwrap().is_some());
+        assert!(vault.token("2").unwrap().is_some());
+    }
+
+    /// "Log Out" of a real session still removes only that account.
+    #[test]
+    fn real_log_out_removes_only_its_account() {
+        let (vault, mut config) = real();
+        let session = Session {
+            token: Token::new("tok1"),
+            demo: false,
+            account: Some("1".into()),
+            saved: true,
+        };
+        forget_session_login(&vault, &mut config, &session);
+        let ids: Vec<&str> = config.accounts.iter().map(|a| a.user_id.as_str()).collect();
+        assert_eq!(ids, vec!["2"]);
+        assert!(vault.token("1").unwrap().is_none());
+        assert!(vault.token("2").unwrap().is_some());
     }
 }
