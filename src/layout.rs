@@ -568,14 +568,14 @@ impl Behavior<Pane> for LayoutBehavior<'_> {
         if self.editing { 6.0 } else { 0.0 }
     }
 
-    fn resize_stroke(&self, _style: &egui::Style, resize_state: egui_tiles::ResizeState) -> Stroke {
-        match resize_state {
-            egui_tiles::ResizeState::Idle => Stroke::NONE,
-            egui_tiles::ResizeState::Hovering => {
-                Stroke::new(2.0, self.pal.accent.gamma_multiply(0.6))
-            }
-            egui_tiles::ResizeState::Dragging => Stroke::new(2.0, self.pal.accent),
-        }
+    fn resize_stroke(
+        &self,
+        _style: &egui::Style,
+        _resize_state: egui_tiles::ResizeState,
+    ) -> Stroke {
+        // No glow on the divider (Leo): hovering only changes the cursor to
+        // the ↔ / ↕ resize arrow, which egui_tiles sets itself.
+        Stroke::NONE
     }
 
     fn min_size(&self) -> f32 {

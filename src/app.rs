@@ -6825,7 +6825,13 @@ impl State {
                             .hint_text(RichText::new(hint).color(pal.muted))
                             .font(egui::FontId::proportional(15.0))
                             .frame(egui::Frame::NONE)
-                            .margin(egui::Margin::ZERO)
+                            // The text's line box keeps room for descenders,
+                            // so its letters sit above the row's centre; push
+                            // it down so it lines up with the centred + icon.
+                            .margin(egui::Margin {
+                                top: 6,
+                                ..egui::Margin::ZERO
+                            })
                             .desired_width((ui.available_width() - right_w).max(40.0))
                             .show(ui);
                         let resp = out.response;
@@ -6907,8 +6913,10 @@ impl State {
         // A frame top from another composer (the tile's, when this is the
         // thread panel's) is ignored: it must sit just above this row.
         let frame_top =
-            frame_top.filter(|t| (box_rect.top() - 40.0..=box_rect.top() + 0.5).contains(t));
-        let float_bottom = frame_top.unwrap_or(box_rect.top()) - 4.0;
+            frame_top.filter(|t| (box_rect.top() - 60.0..=box_rect.top() + 0.5).contains(t));
+        // The pane's notch label ("input") straddles the top border, so keep
+        // the floating rows clear of it, not just of the border line.
+        let float_bottom = frame_top.map_or(box_rect.top() - 4.0, |t| t - 12.0);
         // Esc cancels a reply / edit even when the message box isn't
         // focused (unless a picker or another text field has it).
         if banner.is_some()
