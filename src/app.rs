@@ -5009,6 +5009,9 @@ impl State {
             self.open_admin(&guild, tab);
             if let Some(page) = &mut self.admin {
                 page.demo_detail = detail;
+                if detail {
+                    page.demo_detail_now();
+                }
             }
             return true;
         }

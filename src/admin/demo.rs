@@ -110,6 +110,13 @@ fn load(r: &Request) -> Value {
               "bitrate": 64000, "user_limit": 0 },
         ]),
         Kind::ChannelMemberSearch => members(&r.path),
+        Kind::SearchMembers => members(&r.path),
+        Kind::LoadBans => json!([
+            { "user": { "id": "970000000000000011", "username": "spam_bot_9000",
+                        "global_name": "FREE NITRO" }, "reason": "Spam links" },
+            { "user": { "id": "970000000000000012", "username": "raider",
+                        "global_name": "Raider" }, "reason": null },
+        ]),
         _ => Value::Null,
     }
 }

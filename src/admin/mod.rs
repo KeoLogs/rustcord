@@ -28,6 +28,7 @@ use crate::types::Guild;
 
 pub mod channels;
 pub mod demo;
+pub mod members;
 pub mod overview;
 pub mod roles;
 pub mod ui;
@@ -50,6 +51,14 @@ pub enum Method {
 pub enum Kind {
     LoadGuild,
     SaveGuild,
+    SearchMembers,
+    Kick,
+    Ban,
+    LoadBans,
+    Unban,
+    Timeout,
+    SetNick,
+    SetMemberRoles,
     LoadChannels,
     CreateChannel,
     SaveChannel,
@@ -74,6 +83,14 @@ impl Kind {
         match self {
             Kind::LoadGuild => "Loading the server settings",
             Kind::SaveGuild => "Saving the server settings",
+            Kind::SearchMembers => "Searching members",
+            Kind::Kick => "Kicking the member",
+            Kind::Ban => "Banning the member",
+            Kind::LoadBans => "Loading bans",
+            Kind::Unban => "Unbanning",
+            Kind::Timeout => "Changing the timeout",
+            Kind::SetNick => "Changing the nickname",
+            Kind::SetMemberRoles => "Changing roles",
             Kind::LoadChannels => "Loading channels",
             Kind::CreateChannel => "Creating the channel",
             Kind::SaveChannel => "Saving the channel",
@@ -96,6 +113,13 @@ impl Kind {
     fn tab(self) -> Tab {
         match self {
             Kind::LoadGuild | Kind::SaveGuild => Tab::Overview,
+            Kind::LoadBans | Kind::Unban => Tab::Bans,
+            Kind::SearchMembers
+            | Kind::Kick
+            | Kind::Ban
+            | Kind::Timeout
+            | Kind::SetNick
+            | Kind::SetMemberRoles => Tab::Members,
             Kind::LoadChannels
             | Kind::CreateChannel
             | Kind::SaveChannel
@@ -336,17 +360,24 @@ pub fn id_or_null(id: &str) -> Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,
+    Bans,
+    Members,
     Channels,
     Roles,
 }
 
 /// Sidebar groups, in order.
-const NAV: &[(&str, &[Tab])] = &[("Server", &[Tab::Overview, Tab::Roles, Tab::Channels])];
+const NAV: &[(&str, &[Tab])] = &[
+    ("Server", &[Tab::Overview, Tab::Roles, Tab::Channels]),
+    ("People", &[Tab::Members, Tab::Bans]),
+];
 
 impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
+            Tab::Bans => "Bans",
+            Tab::Members => "Members",
             Tab::Channels => "Channels",
             Tab::Roles => "Roles",
         }
@@ -355,6 +386,8 @@ impl Tab {
     fn icon(self) -> &'static str {
         match self {
             Tab::Overview => icons::GEAR,
+            Tab::Bans => icons::PROHIBIT,
+            Tab::Members => icons::USERS,
             Tab::Channels => icons::HASH,
             Tab::Roles => icons::ID,
         }
@@ -367,6 +400,12 @@ impl Tab {
         let any = |bits: u64| perms & bits != 0;
         match self {
             Tab::Overview => any(perms::MANAGE_GUILD),
+            Tab::Bans => any(perms::BAN_MEMBERS),
+            Tab::Members => any(perms::KICK_MEMBERS
+                | perms::BAN_MEMBERS
+                | perms::MODERATE_MEMBERS
+                | perms::MANAGE_NICKNAMES
+                | perms::MANAGE_ROLES),
             Tab::Channels => any(perms::MANAGE_CHANNELS),
             Tab::Roles => any(perms::MANAGE_ROLES),
         }
@@ -572,6 +611,7 @@ pub struct AdminPage {
     /// tab's first editor once its data is in.
     pub demo_detail: bool,
     overview: overview::State,
+    members: members::State,
     channels: channels::State,
     roles: roles::State,
 }
@@ -589,6 +629,7 @@ impl AdminPage {
             confirm: None,
             demo_detail: false,
             overview: Default::default(),
+            members: Default::default(),
             channels: Default::default(),
             roles: Default::default(),
         };
@@ -614,6 +655,8 @@ impl AdminPage {
         let g = &self.guild_id;
         match tab {
             Tab::Overview => vec![overview::load(g)],
+            Tab::Bans => vec![members::load_bans(g)],
+            Tab::Members => Vec::new(),
             Tab::Channels => vec![channels::load(g)],
             Tab::Roles => vec![roles::load(g)],
         }
@@ -644,6 +687,7 @@ impl AdminPage {
         };
         match r.kind.tab() {
             Tab::Overview => self.overview.on_response(r.kind, &r.key, &v),
+            Tab::Members | Tab::Bans => self.members.on_response(r.kind, &r.key, &v),
             Tab::Channels => self.channels.on_response(r.kind, &r.key, &v),
             Tab::Roles => self.roles.on_response(r.kind, &r.key, &v),
         }
@@ -653,6 +697,14 @@ impl AdminPage {
                 Tab::Channels => self.channels.demo_open(),
                 _ => {}
             }
+        }
+    }
+
+    /// Demo screenshots: a tab's detail view that needs no reply first.
+    pub fn demo_detail_now(&mut self) {
+        if self.tab == Tab::Members {
+            self.demo_detail = false;
+            self.members.demo_open();
         }
     }
 
@@ -810,6 +862,8 @@ impl AdminPage {
                         let before = out.send.len();
                         match self.tab {
                             Tab::Overview => self.overview.ui(ui, cx, &mut out),
+                            Tab::Bans => self.members.bans_ui(ui, cx, &mut out),
+                            Tab::Members => self.members.ui(ui, cx, &mut out),
                             Tab::Channels => self.channels.ui(ui, cx, &mut out),
                             Tab::Roles => self.roles.ui(ui, cx, &mut out),
                         }

@@ -21,6 +21,9 @@ Settings → About). Version x.y.z:
     reorder channels and categories; topic, slowmode, age-restricted,
     bitrate and user limit; permission overwrites (allow / inherit / deny)
     for each role and member.
+  - Members: search members; change nicknames and roles; time out, kick and
+    ban (with a delete-messages window; type the name to confirm); the bans
+    list with unban. Members at or above your highest role are protected.
 
 ## 0.10.0: DM core (history paging, first unread, optimistic send)
 - Chat history like Discord's (Brief A): scrolling near the top loads 50
