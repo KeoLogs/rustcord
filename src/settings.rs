@@ -962,7 +962,7 @@ fn account(ui: &mut egui::Ui, me: Option<&User>, pal: &Palette) {
                 ui.add(
                     egui::Image::from_uri(&me.avatar_url)
                         .fit_to_exact_size(vec2(72.0, 72.0))
-                        .corner_radius(36),
+                        .corner_radius(crate::theme::avatar_shape().radius(72.0)),
                 );
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&me.name).size(20.0).bold().color(pal.strong));

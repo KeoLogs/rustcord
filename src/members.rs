@@ -541,9 +541,37 @@ impl MemberList {
         from_groups.max(self.rows.len())
     }
 
+    /// How many bots, only when the whole list is loaded (every row
+    /// filled in and as many members as Discord counts). `None` otherwise:
+    /// a partial number would be wrong.
+    pub fn exact_bots(&self) -> Option<u32> {
+        if self.rows.is_empty() || self.rows.iter().any(Option::is_none) {
+            return None;
+        }
+        if self.rows.len() < self.total_rows() {
+            return None;
+        }
+        let members = self
+            .rows
+            .iter()
+            .flatten()
+            .filter(|r| matches!(r, Row::Member(_)))
+            .count() as u32;
+        if self.member_count > 0 && members < self.member_count {
+            return None;
+        }
+        Some(count_bots(self.rows.iter().flatten()))
+    }
+
     pub fn row(&self, i: usize) -> Option<&Row> {
         self.rows.get(i).and_then(Option::as_ref)
     }
+}
+
+/// Bots among the member rows.
+pub fn count_bots<'a>(rows: impl Iterator<Item = &'a Row>) -> u32 {
+    rows.filter(|r| matches!(r, Row::Member(m) if m.user.bot))
+        .count() as u32
 }
 
 /// (online, offline) among the member rows.
@@ -565,40 +593,162 @@ pub fn count_online<'a>(rows: impl Iterator<Item = &'a Row>, presences: &Presenc
     (on, off)
 }
 
-/// The member pane header: a green pill with the online count and a grey
-/// one with the offline count, from `left` along `center_y`.
-pub fn count_pills(
-    ui: &egui::Ui,
-    left: f32,
-    center_y: f32,
-    online: u32,
-    offline: u32,
-    pal: &Palette,
-) {
-    let mut x = left;
-    for (n, fill, tip, key) in [
-        (online, pal.online, format!("{online} online"), "pill_on"),
-        (
-            offline,
-            pal.offline,
-            format!("{offline} offline"),
-            "pill_off",
-        ),
-    ] {
-        let galley = ui.painter().layout_no_wrap(
-            n.to_string(),
-            crate::theme::bold_font(12.0),
-            Color32::WHITE,
-        );
-        let h = 20.0;
-        let w = (galley.size().x + 16.0).max(h + 8.0);
-        let rect = egui::Rect::from_min_size(egui::pos2(x, center_y - h / 2.0), vec2(w, h));
-        ui.painter().rect_filled(rect, h / 2.0, fill);
+/// One count box in the member pane header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CountBox {
+    pub count: u32,
+    /// "online", "offline", "bots": shown after the number on hover.
+    pub word: &'static str,
+    pub kind: CountKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CountKind {
+    Online,
+    Offline,
+    Bots,
+}
+
+impl CountKind {
+    fn fill(self, pal: &Palette) -> Color32 {
+        match self {
+            CountKind::Online => pal.online,
+            CountKind::Offline => pal.offline,
+            CountKind::Bots => pal.accent,
+        }
+    }
+}
+
+/// The header boxes: online and offline, plus bots only when `bots` is
+/// an exact count (never a partial number).
+pub fn count_boxes_for(online: u32, offline: u32, bots: Option<u32>) -> Vec<CountBox> {
+    let mut v = vec![
+        CountBox {
+            count: online,
+            word: "online",
+            kind: CountKind::Online,
+        },
+        CountBox {
+            count: offline,
+            word: "offline",
+            kind: CountKind::Offline,
+        },
+    ];
+    if let Some(n) = bots {
+        v.push(CountBox {
+            count: n,
+            word: if n == 1 { "bot" } else { "bots" },
+            kind: CountKind::Bots,
+        });
+    }
+    v
+}
+
+/// Box height; collapsed boxes are squares (wider only for long numbers).
+const BOX: f32 = 22.0;
+const BOX_GAP: f32 = 4.0;
+/// Padding inside a box, left and right of the text.
+const BOX_PAD: f32 = 6.0;
+
+/// Where each box goes, right-aligned in `area` (x from the area's left
+/// edge), given each box's collapsed and fully widened widths and how
+/// widened it is (0..1). Boxes that don't fit even collapsed are left out
+/// from the end (bots first). A widening box pushes the others left while
+/// there is room; without room it grows over its neighbours instead (drawn
+/// on top, `true`), so its label is never cut. Returns (left, width, on
+/// top) per box that fits.
+pub fn layout_boxes(area_width: f32, boxes: &[(f32, f32, f32)]) -> Vec<(f32, f32, bool)> {
+    let mut n = boxes.len();
+    let collapsed = |n: usize| -> f32 {
+        boxes[..n].iter().map(|b| b.0).sum::<f32>() + BOX_GAP * n.saturating_sub(1) as f32
+    };
+    while n > 0 && collapsed(n) > area_width {
+        n -= 1;
+    }
+    if n == 0 {
+        return Vec::new();
+    }
+    let boxes = &boxes[..n];
+    let grow = |b: &(f32, f32, f32)| (b.1 - b.0).max(0.0) * b.2;
+    let extra: f32 = boxes.iter().map(grow).sum();
+    let fits = extra <= area_width - collapsed(n);
+    let widths: Vec<f32> = boxes
+        .iter()
+        .map(|b| if fits { b.0 + grow(b) } else { b.0 })
+        .collect();
+    let total = widths.iter().sum::<f32>() + BOX_GAP * (n - 1) as f32;
+    let mut x = area_width - total;
+    boxes
+        .iter()
+        .zip(widths)
+        .map(|(b, w)| {
+            let left = x;
+            x += w + BOX_GAP;
+            if fits || grow(b) <= 0.0 {
+                return (left, w, false);
+            }
+            // Grow leftwards from the box's right edge, staying inside.
+            let wide = (b.0 + grow(b)).min(area_width);
+            ((left + w - wide).max(0.0), wide, true)
+        })
+        .collect()
+}
+
+/// The member pane header: square count boxes (green online, grey
+/// offline, blue bots), right-aligned in `area` (the header left of the
+/// window buttons). Hovering one widens it smoothly to read "7 online".
+/// Corners follow the theme's `shape`.
+pub fn count_boxes(ui: &egui::Ui, area: egui::Rect, boxes: &[CountBox], pal: &Palette) {
+    let ctx = ui.ctx().clone();
+    let font = crate::theme::bold_font(12.0);
+    let mut parts = Vec::new();
+    for b in boxes {
+        let id = ui.scope_id().with(("member_count_box", b.word));
+        let num = ui
+            .painter()
+            .layout_no_wrap(b.count.to_string(), font.clone(), Color32::WHITE);
+        let word =
+            ui.painter()
+                .layout_no_wrap(format!(" {}", b.word), font.clone(), Color32::WHITE);
+        let small = (num.size().x + 2.0 * BOX_PAD).max(BOX);
+        let wide = num.size().x + word.size().x + 2.0 * BOX_PAD;
+        // Hovered last frame? (The rect moves as boxes widen.)
+        let last: Option<egui::Rect> = ui.data(|d| d.get_temp(id));
+        let hovered = last.is_some_and(|r| ui.rect_contains_pointer(r));
+        let t = ctx.animate_bool_with_time(id, hovered, 0.15);
+        parts.push((id, b, num, word, small, wide, t));
+    }
+    let pad = 8.0;
+    let inner = area.width() - 2.0 * pad;
+    let spots = layout_boxes(
+        inner,
+        &parts.iter().map(|p| (p.4, p.5, p.6)).collect::<Vec<_>>(),
+    );
+    let shape = crate::theme::shape();
+    let y = area.center().y - BOX / 2.0;
+    let mut drawn: Vec<_> = parts.into_iter().zip(spots).collect();
+    // Boxes growing over their neighbours go last (on top).
+    drawn.sort_by_key(|(_, (_, _, on_top))| *on_top);
+    for ((id, b, num, word, small, _, t), (x, w, _)) in drawn {
+        let rect = egui::Rect::from_min_size(egui::pos2(area.left() + pad + x, y), vec2(w, BOX));
+        ui.data_mut(|d| d.insert_temp(id, rect));
         ui.painter()
-            .galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
-        ui.interact(rect, ui.scope_id().with(key), egui::Sense::hover())
-            .on_hover_text(tip);
-        x = rect.right() + 6.0;
+            .rect_filled(rect, shape.radius(BOX), b.kind.fill(pal));
+        // The number moves from the centre to the left as the word fades in.
+        let centred = (small - num.size().x) / 2.0;
+        let nx = rect.left() + egui::lerp(centred..=BOX_PAD, t);
+        let ny = rect.center().y - num.size().y / 2.0;
+        let num_w = num.size().x;
+        ui.painter().galley(egui::pos2(nx, ny), num, Color32::WHITE);
+        if t > 0.0 {
+            let clip = rect.shrink2(vec2(BOX_PAD / 2.0, 0.0));
+            ui.painter().with_clip_rect(clip).galley(
+                egui::pos2(nx + num_w, ny),
+                word,
+                Color32::WHITE.gamma_multiply(t),
+            );
+        }
+        ui.interact(rect, id.with("hover"), egui::Sense::hover());
     }
 }
 
@@ -738,16 +888,18 @@ pub fn row_height(compact: bool) -> f32 {
 pub fn status_dot(ui: &egui::Ui, avatar: egui::Rect, status: Status, ring: Color32, pal: &Palette) {
     let r = (avatar.width() * 0.16).clamp(3.5, 8.0);
     let c = avatar.right_bottom() - vec2(r * 0.8, r * 0.8);
-    ui.painter().circle_filled(c, r + 2.0, ring);
-    ui.painter().circle_filled(c, r, status.color(pal));
+    // Round or square, as the theme's `shape` says.
+    let shape = crate::theme::shape();
+    let p = ui.painter();
+    shape.dot(p, c, r + 2.0, ring);
+    shape.dot(p, c, r, status.color(pal));
     // Discord's shapes: offline is a ring, idle a crescent, DND a dash.
     match status {
         Status::Offline => {
-            ui.painter().circle_filled(c, r * 0.45, ring);
+            shape.dot(p, c, r * 0.45, ring);
         }
         Status::Idle => {
-            ui.painter()
-                .circle_filled(c - vec2(r * 0.5, r * 0.5), r * 0.62, ring);
+            shape.dot(p, c - vec2(r * 0.5, r * 0.5), r * 0.62, ring);
         }
         Status::Dnd => {
             ui.painter().rect_filled(
@@ -835,7 +987,7 @@ pub fn list_ui(
                     None => {
                         // Not loaded yet: a grey placeholder like Discord.
                         let a = rect.left_center() + vec2(4.0 + h * 0.35, 0.0);
-                        ui.painter().circle_filled(a, h * 0.32, pal.hover);
+                        crate::theme::avatar_shape().dot(ui.painter(), a, h * 0.32, pal.hover);
                         let bar = egui::Rect::from_min_size(
                             egui::pos2(a.x + h * 0.5, a.y - 5.0),
                             vec2(rect.width() * 0.45, 10.0),
@@ -1016,6 +1168,78 @@ mod tests {
             "ops": ops,
         }))
         .unwrap()
+    }
+
+    fn bot(id: &str) -> Value {
+        json!({ "member": { "user": { "id": id, "username": format!("b{id}"), "bot": true }, "roles": [] } })
+    }
+
+    #[test]
+    fn bots_only_when_exact() {
+        let upd = |count: u32, ops: Value| {
+            ListUpdate::from_json(&json!({
+                "guild_id": "g", "id": "everyone", "member_count": count, "online_count": 2,
+                "groups": [{ "id": "online", "count": 2 }, { "id": "offline", "count": count - 2 }],
+                "ops": ops,
+            }))
+            .unwrap()
+        };
+        // Whole list loaded: exact.
+        let mut list = MemberList::new("g", "everyone");
+        list.apply(upd(
+            3,
+            json!([{ "op": "SYNC", "range": [0, 99], "items": [
+                { "group": { "id": "online", "count": 2 } }, member("a"), bot("b"),
+                { "group": { "id": "offline", "count": 1 } }, bot("c"),
+            ]}]),
+        ));
+        assert_eq!(list.exact_bots(), Some(2));
+        // Discord counts more members than are loaded: no number.
+        let mut big = MemberList::new("g", "everyone");
+        big.apply(upd(
+            500,
+            json!([{ "op": "SYNC", "range": [0, 99], "items": [
+                { "group": { "id": "online", "count": 2 } }, member("a"), bot("b"),
+            ]}]),
+        ));
+        assert_eq!(big.exact_bots(), None);
+        // Holes in the list: no number.
+        let mut holes = list.clone();
+        holes.rows.insert(1, None);
+        assert_eq!(holes.exact_bots(), None);
+        assert_eq!(MemberList::default().exact_bots(), None);
+        // The bots box is only there with a count.
+        assert_eq!(count_boxes_for(1, 2, None).len(), 2);
+        let b = count_boxes_for(1, 2, Some(1));
+        assert_eq!(b.len(), 3);
+        assert_eq!((b[2].kind, b[2].word), (CountKind::Bots, "bot"));
+        assert_eq!(count_boxes_for(1, 2, Some(4))[2].word, "bots");
+    }
+
+    #[test]
+    fn count_box_layout() {
+        // Collapsed squares, right-aligned with 4 px gaps.
+        let b = [(22.0, 70.0, 0.0), (22.0, 80.0, 0.0)];
+        assert_eq!(
+            layout_boxes(100.0, &b),
+            vec![(52.0, 22.0, false), (78.0, 22.0, false)]
+        );
+        // A hovered box widens to its full label, pushing the others left.
+        let b = [(22.0, 70.0, 1.0), (22.0, 80.0, 0.0)];
+        assert_eq!(
+            layout_boxes(200.0, &b),
+            vec![(104.0, 70.0, false), (178.0, 22.0, false)]
+        );
+        // Not enough room: it grows over its neighbour, full width, inside
+        // the area, on top; the other box stays put.
+        let spots = layout_boxes(80.0, &b);
+        assert_eq!(spots[1], (58.0, 22.0, false));
+        let (x, w, top) = spots[0];
+        assert!(top && w == 70.0 && x >= 0.0 && x + w <= 80.0);
+        // Too narrow even collapsed: the last boxes (bots) are left out.
+        let three = [(22.0, 70.0, 0.0), (22.0, 80.0, 0.0), (22.0, 60.0, 0.0)];
+        assert_eq!(layout_boxes(50.0, &three).len(), 2);
+        assert!(layout_boxes(10.0, &three).is_empty());
     }
 
     #[test]

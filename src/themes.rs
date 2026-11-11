@@ -1116,7 +1116,7 @@ pub fn paint_preview(painter: &Painter, rect: Rect, pal: &Palette, style: &Theme
     for i in 0..4 {
         let c = pos2(rail.center().x, rail.top() + 10.0 + i as f32 * (d + 5.0));
         let col = if i == 0 { pal.accent } else { pal.rail_icon };
-        painter.circle_filled(c, d / 2.0, col);
+        s.shape.dot(&painter, c, d / 2.0, col);
     }
     // Sidebar: channel rows, one selected.
     for i in 0..5 {
@@ -1140,7 +1140,7 @@ pub fn paint_preview(painter: &Painter, rect: Rect, pal: &Palette, style: &Theme
         let y = chat.top() + 12.0 + i as f32 * 24.0;
         let av = pos2(chat.left() + 11.0, y + 4.0);
         let colors = [pal.online, pal.accent, pal.idle];
-        painter.circle_filled(av, 6.0, colors[i]);
+        s.avatar_shape.dot(&painter, av, 6.0, colors[i]);
         let x = chat.left() + 22.0;
         painter.rect_filled(
             Rect::from_min_size(pos2(x, y), vec2(26.0, 3.5)),

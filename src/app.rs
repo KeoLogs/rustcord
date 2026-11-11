@@ -617,6 +617,18 @@ impl RustCordApp {
                     .ok()
             })
             .flatten();
+        // `…:rustcord-light`, `…:discord-dark`, `…:discord-light`: a
+        // built-in theme for the screenshot (not saved).
+        use crate::builtin_themes::BuiltinTheme;
+        let builtin = match arg {
+            "rustcord-light" => Some(BuiltinTheme::RustcordLight),
+            "discord-dark" => Some(BuiltinTheme::DiscordDark),
+            "discord-light" => Some(BuiltinTheme::DiscordLight),
+            _ => None,
+        };
+        if let Some(t) = builtin {
+            self.config.builtin_theme = t;
+        }
         if let Some(section) = section {
             let mut page = SettingsPage::new(&self.config);
             page.section = section;
@@ -842,7 +854,7 @@ impl eframe::App for RustCordApp {
             crate::taskbar::frame_target(frame),
             count,
             self.config.taskbar_badge,
-            crate::taskbar::rgb(self.active_theme.palette.danger),
+            crate::taskbar::look(self.active_theme.palette.danger),
         );
         let Screen::Main(state) = &mut self.screen else {
             return;
@@ -1372,7 +1384,7 @@ fn window_screen(w: &mut AccountWindow, ui: &mut egui::Ui) {
         Target::Title(&w.title),
         count,
         w.config.taskbar_badge,
-        crate::taskbar::rgb(w.theme.palette.danger),
+        crate::taskbar::look(w.theme.palette.danger),
     );
     let mut close = ctx.input(|i| i.viewport().close_requested());
     if let Some(reason) = state.fatal.take() {
@@ -5261,8 +5273,9 @@ impl State {
         // Status dot with a ring in the panel colour (Discord's cut-out).
         let ring = if resp.hovered() { pal.hover } else { bg };
         let c = av.right_bottom() - vec2(3.0, 3.0);
-        ui.painter().circle_filled(c, 7.0, ring);
-        ui.painter().circle_filled(c, 5.0, dot);
+        let shape = theme::shape();
+        shape.dot(ui.painter(), c, 7.0, ring);
+        shape.dot(ui.painter(), c, 5.0, dot);
         if show_text {
             let x = av.right() + 8.0;
             let max_w = hit.right() - x - 4.0;
@@ -7352,17 +7365,35 @@ impl State {
         let total = list.map_or(fallback.len(), |l| l.total_rows().min(100_000));
         // Header: green "online" and grey "offline" count pills (the
         // "recently active" fallback has no meaningful counts).
+        // Blue bots box only when the count is exact: the bot-built list
+        // (under its cap), a fully loaded op 14 list, or a DM's recipients.
+        let from_bot_list = self.member_list.as_ref().is_none_or(|l| l.rows.is_empty())
+            && self
+                .bot_list
+                .as_ref()
+                .is_some_and(|b| !b.list.rows.is_empty());
         let counts = match list {
-            Some(l) => Some(l.online_offline(&self.presences)),
-            None if self.dms.channel(&channel_id).is_some() => Some(members::count_online(
-                fallback.iter().flatten(),
-                &self.presences,
-            )),
+            Some(l) => {
+                let bots = match &self.bot_list {
+                    Some(b) if from_bot_list => (b.members.len()
+                        < members::BOT_LIST_LIMIT as usize)
+                        .then(|| b.members.iter().filter(|m| m.user.bot).count() as u32),
+                    _ => l.exact_bots(),
+                };
+                let (on, off) = l.online_offline(&self.presences);
+                Some((on, off, bots))
+            }
+            None if self.dms.channel(&channel_id).is_some() => {
+                let rows = fallback.iter().flatten();
+                let (on, off) = members::count_online(rows.clone(), &self.presences);
+                Some((on, off, Some(members::count_bots(rows))))
+            }
             None => None,
         };
         match counts {
-            Some((on, off)) if on + off > 0 => {
-                members::count_pills(ui, header.left() + 16.0, header.center().y, on, off, pal)
+            Some((on, off, bots)) if on + off > 0 => {
+                let boxes = members::count_boxes_for(on, off, bots.filter(|n| *n > 0));
+                members::count_boxes(ui, header, &boxes, pal)
             }
             _ => {
                 let galley = truncated(
@@ -8724,7 +8755,7 @@ fn channel_row(
         match c.recipients.first().filter(|_| c.kind == CHANNEL_DM) {
             Some(u) => paint_avatar(ui, a, &u.id, &u.name, &u.avatar_url, config, pal),
             None => {
-                ui.painter().circle_filled(a.center(), 16.0, pal.accent);
+                theme::avatar_shape().dot(ui.painter(), a.center(), 16.0, pal.accent);
                 ui.painter().text(
                     a.center(),
                     egui::Align2::CENTER_CENTER,
@@ -9004,7 +9035,8 @@ fn window_focused(ctx: &egui::Context) -> bool {
 fn unread_pill(ui: &egui::Ui, item: egui::Rect, height: f32, pal: &Palette) {
     let x = ui.clip_rect().left();
     let rect = egui::Rect::from_center_size(egui::pos2(x, item.center().y), vec2(8.0, height));
-    ui.painter().rect_filled(rect, 4, pal.unread);
+    ui.painter()
+        .rect_filled(rect, theme::shape().radius(8.0), pal.unread);
 }
 
 /// Red rounded badge with a count ("99+" past 99).
@@ -9027,9 +9059,13 @@ fn mention_badge(
     let size = vec2((galley.size().x + 9.0).max(16.0), 16.0);
     let rect = align.align_size_within_rect(size, egui::Rect::from_min_size(at, egui::Vec2::ZERO));
     let rect = egui::Rect::from_min_size(rect.min, size);
-    // Ring in the panel colour so it stands out over icons.
-    ui.painter().rect_filled(rect.expand(2.0), 10, ring);
-    ui.painter().rect_filled(rect, 8, pal.mention);
+    // Ring in the panel colour so it stands out over icons. Pill or
+    // square as the theme's `shape` says.
+    let shape = theme::shape();
+    ui.painter()
+        .rect_filled(rect.expand(2.0), shape.radius(size.y + 4.0), ring);
+    ui.painter()
+        .rect_filled(rect, shape.radius(size.y), pal.mention);
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
 }
@@ -9190,7 +9226,8 @@ fn rail_item(
     if h > 0.5 {
         let left = ui.clip_rect().left();
         let pill = egui::Rect::from_center_size(egui::pos2(left, rect.center().y), vec2(8.0, h));
-        ui.painter().rect_filled(pill, 4, pal.unread);
+        ui.painter()
+            .rect_filled(pill, theme::shape().radius(8.0), pal.unread);
     }
 
     if badge.mentions > 0 {
@@ -9312,14 +9349,15 @@ fn folder_item(
             );
             match &g.icon_url {
                 Some(url) if config.modules.images => {
-                    painter.circle_filled(r.center(), mini / 2.0, pal.rail_icon);
+                    let mr = theme::shape().radius(mini);
+                    painter.rect_filled(r, mr, pal.rail_icon);
                     egui::Image::from_uri(url)
-                        .corner_radius(mini / 2.0)
+                        .corner_radius(mr)
                         .show_loading_spinner(false)
                         .paint_at(ui, r);
                 }
                 _ => {
-                    painter.circle_filled(r.center(), mini / 2.0, pal.rail_icon);
+                    painter.rect_filled(r, theme::shape().radius(mini), pal.rail_icon);
                     let i: String = initials(&g.name).chars().take(1).collect();
                     painter.text(
                         r.center(),
@@ -9347,7 +9385,8 @@ fn folder_item(
     if h > 0.5 {
         let left = ui.clip_rect().left();
         let pill = egui::Rect::from_center_size(egui::pos2(left, rect.center().y), vec2(8.0, h));
-        ui.painter().rect_filled(pill, 4, pal.unread);
+        ui.painter()
+            .rect_filled(pill, theme::shape().radius(8.0), pal.unread);
     }
     if f.badge.mentions > 0 {
         mention_badge(
