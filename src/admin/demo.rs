@@ -55,6 +55,13 @@ pub fn respond(r: &Request) -> Result<Value, String> {
                     o.insert("inviter".into(), json!({ "username": "you" }));
                     o.insert("uses".into(), json!(0));
                 }
+                if r.kind == Kind::CreateWebhook {
+                    let channel = r.path.split('/').nth(2).unwrap_or("");
+                    o.insert("type".into(), json!(1));
+                    o.insert("channel_id".into(), json!(channel));
+                    o.insert("token".into(), json!("demo-token-not-a-real-webhook"));
+                    o.insert("user".into(), json!({ "username": "you" }));
+                }
                 o.insert("id".into(), json!(id));
             }
         }
@@ -165,6 +172,23 @@ fn load(r: &Request) -> Value {
             { "id": "701", "name": "Block suspected spam", "enabled": false, "event_type": 1,
               "trigger_type": 3, "trigger_metadata": {},
               "actions": [{ "type": 1 }], "exempt_roles": [], "exempt_channels": [] },
+        ]),
+        // Made-up tokens: these URLs lead nowhere.
+        Kind::LoadWebhooks => json!([
+            { "id": "600", "type": 1, "name": "Build Bot", "channel_id": "203",
+              "token": "demo-token-not-a-real-webhook", "avatar": null,
+              "user": { "username": "sam" } },
+            { "id": "601", "type": 1, "name": "Release Notes", "channel_id": "200",
+              "token": "demo-token-also-not-real", "avatar": null,
+              "user": { "username": "alex" } },
+            { "id": "602", "type": 2, "name": "Rust Blog", "channel_id": "201",
+              "user": { "username": "sam" } },
+        ]),
+        Kind::LoadIntegrations => json!([
+            { "id": "650", "name": "Helper Bot", "type": "discord", "enabled": true,
+              "user": { "username": "sam" } },
+            { "id": "651", "name": "RustCord Streams", "type": "twitch", "enabled": false,
+              "user": { "username": "alex" } },
         ]),
         _ => Value::Null,
     }

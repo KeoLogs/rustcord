@@ -36,6 +36,7 @@ pub mod members;
 pub mod overview;
 pub mod roles;
 pub mod ui;
+pub mod webhooks;
 
 /// Most rows any admin list keeps (audit log pages, members found, bans…).
 pub const LIST_CAP: usize = 500;
@@ -55,6 +56,12 @@ pub enum Method {
 pub enum Kind {
     LoadGuild,
     SaveGuild,
+    LoadWebhooks,
+    CreateWebhook,
+    SaveWebhook,
+    DeleteWebhook,
+    LoadIntegrations,
+    DeleteIntegration,
     LoadRules,
     CreateRule,
     SaveRule,
@@ -104,6 +111,12 @@ impl Kind {
         match self {
             Kind::LoadGuild => "Loading the server settings",
             Kind::SaveGuild => "Saving the server settings",
+            Kind::LoadWebhooks => "Loading webhooks",
+            Kind::CreateWebhook => "Creating the webhook",
+            Kind::SaveWebhook => "Saving the webhook",
+            Kind::DeleteWebhook => "Deleting the webhook",
+            Kind::LoadIntegrations => "Loading integrations",
+            Kind::DeleteIntegration => "Removing the integration",
             Kind::LoadRules => "Loading AutoMod rules",
             Kind::CreateRule => "Creating the rule",
             Kind::SaveRule => "Saving the rule",
@@ -151,6 +164,10 @@ impl Kind {
     fn tab(self) -> Tab {
         match self {
             Kind::LoadGuild | Kind::SaveGuild => Tab::Overview,
+            Kind::LoadIntegrations | Kind::DeleteIntegration => Tab::Integrations,
+            Kind::LoadWebhooks | Kind::CreateWebhook | Kind::SaveWebhook | Kind::DeleteWebhook => {
+                Tab::Webhooks
+            }
             Kind::LoadRules | Kind::CreateRule | Kind::SaveRule | Kind::DeleteRule => Tab::AutoMod,
             Kind::LoadAudit | Kind::LoadAuditMore => Tab::AuditLog,
             Kind::LoadStickers | Kind::CreateSticker | Kind::SaveSticker | Kind::DeleteSticker => {
@@ -276,6 +293,7 @@ impl std::fmt::Debug for Response {
 pub enum PickSlot {
     Icon,
     Banner,
+    WebhookAvatar,
     Sticker,
     Emoji,
     RoleIcon,
@@ -409,6 +427,8 @@ pub fn id_or_null(id: &str) -> Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,
+    Integrations,
+    Webhooks,
     AutoMod,
     AuditLog,
     Stickers,
@@ -426,12 +446,15 @@ const NAV: &[(&str, &[Tab])] = &[
     ("Expressions", &[Tab::Emoji, Tab::Stickers]),
     ("People", &[Tab::Members, Tab::Invites, Tab::Bans]),
     ("Moderation", &[Tab::AuditLog, Tab::AutoMod]),
+    ("Apps", &[Tab::Webhooks, Tab::Integrations]),
 ];
 
 impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
+            Tab::Integrations => "Integrations",
+            Tab::Webhooks => "Webhooks",
             Tab::AutoMod => "AutoMod",
             Tab::AuditLog => "Audit Log",
             Tab::Stickers => "Stickers",
@@ -447,6 +470,8 @@ impl Tab {
     fn icon(self) -> &'static str {
         match self {
             Tab::Overview => icons::GEAR,
+            Tab::Integrations => icons::PUZZLE,
+            Tab::Webhooks => icons::LINK,
             Tab::AutoMod => icons::SHIELD,
             Tab::AuditLog => icons::FILE_TEXT,
             Tab::Stickers => icons::STICKER,
@@ -466,6 +491,8 @@ impl Tab {
         let any = |bits: u64| perms & bits != 0;
         match self {
             Tab::Overview => any(perms::MANAGE_GUILD),
+            Tab::Integrations => any(perms::MANAGE_GUILD),
+            Tab::Webhooks => any(perms::MANAGE_WEBHOOKS),
             Tab::AutoMod => any(perms::MANAGE_GUILD),
             Tab::AuditLog => any(perms::VIEW_AUDIT_LOG),
             Tab::Stickers => any(perms::MANAGE_EXPRESSIONS | (1 << 43)),
@@ -685,6 +712,7 @@ pub struct AdminPage {
     /// tab's first editor once its data is in.
     pub demo_detail: bool,
     overview: overview::State,
+    webhooks: webhooks::State,
     automod: automod::State,
     audit: audit::State,
     emojis: emojis::State,
@@ -707,6 +735,7 @@ impl AdminPage {
             confirm: None,
             demo_detail: false,
             overview: Default::default(),
+            webhooks: Default::default(),
             automod: Default::default(),
             audit: Default::default(),
             emojis: Default::default(),
@@ -737,6 +766,8 @@ impl AdminPage {
         let g = &self.guild_id;
         match tab {
             Tab::Overview => vec![overview::load(g)],
+            Tab::Integrations => vec![webhooks::load_integrations(g)],
+            Tab::Webhooks => vec![webhooks::load(g)],
             Tab::AutoMod => vec![automod::load(g)],
             Tab::AuditLog => vec![audit::load(g, "", 0, None)],
             Tab::Stickers => vec![emojis::load_stickers(g)],
@@ -774,6 +805,7 @@ impl AdminPage {
         };
         match r.kind.tab() {
             Tab::Overview => self.overview.on_response(r.kind, &r.key, &v),
+            Tab::Webhooks | Tab::Integrations => self.webhooks.on_response(r.kind, &r.key, &v),
             Tab::AutoMod => self.automod.on_response(r.kind, &r.key, &v),
             Tab::AuditLog => self.audit.on_response(r.kind, &r.key, &v),
             Tab::Emoji | Tab::Stickers => self.emojis.on_response(r.kind, &r.key, &v),
@@ -809,6 +841,7 @@ impl AdminPage {
         let p = Arc::new(p);
         match p.slot {
             PickSlot::Icon | PickSlot::Banner => self.overview.on_picked(p),
+            PickSlot::WebhookAvatar => self.webhooks.on_picked(p),
             PickSlot::Emoji | PickSlot::Sticker => self.emojis.on_picked(p),
             PickSlot::RoleIcon => self.roles.on_picked(p),
         }
@@ -959,6 +992,8 @@ impl AdminPage {
                         let before = out.send.len();
                         match self.tab {
                             Tab::Overview => self.overview.ui(ui, cx, &mut out),
+                            Tab::Integrations => self.webhooks.integrations_ui(ui, cx, &mut out),
+                            Tab::Webhooks => self.webhooks.ui(ui, cx, &mut out),
                             Tab::AutoMod => self.automod.ui(ui, cx, &mut out),
                             Tab::AuditLog => self.audit.ui(ui, cx, &mut out),
                             Tab::Stickers => self.emojis.sticker_ui(ui, cx, &mut out),

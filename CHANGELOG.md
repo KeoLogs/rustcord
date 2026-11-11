@@ -33,6 +33,9 @@ Settings → About). Version x.y.z:
   - AutoMod: list, create, edit and delete keyword, spam and mention-spam
     rules, with their actions (block, alert channel, timeout) and exempt
     roles and channels.
+  - Webhooks and integrations: list, create, edit and delete webhooks. A
+    webhook URL is hidden until you click Reveal, Copy URL copies it, and
+    it is never logged. Integrations can be listed and removed.
 
 ## 0.10.0: DM core (history paging, first unread, optimistic send)
 - Chat history like Discord's (Brief A): scrolling near the top loads 50
