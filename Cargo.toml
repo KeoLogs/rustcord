@@ -58,11 +58,16 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# Smaller, faster release builds.
+# Smaller, faster release builds. panic = "abort": no unwinding tables or
+# landing pads (smaller binary, less to map); nothing in RustCord catches
+# panics. Debug symbols stay off (strip). Thin LTO, not fat: fat measured
+# no clear RAM gain for 2.6x the build time. See scripts/memprobe-results.md.
 [profile.release]
 lto = "thin"
 codegen-units = 1
+panic = "abort"
 strip = true
+debug = false
 
 [dev-dependencies]
 tempfile = "3"
