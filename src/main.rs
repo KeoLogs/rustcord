@@ -28,6 +28,7 @@ mod links;
 mod login;
 mod markdown;
 mod members;
+mod memstats;
 mod notify;
 mod onboarding;
 mod paste;

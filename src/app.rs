@@ -1053,6 +1053,12 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
         let Screen::Main(state) = &mut app.screen else {
             return;
         };
+        // Dev memory panel: counted only while Performance is open.
+        page.mem = (page.section == crate::settings::Section::Performance).then(|| {
+            let mut c = state.mem_counts();
+            c.fill_egui(&ctx);
+            c
+        });
         let action = page.ui(
             ui,
             &app.config,
@@ -4554,6 +4560,20 @@ impl State {
     /// Unread pill / mention badge / muted look for a server icon.
     fn guild_badge(&self, g: &Guild, now: &str) -> Badge {
         crate::badge::guild_badge(g, &self.reads, &self.mutes, now)
+    }
+
+    /// Cache sizes for the dev memory panel (Settings → Performance).
+    fn mem_counts(&self) -> crate::memstats::MemCounts {
+        crate::memstats::MemCounts {
+            cached_channels: self.messages.len(),
+            cached_messages: self.messages.values().map(Vec::len).sum(),
+            md_cache: self.md_cache.len(),
+            members: self.member_cache.len(),
+            presences: self.presences.len(),
+            profiles: self.profiles.len(),
+            user_names: self.user_names.len(),
+            ..Default::default()
+        }
     }
 
     /// The taskbar badge count: the sum of the rail's red badges (mentions
