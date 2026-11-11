@@ -964,15 +964,11 @@ impl eframe::App for RustCordApp {
         if let Some(session) = &mut self.session {
             save_account(&self.vault, &mut self.config, session, state);
         }
-        if let Some(path) = state.picked_sound.take() {
-            match &mut self.settings {
-                Some(page) => {
-                    if let Err(e) = page.set_sound_file(path) {
-                        state.toast = Some((e, Instant::now()));
-                    }
-                }
-                None => {}
-            }
+        if let Some(path) = state.picked_sound.take()
+            && let Some(page) = &mut self.settings
+            && let Err(e) = page.set_sound_file(path)
+        {
+            state.toast = Some((e, Instant::now()));
         }
         if let Some(path) = state.picked_theme.take() {
             // Small file copies; the picker itself ran in the backend.
