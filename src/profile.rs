@@ -150,6 +150,11 @@ pub struct ProfileCache {
 }
 
 impl ProfileCache {
+    /// Profiles kept (Settings → Performance).
+    pub fn len(&self) -> usize {
+        self.profiles.len()
+    }
+
     pub fn get(&self, user_id: &str, guild_id: Option<&str>) -> Option<&Profile> {
         self.profiles
             .iter()
@@ -186,11 +191,6 @@ impl ProfileCache {
         self.notes.retain(|(u, _)| u != user_id);
         self.notes.push_front((user_id.to_string(), note));
         self.notes.truncate(MAX_PROFILES);
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.profiles.len()
     }
 }
 
