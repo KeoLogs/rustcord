@@ -26,6 +26,7 @@ use crate::gif_picker::{Gif, GifAction, GifPicker};
 use crate::home::{self, HomeAction, HomeCtx, HomeSelected, HomeState};
 use crate::invites::{self, AddServerAction, AddServerDialog, CardCtx, InviteAction, InviteCache};
 use crate::layout::{self, HostState, LAYOUT_KEY, LayoutBehavior, Pane};
+use crate::lightbox::{self, Viewer, ViewerAction};
 use crate::links::{self, LinkCheck, LinkDecision, LinkWarning};
 use crate::login::{LoginAction, LoginForm};
 use crate::markdown::{self, Block, MarkdownAction, ParseCache};
@@ -1171,6 +1172,8 @@ fn chat_screen(ui: &mut egui::Ui, state: &mut State, f: ChatFrame<'_>) {
     if !f.config.modules.layout_editor {
         *f.editing = false;
     }
+    // The image viewer's keys first: the message box must not get them.
+    state.viewer_keys(&ctx, f.config);
     let status = state.status.clone();
     RustCordApp::top_bar(
         ui,
@@ -1651,6 +1654,9 @@ enum MessageAction {
     Pin(String, bool),
     /// Save an image attachment: (url, file name).
     SaveImage(String, String),
+    /// Clicked a picture with the Image viewer module on: the message's
+    /// pictures and the clicked one.
+    ViewMedia(Vec<lightbox::MediaItem>, usize),
     /// Reveal a run of blocked messages (id of the first one).
     ShowBlocked(String),
     /// Clicked a reply preview: scroll to the original message.
@@ -1947,6 +1953,8 @@ pub struct State {
     user_names: HashMap<String, String>,
     /// "Leaving RustCord" dialog for a clicked link.
     link_warning: Option<LinkWarning>,
+    /// The image viewer (lightbox), while open. Image viewer module only.
+    viewer: Option<Viewer>,
     /// Pinned messages popup, and the pin button's rect it hangs from.
     pins: Option<(PinsPopup, egui::Rect)>,
     /// Scroll to (and flash) this message once it's on screen.
@@ -2059,6 +2067,7 @@ impl State {
             md_cache: ParseCache::default(),
             user_names: HashMap::new(),
             link_warning: None,
+            viewer: None,
             pins: None,
             scroll_to: None,
             channel_errors: HashMap::new(),
@@ -2540,6 +2549,11 @@ impl State {
                 }
             }
             ToUi::Notice(text) => self.toast = Some((text, Instant::now())),
+            ToUi::CopyImage(img) => {
+                let img = Arc::try_unwrap(img).unwrap_or_else(|a| (*a).clone());
+                ctx.copy_image(img);
+                self.toast = Some(("Image copied".into(), Instant::now()));
+            }
             ToUi::RateLimited(rl) => self.rate_limited(rl),
             ToUi::GuildEmojis { guild_id, emojis } => {
                 if let Some(g) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
@@ -6479,6 +6493,7 @@ impl State {
             Some(MessageAction::SaveImage(url, filename)) => {
                 let _ = self.tx.send(ToBackend::SaveFile { url, filename });
             }
+            Some(MessageAction::ViewMedia(items, index)) => self.open_viewer(items, index, &ctx),
             Some(MessageAction::ShowBlocked(id)) => {
                 self.revealed_blocked.insert(id);
             }
@@ -6569,6 +6584,73 @@ impl State {
         match links::check(url, config.warn_before_links, &config.trusted_domains) {
             LinkCheck::Open(u) => ctx.open_url(egui::OpenUrl::new_tab(u)),
             LinkCheck::Ask(w) => self.link_warning = Some(w),
+        }
+    }
+
+    /// Open the image viewer (replacing one that is open).
+    fn open_viewer(&mut self, items: Vec<lightbox::MediaItem>, index: usize, ctx: &egui::Context) {
+        if items.is_empty() {
+            return;
+        }
+        self.close_viewer(ctx);
+        self.viewer = Some(Viewer::new(items, index));
+    }
+
+    /// Close the image viewer and free what it loaded.
+    fn close_viewer(&mut self, ctx: &egui::Context) {
+        if let Some(mut v) = self.viewer.take() {
+            v.free(ctx);
+        }
+    }
+
+    /// Esc / arrows for the open viewer, before anything else sees them.
+    fn viewer_keys(&mut self, ctx: &egui::Context, config: &Config) {
+        if !config.modules.media_viewer {
+            // Module switched off: free it.
+            self.close_viewer(ctx);
+            return;
+        }
+        if let Some(v) = &mut self.viewer
+            && v.keys(ctx) == Some(ViewerAction::Close)
+        {
+            self.close_viewer(ctx);
+        }
+    }
+
+    /// Draw the open viewer and run what was picked.
+    fn viewer_overlay(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let Some(v) = &mut self.viewer else {
+            return;
+        };
+        let opts = lightbox::Options {
+            wheel_zoom: config.viewer_wheel_zoom,
+            load_original: config.viewer_load_original,
+            click_outside_closes: config.viewer_click_outside_closes,
+        };
+        // The chat's toast is under the overlay: show it in the viewer.
+        let toast = self
+            .toast
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < Duration::from_secs(3))
+            .map(|(t, _)| t.clone());
+        if toast.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+        match v.show(ctx, pal, opts, toast.as_deref()) {
+            Some(ViewerAction::Close) => self.close_viewer(ctx),
+            Some(ViewerAction::OpenOriginal(url)) => self.open_link(&url, ctx, config),
+            Some(ViewerAction::CopyImage(url)) => {
+                let _ = self.tx.send(ToBackend::CopyImage { url });
+                self.toast = Some(("Copying image…".into(), Instant::now()));
+            }
+            Some(ViewerAction::Save(url, filename)) => {
+                let _ = self.tx.send(ToBackend::SaveFile { url, filename });
+            }
+            Some(ViewerAction::CopyLink(url)) => {
+                ctx.copy_text(url);
+                self.toast = Some(("Link copied".into(), Instant::now()));
+            }
+            None => {}
         }
     }
 
@@ -7873,6 +7955,8 @@ impl State {
         self.picker_overlays(&ctx, config, pal);
         self.popout_overlay(&ctx, config, pal);
         self.pins_overlay(&ctx, config, pal);
+        // Before the dialogs, so the link warning shows over it.
+        self.viewer_overlay(&ctx, config, pal);
         self.dialogs(&ctx, config, pal);
 
         // Drag-and-drop hint
@@ -9937,16 +10021,22 @@ fn message_content(
             ectx.images_enabled = config.modules.images;
             ectx.max_width = ui.available_width().min(embed::MAX_WIDTH);
             ectx.text = Some(&text);
+            ectx.viewer = config.modules.media_viewer;
             ui.add_space(2.0);
             let out = embed::render_embed(ui, e, &ectx);
             if let Some(url) = out.clicked_link {
                 *action = Some(MessageAction::OpenLink(url));
             }
+            if let Some(key) = out.clicked_media {
+                *action = view_media(message_media(m, config), &key);
+            }
         }
     }
     for a in &m.attachments {
-        if let Some(url) = attachment_ui(ui, a, config, pal) {
-            *action = Some(MessageAction::OpenLink(url));
+        match attachment_ui(ui, a, config, pal) {
+            Some(AttachClick::Link(url)) => *action = Some(MessageAction::OpenLink(url)),
+            Some(AttachClick::View(key)) => *action = view_media(message_media(m, config), &key),
+            None => {}
         }
     }
     for st in &m.stickers {
@@ -10327,8 +10417,13 @@ fn forwarded_ui(
                 }
             }
             for a in &f.attachments {
-                if let Some(url) = attachment_ui(ui, a, config, pal) {
-                    *action = Some(MessageAction::OpenLink(url));
+                match attachment_ui(ui, a, config, pal) {
+                    Some(AttachClick::Link(url)) => *action = Some(MessageAction::OpenLink(url)),
+                    Some(AttachClick::View(key)) => {
+                        let items = f.attachments.iter().filter_map(viewer_item).collect();
+                        *action = view_media(items, &key);
+                    }
+                    None => {}
                 }
             }
             for st in &f.stickers {
@@ -10832,14 +10927,79 @@ fn message_menu(
     );
 }
 
-/// An image (click: open full size) or a file card. Returns a link the user
-/// clicked; the caller opens it through the link warning.
+/// What a click on an attachment asks for.
+enum AttachClick {
+    /// Open this link (through the link warning).
+    Link(String),
+    /// Open the image viewer on this attachment (`MediaItem::key`).
+    View(String),
+}
+
+/// The viewer's item for an image attachment (None for other files).
+fn viewer_item(a: &Attachment) -> Option<lightbox::MediaItem> {
+    if !a.is_image() {
+        return None;
+    }
+    let (w, h) = IMAGE_MAX;
+    Some(lightbox::MediaItem {
+        key: a.url.clone(),
+        original: a.url.clone(),
+        download: a.url.clone(),
+        base: if a.proxy_url.is_empty() {
+            a.url.clone()
+        } else {
+            a.proxy_url.clone()
+        },
+        filename: a.filename.clone(),
+        width: a.width,
+        height: a.height,
+        thumb_uri: a.thumbnail_url(w as u32, h as u32),
+        animated: a.content_type == "image/gif" || lightbox::is_gif_url(&a.filename),
+    })
+}
+
+/// Every picture of a message the viewer can show, in drawing order
+/// (embeds are drawn above attachments).
+fn message_media(m: &Message, config: &Config) -> Vec<lightbox::MediaItem> {
+    let mut items = Vec::new();
+    if config.modules.embeds && config.show_embed_images {
+        for e in &m.embeds {
+            for (media, thumb_uri) in e.viewer_media() {
+                let base = media.source().to_string();
+                items.push(lightbox::MediaItem {
+                    key: base.clone(),
+                    original: media.link().to_string(),
+                    // Through Discord's proxy, never the third-party host.
+                    download: base.clone(),
+                    filename: lightbox::filename_of(media.link()),
+                    width: media.width,
+                    height: media.height,
+                    thumb_uri,
+                    animated: lightbox::is_gif_url(media.link()) || lightbox::is_gif_url(&base),
+                    base,
+                });
+            }
+        }
+    }
+    items.extend(m.attachments.iter().filter_map(viewer_item));
+    items
+}
+
+/// Open the viewer on the item with `key`.
+fn view_media(items: Vec<lightbox::MediaItem>, key: &str) -> Option<MessageAction> {
+    let index = items.iter().position(|i| i.key == key)?;
+    Some(MessageAction::ViewMedia(items, index))
+}
+
+/// An image (click: the image viewer, or the full size in the browser) or
+/// a file card. Returns what the user clicked; links go through the link
+/// warning.
 fn attachment_ui(
     ui: &mut egui::Ui,
     a: &Attachment,
     config: &Config,
     pal: &Palette,
-) -> Option<String> {
+) -> Option<AttachClick> {
     let mut clicked = None;
     if a.is_image() && config.modules.images {
         let (cap_w, max_h) = IMAGE_MAX;
@@ -10863,7 +11023,11 @@ fn attachment_ui(
                 a.human_size()
             ));
         if resp.clicked() {
-            clicked = Some(a.url.clone());
+            clicked = Some(if config.modules.media_viewer {
+                AttachClick::View(a.url.clone())
+            } else {
+                AttachClick::Link(a.url.clone())
+            });
         }
     } else {
         // Discord's file card is 432 wide; narrower columns shrink it and
@@ -10890,7 +11054,7 @@ fn attachment_ui(
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text(format!("{}\n{}", a.filename, a.url));
                         if link.clicked() {
-                            clicked = Some(a.url.clone());
+                            clicked = Some(AttachClick::Link(a.url.clone()));
                         }
                         ui.label(RichText::new(a.human_size()).small().color(pal.muted));
                     });

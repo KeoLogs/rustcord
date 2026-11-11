@@ -16,6 +16,7 @@ pub enum Section {
     Account,
     Appearance,
     Chat,
+    Media,
     Notifications,
     Privacy,
     Modules,
@@ -37,6 +38,7 @@ const SECTIONS: &[(&str, &[NavItem])] = &[
         &[
             (Section::Appearance, "Appearance", icons::PALETTE),
             (Section::Chat, "Chat", icons::CHAT_CIRCLE),
+            (Section::Media, "Media", icons::IMAGE),
             (Section::Notifications, "Notifications", icons::BELL),
             (Section::Privacy, "Privacy & Safety", icons::SHIELD),
         ],
@@ -547,6 +549,7 @@ impl SettingsPage {
                 }
             }
             Section::Chat => chat(ui, config, pal),
+            Section::Media => media(ui, config, pal),
             Section::Notifications => notifications(ui, config, pal),
             Section::Privacy => {
                 privacy_synced(ui, synced, &mut self.synced, pal);
@@ -780,6 +783,47 @@ impl SettingsPage {
         }
         action
     }
+}
+
+/// Settings → Media: the image viewer (lightbox) and its options.
+fn media(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
+    label(ui, pal, "IMAGE VIEWER");
+    switch_row(
+        ui,
+        &mut config.modules.media_viewer,
+        "Open images in viewer",
+        "Click an image or GIF to open it big over the app, like Discord (same as the Image viewer module). Off: clicks open the image in your browser.",
+        pal,
+    );
+    ui.add_enabled_ui(config.modules.media_viewer, |ui| {
+        switch_row(
+            ui,
+            &mut config.viewer_wheel_zoom,
+            "Zoom with the scroll wheel",
+            "Off: hold Ctrl while scrolling to zoom.",
+            pal,
+        );
+        switch_row(
+            ui,
+            &mut config.viewer_load_original,
+            "Load full resolution when zooming in",
+            "The viewer opens a copy sized to your window. Zooming past it loads the original file. Off uses less memory and data.",
+            pal,
+        );
+        switch_row(
+            ui,
+            &mut config.viewer_click_outside_closes,
+            "Click outside to close",
+            "A click on the dark background closes the viewer. Esc and the X always do.",
+            pal,
+        );
+    });
+    ui.add_space(4.0);
+    hint(
+        ui,
+        pal,
+        "In the viewer: scroll to zoom, drag to move, double-click for fit or 100%, Left / Right for the message's other pictures, Esc to close.",
+    );
 }
 
 /// Settings → Chat (Discord Messenger's DisableFormatting, ShowEmbedContent,

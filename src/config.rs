@@ -95,6 +95,13 @@ pub struct Config {
     /// clicking a GIF's star.
     #[serde(default)]
     pub favourite_gifs: Vec<crate::gif_picker::Gif>,
+    /// Image viewer: the plain scroll wheel zooms (off: Ctrl+wheel only).
+    pub viewer_wheel_zoom: bool,
+    /// Image viewer: load the full-size file when zooming past the
+    /// window-sized copy.
+    pub viewer_load_original: bool,
+    /// Image viewer: a click on the dimmed background closes it.
+    pub viewer_click_outside_closes: bool,
 }
 
 impl Default for Config {
@@ -129,6 +136,9 @@ impl Default for Config {
             recent_emoji: Default::default(),
             skin_tone: 0,
             favourite_gifs: Vec::new(),
+            viewer_wheel_zoom: true,
+            viewer_load_original: true,
+            viewer_click_outside_closes: true,
         }
     }
 }
@@ -262,6 +272,10 @@ pub struct Modules {
     /// The star on GIFs and the GIF picker's Favourites tab.
     #[serde(default = "on")]
     pub favourite_gifs: bool,
+    /// Click an image / GIF to open it in the lightbox (`lightbox.rs`).
+    /// Off = clicks open the browser, as before.
+    #[serde(default = "on")]
+    pub media_viewer: bool,
 }
 
 impl Default for Modules {
@@ -286,6 +300,7 @@ impl Default for Modules {
             custom_themes: true,
             paste_media: true,
             favourite_gifs: true,
+            media_viewer: true,
         }
     }
 }
@@ -476,6 +491,12 @@ pub const MODULES: &[ModuleInfo] = &[
         description: "A star on each GIF and a Favourites tab in the GIF picker. Off = no star or tab; saved favourites are kept for later.",
         get: |m| &mut m.favourite_gifs,
     },
+    ModuleInfo {
+        name: "Image viewer",
+        category: ModuleCategory::Messaging,
+        description: "Click an image or GIF to open it big over the app, like Discord: zoom, pan, arrows between a message's pictures, copy and save. Off = clicks open the browser and nothing is loaded.",
+        get: |m| &mut m.media_viewer,
+    },
 ];
 
 #[cfg(test)]
@@ -513,6 +534,9 @@ mod tests {
         assert_eq!(c.custom_theme, None);
         assert!(c.modules.custom_themes);
         assert!(c.modules.paste_media && c.modules.favourite_gifs);
+        // The image viewer came later: on, with its options on.
+        assert!(c.modules.media_viewer);
+        assert!(c.viewer_wheel_zoom && c.viewer_load_original && c.viewer_click_outside_closes);
         // Favourite GIFs came later: none yet.
         assert!(c.favourite_gifs.is_empty());
         // The taskbar badge came later: on.

@@ -23,6 +23,7 @@ mod invites;
 mod layout;
 mod layout_presets;
 mod layout_v3;
+mod lightbox;
 mod links;
 mod login;
 mod markdown;

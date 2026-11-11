@@ -954,6 +954,8 @@ pub enum ToUi {
     UserSettings(Box<crate::settings_proto::UserSettings>),
     /// USER_SETTINGS_PROTO_UPDATE payload (`d`).
     UserSettingsUpdate(serde_json::Value),
+    /// Decoded pixels for the clipboard (image viewer "Copy image").
+    CopyImage(std::sync::Arc<eframe::egui::ColorImage>),
     /// A short message for the user (shown briefly), e.g. "Saved …".
     Notice(String),
     /// A user action hit Discord's rate limit (it is not retried): show
@@ -1238,6 +1240,11 @@ pub enum ToBackend {
     SaveFile {
         url: String,
         filename: String,
+    },
+    /// Image viewer "Copy image": download and decode it (blocking thread),
+    /// answered with `ToUi::CopyImage`. Only from a click.
+    CopyImage {
+        url: String,
     }, // --- reactions ---
     /// Add / remove my reaction. Only from a click (never automatic).
     React {

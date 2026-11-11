@@ -320,6 +320,35 @@ impl Embed {
         }
     }
 
+    /// Can the image viewer open this embed's pictures? Not video / gifv
+    /// previews: those are stills of something that plays.
+    pub fn viewable(&self) -> bool {
+        !matches!(self.kind, EmbedKind::Video | EmbedKind::Gifv)
+    }
+
+    /// The pictures the viewer can show, in drawing order, each with the
+    /// URI the chat loads for it.
+    pub fn viewer_media(&self) -> Vec<(&EmbedMedia, String)> {
+        if !self.viewable() {
+            return Vec::new();
+        }
+        if self.is_bare_media() {
+            return self
+                .main_media()
+                .map(|m| (m, m.sized_url(IMAGE_MAX.0, IMAGE_MAX.1)))
+                .into_iter()
+                .collect();
+        }
+        let mut out = Vec::new();
+        if let Some(t) = &self.thumbnail {
+            out.push((t, t.sized_url(THUMB_MAX.0, THUMB_MAX.1)));
+        }
+        if let Some(i) = &self.image {
+            out.push((i, i.sized_url(IMAGE_MAX.0, IMAGE_MAX.1)));
+        }
+        out
+    }
+
     /// Every image URI [`render_embed`] may load for this embed, so the
     /// caller can `ctx.forget_image` them when the channel is evicted.
     pub fn image_uris(&self) -> Vec<String> {
@@ -429,6 +458,9 @@ pub struct EmbedCtx<'a> {
     /// Markdown renderer for descriptions and field values. `None` = plain
     /// text.
     pub text: Option<TextFn<'a>>,
+    /// The Image viewer module: a click on a picture reports
+    /// [`EmbedOutput::clicked_media`] instead of a link.
+    pub viewer: bool,
 }
 
 impl<'a> EmbedCtx<'a> {
@@ -440,6 +472,7 @@ impl<'a> EmbedCtx<'a> {
             images_enabled: true,
             max_width: MAX_WIDTH,
             text: None,
+            viewer: false,
         }
     }
 
@@ -454,6 +487,9 @@ pub struct EmbedOutput {
     /// A link the user clicked. Run it through `links::check`; never open
     /// it directly.
     pub clicked_link: Option<String>,
+    /// A picture clicked for the image viewer: its `EmbedMedia::source()`
+    /// (matches `Embed::viewer_media`).
+    pub clicked_media: Option<String>,
     /// The whole embed (for hover / context menus). None if nothing drawn.
     pub response: Option<egui::Response>,
 }
@@ -473,7 +509,7 @@ pub fn render_embed(ui: &mut egui::Ui, embed: &Embed, ctx: &EmbedCtx) -> EmbedOu
             let gif = embed.kind == EmbedKind::Gifv;
             // Same fit as attachments: min(400, column - 16), 350 high.
             let fit = crate::widgets::media_width(max_width, IMAGE_MAX.0);
-            media_image(ui, embed, media, IMAGE_MAX, fit, gif, &mut out)
+            media_image(ui, embed, media, IMAGE_MAX, fit, gif, ctx.viewer, &mut out)
         } else {
             let link = embed.media_link(media);
             link_text(ui, RichText::new(&link), Some(&link), &mut out)
@@ -538,7 +574,7 @@ fn card_contents(
         });
         if small_thumb && let Some(t) = &embed.thumbnail {
             ui.add_space(8.0);
-            media_image(ui, embed, t, THUMB_MAX, THUMB_MAX.0, false, out);
+            media_image(ui, embed, t, THUMB_MAX, THUMB_MAX.0, false, ctx.viewer, out);
         }
     });
 
@@ -550,7 +586,7 @@ fn card_contents(
         };
         if let Some((media, max)) = big {
             ui.add_space(6.0);
-            let resp = media_image(ui, embed, media, max, inner, false, out);
+            let resp = media_image(ui, embed, media, max, inner, false, ctx.viewer, out);
             if embed.kind == EmbedKind::Video {
                 play_badge(ui, resp.rect);
             }
@@ -699,6 +735,7 @@ fn link_text(
 }
 
 /// A clickable embed picture, fitted into `max` and the available width.
+#[allow(clippy::too_many_arguments)]
 fn media_image(
     ui: &mut egui::Ui,
     embed: &Embed,
@@ -706,6 +743,7 @@ fn media_image(
     max: (f32, f32),
     avail_w: f32,
     gif_badge: bool,
+    viewer: bool,
     out: &mut EmbedOutput,
 ) -> egui::Response {
     // The URL depends only on `max`, so `Embed::image_uris` can list it.
@@ -736,7 +774,11 @@ fn media_image(
         );
     }
     if resp.clicked() {
-        out.clicked_link = Some(link);
+        if viewer && embed.viewable() {
+            out.clicked_media = Some(media.source().to_string());
+        } else {
+            out.clicked_link = Some(link);
+        }
     }
     resp
 }
@@ -1063,5 +1105,19 @@ mod tests {
         assert_eq!(field_rows(&vec![f(true); 7], 3), vec![0..3, 3..6, 6..7]);
         assert_eq!(field_rows(&[f(false), f(false)], 3), vec![0..1, 1..2]);
         assert_eq!(field_rows(&[f(true), f(true)], 0), vec![0..1, 1..2]);
+    }
+
+    #[test]
+    fn viewer_media_skips_videos_and_matches_chat_uris() {
+        let img = Embed::from_json(&image());
+        let media = img.viewer_media();
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].1, img.image_uris()[0]);
+        // Gifv / video previews play, the viewer doesn't take them.
+        assert!(Embed::from_json(&gifv()).viewer_media().is_empty());
+        assert!(Embed::from_json(&youtube()).viewer_media().is_empty());
+        let bot = Embed::from_json(&rich_bot());
+        assert_eq!(bot.viewer_media().len(), 1);
+        assert!(bot.image_uris().contains(&bot.viewer_media()[0].1));
     }
 }

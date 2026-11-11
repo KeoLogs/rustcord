@@ -37,6 +37,11 @@ improvements, z fixes). It has:
   join or create a thread when you click
 - **Taskbar unread badge** (Windows): mentions + unread DMs as a red count on
   the taskbar icon, capped at 9+; muted servers don't count
+- **Image viewer**: click an image or GIF to open it big over the app like
+  Discord: scroll to zoom, drag to move, double-click for fit / 100%,
+  Left / Right through a message's pictures, Open original, Copy image, Save,
+  Copy link. Loads only the picture on screen, sized to the window (Image
+  viewer module; options in Settings → Media)
 - **Paste media** (Ctrl+V images or copied files into the upload cards; never
   sent until you press Enter) and **favourite GIFs** (star a GIF, Favourites
   tab); both are modules

@@ -30,6 +30,24 @@ async fn save_file(api: &Api, url: &str, filename: &str) -> anyhow::Result<Optio
     ))))
 }
 
+/// Image viewer "Copy image": download, decode on a blocking thread (first
+/// frame of a GIF), hand the pixels to the UI for the clipboard.
+async fn copy_image(api: &Api, url: &str) -> anyhow::Result<Option<ToUi>> {
+    let bytes = api.download(url).await?;
+    let decoded = tokio::task::spawn_blocking(move || {
+        image::load_from_memory(&bytes).map(|img| {
+            let rgba = img.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            eframe::egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw())
+        })
+    })
+    .await?;
+    Ok(Some(match decoded {
+        Ok(img) => ToUi::CopyImage(std::sync::Arc::new(img)),
+        Err(_) => ToUi::Notice("Couldn't copy the image: unknown format".into()),
+    }))
+}
+
 // --- threads ---
 /// A 403 / 404 (typed HTTP status): the endpoint isn't available to this
 /// account here.
@@ -507,6 +525,7 @@ async fn run(
                     .await
                     .map(|_| Some(ToUi::GuildRemoved(guild_id))),
                 ToBackend::SaveFile { url, filename } => save_file(&api, &url, &filename).await,
+                ToBackend::CopyImage { url } => copy_image(&api, &url).await,
                 // Profiles and notes are user-account endpoints.
                 ToBackend::LoadProfile { user_id, .. } if is_bot => {
                     Ok(Some(ToUi::ProfileUnavailable(user_id)))
