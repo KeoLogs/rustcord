@@ -6,6 +6,14 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## Unreleased
+- Server tools (Brief B, "Server admin" module, on by default): right-click a
+  server you manage → Server Settings. Only the tools your permissions allow
+  are shown, and nothing changes on Discord until you press Save or Confirm.
+  - Overview: name, icon, banner, description, system channel, AFK channel
+    and timeout, verification level, default notifications and the explicit
+    content filter.
+
 ## 0.10.0: DM core (history paging, first unread, optimistic send)
 - Chat history like Discord's (Brief A): scrolling near the top loads 50
   older messages at a time and the view stays where it was; a "Load more"

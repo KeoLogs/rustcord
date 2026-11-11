@@ -1273,7 +1273,7 @@ fn label(ui: &mut egui::Ui, pal: &Palette, text: &str) {
 
 /// Discord's settings row: title and switch on one line, a muted
 /// description under it, then a divider.
-fn switch_row(ui: &mut egui::Ui, on: &mut bool, title: &str, desc: &str, pal: &Palette) {
+pub(crate) fn switch_row(ui: &mut egui::Ui, on: &mut bool, title: &str, desc: &str, pal: &Palette) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(title).size(15.0).color(pal.strong));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1295,7 +1295,7 @@ fn switch_row(ui: &mut egui::Ui, on: &mut bool, title: &str, desc: &str, pal: &P
 }
 
 /// A settings sidebar entry: hover / selected backgrounds like Discord's.
-fn nav_item(
+pub(crate) fn nav_item(
     ui: &mut egui::Ui,
     icon: &str,
     text: &str,
@@ -1335,7 +1335,7 @@ fn nav_item(
 }
 
 /// Discord's round ✕ with "ESC" under it.
-fn close_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
+pub(crate) fn close_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 54.0), egui::Sense::click());
     let c = egui::pos2(rect.center().x, rect.top() + 18.0);
     let col = if resp.hovered() {
@@ -1363,12 +1363,12 @@ fn close_button(ui: &mut egui::Ui, pal: &Palette) -> egui::Response {
         .on_hover_text("Close (Esc)")
 }
 
-fn hint(ui: &mut egui::Ui, pal: &Palette, text: &str) {
+pub(crate) fn hint(ui: &mut egui::Ui, pal: &Palette, text: &str) {
     ui.label(RichText::new(text).size(13.0).color(pal.muted));
 }
 
 /// iOS/Discord-style on/off switch.
-fn toggle(ui: &mut egui::Ui, on: &mut bool, pal: &Palette) -> egui::Response {
+pub(crate) fn toggle(ui: &mut egui::Ui, on: &mut bool, pal: &Palette) -> egui::Response {
     let size = vec2(40.0, 22.0);
     let (rect, mut resp) = ui.allocate_exact_size(size, egui::Sense::click());
     if resp.clicked() {

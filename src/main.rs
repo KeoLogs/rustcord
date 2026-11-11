@@ -2,6 +2,7 @@
 
 mod account_menu;
 mod accounts;
+mod admin;
 mod anim;
 mod api;
 mod app;

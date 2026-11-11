@@ -632,6 +632,11 @@ async fn run(
                     }))
                 }
                 ToBackend::Threads(action) => Ok(thread_request(&api, &tx, action).await),
+                // --- server tools ---
+                ToBackend::Admin(req) => Ok(Some(ToUi::Admin(Box::new(
+                    crate::admin::execute(&api, *req).await,
+                )))),
+                ToBackend::AdminPick(slot) => Ok(admin_pick(slot).await),
                 // --- friends ---
                 ToBackend::Friends(_) | ToBackend::MessageRequest(_) if is_bot => {
                     Ok(Some(ToUi::Notice("Friends need a user account".into())))
@@ -802,6 +807,43 @@ fn decode_image(bytes: &[u8]) -> Option<eframe::egui::ColorImage> {
     ))
 }
 
+/// Server tools: let the user pick one image and read it (capped) for an
+/// icon, banner, emoji or sticker upload. Nothing is sent here.
+async fn admin_pick(slot: crate::admin::PickSlot) -> Option<ToUi> {
+    let Some(file) = rfd::AsyncFileDialog::new()
+        .set_title("Choose an image")
+        .add_filter("Images", &["png", "apng", "jpg", "jpeg", "gif", "webp"])
+        .pick_file()
+        .await
+    else {
+        // Cancelled.
+        return None;
+    };
+    let name = file.file_name();
+    let Some(mime) = crate::admin::mime_for(&name) else {
+        return Some(ToUi::Notice("That file type can't be used here.".into()));
+    };
+    let path = file.path().to_path_buf();
+    match tokio::fs::metadata(&path).await {
+        Ok(m) if m.len() <= crate::admin::MAX_IMAGE_BYTES => {}
+        Ok(_) => {
+            return Some(ToUi::Notice(
+                "That image is too big (10 MB at most).".into(),
+            ));
+        }
+        Err(e) => return Some(ToUi::Notice(format!("Couldn't read {name}: {e}"))),
+    }
+    Some(match tokio::fs::read(&path).await {
+        Ok(bytes) => ToUi::AdminPicked(Box::new(crate::admin::Picked {
+            slot,
+            name,
+            mime: mime.to_string(),
+            bytes: std::sync::Arc::new(bytes),
+        })),
+        Err(e) => ToUi::Notice(format!("Couldn't read {name}: {e}")),
+    })
+}
+
 /// What a read-only test-account run (`RUSTCORD_TEST_ACCOUNT`) may still
 /// do: load things and gateway reads. Everything that would send, ack,
 /// type, react, join, edit or change settings is dropped.
@@ -826,7 +868,7 @@ fn read_only_ok(req: &ToBackend) -> bool {
             | ToBackend::RequestMembers { .. }
             | ToBackend::RequestMemberList { .. }
             | ToBackend::Notify { .. }
-    )
+    ) || matches!(req, ToBackend::Admin(r) if !r.is_write())
 }
 
 #[cfg(test)]

@@ -937,6 +937,59 @@ fn mime_for(name: &str) -> &'static str {
 // are only ever called because the user clicked something; nothing here is
 // retried or polled.
 impl Api {
+    /// One server management call (`src/admin/`): any method, an optional
+    /// JSON body or multipart file, an optional audit log reason. A 204
+    /// reply is `Null`.
+    pub async fn admin(&self, r: &crate::admin::Request) -> Result<Value> {
+        use crate::admin::Method;
+        let method = match r.method {
+            Method::Get => reqwest::Method::GET,
+            Method::Post => reqwest::Method::POST,
+            Method::Patch => reqwest::Method::PATCH,
+            Method::Put => reqwest::Method::PUT,
+            Method::Delete => reqwest::Method::DELETE,
+        };
+        let mut rb = self
+            .http
+            .request(method, format!("{API_BASE}{}", r.path))
+            .header("Authorization", &self.auth);
+        if let Some(reason) = r.reason.as_deref().filter(|s| !s.is_empty()) {
+            rb = rb.header(
+                "X-Audit-Log-Reason",
+                crate::emoji_picker::percent_encode(reason),
+            );
+        }
+        if let Some(f) = &r.file {
+            let mut form = reqwest::multipart::Form::new();
+            for (k, v) in r
+                .body
+                .as_ref()
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+            {
+                let text = v.as_str().map_or_else(|| v.to_string(), str::to_string);
+                form = form.text(k.clone(), text);
+            }
+            let part = reqwest::multipart::Part::bytes(f.bytes.as_ref().clone())
+                .file_name(f.name.clone())
+                .mime_str(&f.mime)?;
+            rb = rb.multipart(form.part("file", part));
+        } else if let Some(body) = &r.body {
+            rb = rb.json(body);
+        }
+        let what = r.kind.what();
+        let resp = self
+            .send(rb)
+            .await
+            .with_context(|| format!("{what} request failed"))?;
+        let resp = Self::check(resp, what).await?;
+        if resp.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(Value::Null);
+        }
+        Ok(resp.json().await.unwrap_or(Value::Null))
+    }
+
     async fn get_json(&self, url: &str, what: &str) -> Result<Value> {
         let resp = self
             .send(self.http.get(url).header("Authorization", &self.auth))
