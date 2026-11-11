@@ -6,6 +6,40 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## Unreleased
+- Server tools (Brief B, "Server admin" module, on by default): right-click a
+  server you manage → Server Settings. Only the tools your permissions allow
+  are shown, and nothing changes on Discord until you press Save or Confirm.
+  - Overview: name, icon, banner, description, system channel, AFK channel
+    and timeout, verification level, default notifications and the explicit
+    content filter.
+  - Roles: create, edit, delete (type the name to confirm) and drag to
+    reorder; colour, hoist, mentionable and icon; the full permission grid
+    with descriptions; give a role to or take it from members. Roles at or
+    above your highest role are locked.
+  - Channels: create, edit, delete (type the name to confirm) and drag to
+    reorder channels and categories; topic, slowmode, age-restricted,
+    bitrate and user limit; permission overwrites (allow / inherit / deny)
+    for each role and member.
+  - Members: search members; change nicknames and roles; time out, kick and
+    ban (with a delete-messages window; type the name to confirm); the bans
+    list with unban. Members at or above your highest role are protected.
+  - Invites: list the server's invites, create one (channel, expiry, max
+    uses, temporary membership), copy the link and revoke.
+  - Emoji and stickers: upload (pick a file, name it, then Add), rename and
+    delete, with Discord's size limits checked before anything is sent.
+  - Audit log: who changed what, with the changes and reason on each entry,
+    filters by user and by action, and "Load more".
+  - AutoMod: list, create, edit and delete keyword, spam and mention-spam
+    rules, with their actions (block, alert channel, timeout) and exempt
+    roles and channels.
+  - Webhooks and integrations: list, create, edit and delete webhooks. A
+    webhook URL is hidden until you click Reveal, Copy URL copies it, and
+    it is never logged. Integrations can be listed and removed.
+  - Community (Community servers only): rules and updates channels and the
+    server language, the welcome screen, and onboarding (default channels,
+    questions and answers with the roles and channels they give).
+
 ## 0.10.0: DM core (history paging, first unread, optimistic send)
 - Chat history like Discord's (Brief A): scrolling near the top loads 50
   older messages at a time and the view stays where it was; a "Load more"

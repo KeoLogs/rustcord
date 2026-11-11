@@ -1004,6 +1004,10 @@ pub enum ToUi {
     UserSettingsUpdate(serde_json::Value),
     /// A short message for the user (shown briefly), e.g. "Saved …".
     Notice(String),
+    /// The reply to a `ToBackend::Admin` request (server tools).
+    Admin(Box<crate::admin::Response>),
+    /// The image picked for `ToBackend::AdminPick`.
+    AdminPicked(Box<crate::admin::Picked>),
     /// A user action hit Discord's rate limit (it is not retried): show
     /// "Slow down, try again in Ns" and hold write controls until then.
     RateLimited(crate::ratelimit::RateLimited),
@@ -1354,6 +1358,12 @@ pub enum ToBackend {
         guild_id: String,
         body: serde_json::Value,
     },
+    // --- server tools ---
+    /// A server management request (Server admin module). Only ever built
+    /// from a click on the admin page; never retried.
+    Admin(Box<crate::admin::Request>),
+    /// Open a file dialog for a server picture (icon, banner, emoji…).
+    AdminPick(crate::admin::PickSlot),
     // --- threads ---
     /// Thread / forum request from a click (join, leave, create, post) or
     /// from opening a list (forum posts, archived threads). Never retried.

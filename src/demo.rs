@@ -133,7 +133,7 @@ const PEOPLE: &[Person] = &[
         Some((4, "☕|brb, coffee")),
     ),
     ("880000000000000008", "Jess", &[], "online", None),
-    (ME, "You", &["503"], "online", None),
+    (ME, "You", &["503", "505"], "online", None),
     ("390000000000000007", "Olly", &["503"], "offline", None),
     ("900000000000000009", "Priya", &[], "offline", None),
 ];
@@ -269,10 +269,14 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
         "id": TEST_GUILD,
         "name": "RustCord Test Server",
         "owner_id": SAM,
+        "features": ["COMMUNITY"],
         "emojis": [{ "id": "123", "name": "pepe" }],
         "roles": [
             { "id": TEST_GUILD, "name": "@everyone", "color": 0, "position": 0, "permissions": "104324673" },
-            { "id": "500", "name": "Admin", "color": 0xf1c40f, "position": 5, "hoist": true, "permissions": "8" },
+            { "id": "500", "name": "Admin", "color": 0xf1c40f, "position": 6, "hoist": true, "permissions": "8" },
+            // You: every server tool (Server Settings) without Administrator,
+            // so channel permissions still apply to you.
+            { "id": "505", "name": "Manager", "color": 0, "position": 5, "permissions": crate::admin::demo::MANAGER_PERMISSIONS.to_string() },
             { "id": "501", "name": "Moderators", "color": 0x3498db, "position": 4, "hoist": true, "permissions": "8192" },
             { "id": "502", "name": "Bots", "color": 0x9b59b6, "position": 3, "hoist": true },
             // Manage Messages: you can pin here.
@@ -369,7 +373,7 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
         let parts = big::DemoParts {
             guilds: guild_values,
             merged_members: vec![
-                json!([{ "user_id": ME, "roles": ["503"] }]),
+                json!([{ "user_id": ME, "roles": ["503", "505"] }]),
                 json!([]),
                 json!([]),
             ],
@@ -405,7 +409,7 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
         );
     } else {
         let mut guilds: Vec<Guild> = guild_values.iter().map(Guild::from_json).collect();
-        guilds[0].my_roles = vec!["503".into()];
+        guilds[0].my_roles = vec!["503".into(), "505".into()];
         send(ToUi::Ready {
             me: User::from_json(&me),
             premium_type: 0,
@@ -620,6 +624,26 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                         "activities": activity.unwrap_or_else(|| json!([])),
                     })),
                 )]));
+            }
+            ToBackend::Admin(req) => {
+                // Bodies and replies are never printed (webhook URLs).
+                eprintln!("demo: {req:?}");
+                send(ToUi::Admin(Box::new(crate::admin::Response {
+                    result: crate::admin::demo::respond(&req),
+                    guild_id: req.guild_id.clone(),
+                    kind: req.kind,
+                    key: req.key.clone(),
+                    was_write: req.is_write(),
+                })));
+            }
+            ToBackend::AdminPick(slot) => {
+                // No file dialog in the demo: a tiny stand-in picture.
+                send(ToUi::AdminPicked(Box::new(crate::admin::Picked {
+                    slot,
+                    name: "demo-image.png".into(),
+                    mime: "image/png".into(),
+                    bytes: std::sync::Arc::new(vec![0x89, b'P', b'N', b'G']),
+                })));
             }
             ToBackend::LeaveGuild { guild_id } => {
                 eprintln!("demo: leave server {guild_id}");

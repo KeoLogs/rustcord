@@ -1026,6 +1026,10 @@ fn session_logic(state: &mut State, ctx: &egui::Context, config: &Config, chat_v
     state.set_friends_module(config.modules.friends);
     state.set_threads_module(config.modules.threads);
     state.set_invites_module(config.modules.invites);
+    state.admin_module = config.modules.server_admin;
+    if !state.admin_module {
+        state.admin = None;
+    }
     if !config.modules.search {
         state.search = None;
     }
@@ -1102,6 +1106,19 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
     if wants_settings {
         app.settings = Some(SettingsPage::new(&app.config));
         app.editing_layout = false;
+    }
+
+    // Server Settings (Server admin module) replaces the main UI while open.
+    if app.settings.is_none()
+        && let Screen::Main(state) = &mut app.screen
+        && state.admin_open()
+    {
+        state.admin_ui(
+            ui,
+            &pal,
+            app.config.modules.images && app.config.modules.emoji_images,
+        );
+        return;
     }
 
     // Settings page replaces the main UI while open.
@@ -2048,6 +2065,11 @@ pub struct State {
     confirm_pin: Option<(String, String, bool)>,
     /// Confirm leaving a server: (id, name).
     confirm_leave: Option<(String, String)>,
+    /// The open Server Settings page (Server admin module). `None` unless
+    /// the user opened it: nothing is kept or loaded otherwise.
+    admin: Option<Box<crate::admin::AdminPage>>,
+    /// The Server admin module is on (from the config, each frame).
+    admin_module: bool,
 
     /// Synced settings (user accounts): status, folders, privacy, compact.
     user_settings: Option<UserSettings>,
@@ -2167,6 +2189,8 @@ impl State {
             highlight: None,
             confirm_pin: None,
             confirm_leave: None,
+            admin: None,
+            admin_module: false,
             user_settings: None,
             status_dialog: None,
             open_folders: HashSet::new(),
@@ -2742,6 +2766,16 @@ impl State {
                 }
             }
             ToUi::Notice(text) => self.toast = Some((text, Instant::now())),
+            ToUi::Admin(resp) => {
+                if let Some(page) = &mut self.admin {
+                    page.on_response(*resp);
+                }
+            }
+            ToUi::AdminPicked(picked) => {
+                if let Some(page) = &mut self.admin {
+                    page.on_picked(*picked);
+                }
+            }
             ToUi::RateLimited(rl) => self.rate_limited(rl),
             ToUi::GuildEmojis { guild_id, emojis } => {
                 if let Some(g) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
@@ -4971,6 +5005,20 @@ impl State {
             return true;
         }
         self.select_guild(guild.clone());
+        // `admin`, `admin-roles`, …: a Server Settings tab.
+        if let Some(tab) = view.strip_prefix("admin") {
+            let tab = tab.trim_start_matches('-');
+            let detail = tab.ends_with("-edit");
+            let tab = crate::admin::Tab::from_name(tab.trim_end_matches("-edit"));
+            self.open_admin(&guild, tab);
+            if let Some(page) = &mut self.admin {
+                page.demo_detail = detail;
+                if detail {
+                    page.demo_detail_now();
+                }
+            }
+            return true;
+        }
         // `welcome`: #welcome, with the embeds and the image attachment.
         let channel = match view {
             "forum" => "205",
@@ -5417,6 +5465,9 @@ impl State {
         {
             s.add_server = Some(AddServerDialog::new());
         }
+        if let Some(gid) = ev.server_settings.take() {
+            self.open_admin(&gid, None);
+        }
         if let Some(gid) = ev.channels_roles {
             let _ = self.tx.send(ToBackend::LoadOnboarding {
                 guild_id: gid,
@@ -5489,6 +5540,20 @@ impl State {
                     .clicked()
                 {
                     ev.channels_roles = Some(g.id.clone());
+                }
+                // Only for servers I may manage (computed permissions).
+                if self.admin_module
+                    && !self.admin_tabs(g).is_empty()
+                    && widgets::menu_item(
+                        ui,
+                        Some(icons::GEAR),
+                        "Server Settings",
+                        Tone::Normal,
+                        pal,
+                    )
+                    .clicked()
+                {
+                    ev.server_settings = Some(g.id.clone());
                 }
                 if widgets::menu_item(ui, Some(icons::ID), "Copy Server ID", Tone::Normal, pal)
                     .clicked()
@@ -7084,6 +7149,82 @@ impl State {
     /// Why the channel's messages aren't shown, if they can't be.
     pub fn channel_error(&self, channel_id: &str) -> Option<&ChannelError> {
         self.channel_errors.get(channel_id)
+    }
+
+    /// The Server Settings tabs I may use in a server (none = no entry).
+    fn admin_tabs(&self, g: &Guild) -> Vec<crate::admin::Tab> {
+        let Some(me) = &self.me else {
+            return Vec::new();
+        };
+        if g.is_dms() {
+            return Vec::new();
+        }
+        let p = perms::guild_permissions(
+            &g.id,
+            &g.owner_id,
+            &g.roles,
+            &perms::Me {
+                user_id: &me.id,
+                roles: &g.my_roles,
+            },
+        );
+        crate::admin::available_tabs(p, &g.features)
+    }
+
+    /// Open Server Settings (the user clicked it): the first tab I may
+    /// use, or `tab` if I may use that one. Its data is loaded once.
+    fn open_admin(&mut self, guild_id: &str, tab: Option<crate::admin::Tab>) {
+        if !self.admin_module {
+            return;
+        }
+        let Some(g) = self.guilds.iter().find(|g| g.id == guild_id) else {
+            return;
+        };
+        let tabs = self.admin_tabs(g);
+        let Some(tab) = tab.filter(|t| tabs.contains(t)).or(tabs.first().copied()) else {
+            return;
+        };
+        let (page, reqs) = crate::admin::AdminPage::open(guild_id, tab);
+        for r in reqs {
+            let _ = self.tx.send(ToBackend::Admin(Box::new(r)));
+        }
+        self.admin = Some(Box::new(page));
+    }
+
+    /// Is the Server Settings page open (it replaces the main UI)?
+    pub fn admin_open(&self) -> bool {
+        self.admin.is_some()
+    }
+
+    /// Draw the Server Settings page and send what the user asked for.
+    pub fn admin_ui(&mut self, ui: &mut egui::Ui, pal: &Palette, images: bool) {
+        let Some(mut page) = self.admin.take() else {
+            return;
+        };
+        let (Some(g), Some(me)) = (
+            self.guilds.iter().find(|g| g.id == page.guild_id),
+            self.me.as_ref(),
+        ) else {
+            // The server is gone (left, kicked): close.
+            return;
+        };
+        let mut cx = crate::admin::Cx::new(g, &me.id, pal);
+        cx.images = images;
+        let out = page.ui(ui, &cx);
+        for r in out.send {
+            let _ = self.tx.send(ToBackend::Admin(Box::new(r)));
+        }
+        if let Some(slot) = out.pick {
+            let _ = self.tx.send(ToBackend::AdminPick(slot));
+        }
+        if out.close {
+            // Free the emoji / sticker pictures the page showed.
+            for uri in page.image_uris() {
+                ui.ctx().forget_image(&uri);
+            }
+        } else {
+            self.admin = Some(page);
+        }
     }
 
     /// My permission `bit` in a channel (always true in DMs).
@@ -10060,6 +10201,7 @@ struct RailEvents {
     add_server: bool,
     /// Guild context menu → Channels & Roles.
     channels_roles: Option<String>,
+    server_settings: Option<String>,
 }
 
 /// Up to three initials of a server name ("RustCord Test Server" → "RTS").

@@ -270,6 +270,9 @@ pub struct Modules {
     /// Settings, Presets: save / import / apply your own setups (`.rcpreset`).
     #[serde(default = "on")]
     pub presets: bool,
+    /// Server Settings: the server management screens (`src/admin/`).
+    #[serde(default = "on")]
+    pub server_admin: bool,
 }
 
 impl Default for Modules {
@@ -295,6 +298,7 @@ impl Default for Modules {
             paste_media: true,
             favourite_gifs: true,
             presets: true,
+            server_admin: true,
         }
     }
 }
@@ -538,6 +542,12 @@ pub const MODULES: &[ModuleInfo] = &[
         category: ModuleCategory::Appearance,
         description: "Save your layout, theme and modules as a preset, share it as a .rcpreset file or code, and apply presets (Settings, Presets). Off = the Presets page is hidden and no preset files are read.",
         get: |m| &mut m.presets,
+    },
+    ModuleInfo {
+        name: "Server admin",
+        category: ModuleCategory::Servers,
+        description: "Server Settings for servers you manage: overview, roles, channels, members, invites, emoji, audit log, AutoMod and webhooks. Only tools you have permission for are shown. Off = no Server Settings entry and nothing is loaded.",
+        get: |m| &mut m.server_admin,
     },
 ];
 
