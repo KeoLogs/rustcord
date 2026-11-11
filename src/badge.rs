@@ -1,8 +1,8 @@
 //! Unread badges: the numbers on the server rail / DM icon and the taskbar
 //! badge, from one place so they always agree.
 //!
-//! Also draws the taskbar badge picture (a red circle with a white count)
-//! into RGBA in code, so no artwork ships with the app. Pure and tested;
+//! Also draws the taskbar badge picture (a red circle, or a square in the
+//! square themes, with a white count) into RGBA in code, so no artwork ships with the app. Pure and tested;
 //! the platform part lives in `taskbar.rs`.
 
 use crate::notify::Mutes;
@@ -82,7 +82,7 @@ pub fn label(count: u32) -> Option<u8> {
 pub const NINE_PLUS: u8 = 10;
 
 /// Text of a label ("1".."9", "9+").
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))] // the taskbar badge is Windows-only
 pub fn label_text(label: u8) -> String {
     if label >= NINE_PLUS {
         "9+".into()
@@ -92,12 +92,11 @@ pub fn label_text(label: u8) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Badge picture (only `taskbar.rs` on Windows draws it; tests run it
-// everywhere)
+// Badge picture
 // ---------------------------------------------------------------------------
 
 /// 5x7 glyphs, one row per byte (bit 4 = left column).
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))] // the taskbar badge is Windows-only
 fn glyph(c: char) -> [u8; 7] {
     match c {
         '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
@@ -116,7 +115,7 @@ fn glyph(c: char) -> [u8; 7] {
 }
 
 /// Glyph cell `(x, y)` of `rows` is ink (out of range = no ink).
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))] // the taskbar badge is Windows-only
 fn ink(rows: &[u8; 7], x: f32, y: f32) -> bool {
     if !(0.0..5.0).contains(&x) || !(0.0..7.0).contains(&y) {
         return false;
@@ -125,17 +124,43 @@ fn ink(rows: &[u8; 7], x: f32, y: f32) -> bool {
 }
 
 /// Supersamples per pixel side.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))] // the taskbar badge is Windows-only
 const SS: u32 = 4;
 /// Strokes are thickened by this much (in glyph units) on each side so the
 /// count stays readable at 16 px.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))] // the taskbar badge is Windows-only
 const BOLD: f32 = 0.18;
 
+/// Colour and shape of the taskbar badge picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Look {
+    pub fill: [u8; 3],
+    /// A square with 2 px corners (the RustCord themes) instead of a circle.
+    pub square: bool,
+}
+
+/// Is `(px, py)` inside the badge shape of side `s`?
+#[cfg_attr(not(windows), allow(dead_code))] // the taskbar badge is Windows-only
+fn inside_shape(px: f32, py: f32, s: f32, square: bool) -> bool {
+    if square {
+        // Rounded square, 2 px corners.
+        let c = crate::theme::SQUARE_RADIUS;
+        let dx = (px.min(s - px) - c).min(0.0);
+        let dy = (py.min(s - py) - c).min(0.0);
+        px >= 0.0 && py >= 0.0 && px <= s && py <= s && dx * dx + dy * dy <= c * c
+    } else {
+        let r = s / 2.0;
+        let (dx, dy) = (px - r, py - r);
+        dx * dx + dy * dy <= r * r
+    }
+}
+
 /// Draw the badge for `label` as `size` x `size` RGBA (straight alpha, rows
-/// top to bottom): a `fill` circle with the count in white, anti-aliased.
-#[cfg_attr(not(windows), allow(dead_code))]
-pub fn render(label: u8, size: u32, fill: [u8; 3]) -> Vec<u8> {
+/// top to bottom): a circle (or square) in `look.fill` with the count in
+/// white, anti-aliased.
+#[cfg_attr(not(windows), allow(dead_code))] // the taskbar badge is Windows-only
+pub fn render(label: u8, size: u32, look: Look) -> Vec<u8> {
+    let fill = look.fill;
     let text = label_text(label);
     let glyphs: Vec<[u8; 7]> = text.chars().map(glyph).collect();
     let n = glyphs.len() as f32;
@@ -149,7 +174,6 @@ pub fn render(label: u8, size: u32, fill: [u8; 3]) -> Vec<u8> {
     };
     let left = (s - text_w * unit) / 2.0;
     let top = (s - 7.0 * unit) / 2.0;
-    let r = s / 2.0;
     let is_ink = |px: f32, py: f32| {
         let gx = (px - left) / unit;
         let gy = (py - top) / unit;
@@ -172,8 +196,7 @@ pub fn render(label: u8, size: u32, fill: [u8; 3]) -> Vec<u8> {
                 for sx in 0..SS {
                     let px = x as f32 + (sx as f32 + 0.5) * step;
                     let py = y as f32 + (sy as f32 + 0.5) * step;
-                    let (dx, dy) = (px - r, py - r);
-                    if dx * dx + dy * dy > r * r {
+                    if !inside_shape(px, py, s, look.square) {
                         continue;
                     }
                     inside += 1;
@@ -199,7 +222,7 @@ pub fn render(label: u8, size: u32, fill: [u8; 3]) -> Vec<u8> {
 
 /// Ink of glyph `i` (as f32 index) at glyph-space `(gx, gy)`, strokes
 /// thickened by [`BOLD`].
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code))] // the taskbar badge is Windows-only
 fn is_glyph_ink(glyphs: &[[u8; 7]], i: f32, gx: f32, gy: f32) -> bool {
     let rows = &glyphs[i as usize];
     let lx = gx - i.floor() * 6.0;
@@ -330,11 +353,40 @@ mod tests {
     }
 
     #[test]
+    fn square_picture() {
+        let look = Look {
+            fill: [0xda, 0x37, 0x3c],
+            square: true,
+        };
+        let size = 32;
+        let px = render(3, size, look);
+        let alpha = |x: u32, y: u32| px[((y * size + x) * 4 + 3) as usize];
+        // Filled almost to the corner (a circle leaves (3, 3) empty) ...
+        assert_eq!(alpha(3, 3), 255);
+        assert_eq!(alpha(0, size / 2), 255);
+        // ... with a small rounded corner.
+        assert!(alpha(0, 0) < 255);
+        let round = render(
+            3,
+            size,
+            Look {
+                square: false,
+                ..look
+            },
+        );
+        assert_eq!(round[((3 * size + 3) * 4 + 3) as usize], 0);
+    }
+
+    #[test]
     fn picture() {
         let red = [0xda, 0x37, 0x3c];
+        let look = Look {
+            fill: red,
+            square: false,
+        };
         for size in [16, 20, 24, 32] {
             for l in 1..=NINE_PLUS {
-                let px = render(l, size, red);
+                let px = render(l, size, look);
                 assert_eq!(px.len(), (size * size * 4) as usize);
                 let at = |x: u32, y: u32| {
                     let i = ((y * size + x) * 4) as usize;
@@ -352,7 +404,7 @@ mod tests {
             }
         }
         // Different counts, different pictures.
-        assert_ne!(render(1, 16, red), render(7, 16, red));
-        assert_ne!(render(9, 16, red), render(NINE_PLUS, 16, red));
+        assert_ne!(render(1, 16, look), render(7, 16, look));
+        assert_ne!(render(9, 16, look), render(NINE_PLUS, 16, look));
     }
 }

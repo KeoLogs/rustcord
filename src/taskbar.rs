@@ -28,8 +28,8 @@ pub enum Target<'a> {
 /// One window's badge.
 #[derive(Default)]
 pub struct TaskbarBadge {
-    /// Label and colour as last set on the taskbar (`None` = no badge).
-    shown: Option<(u8, [u8; 3])>,
+    /// Label and look as last set on the taskbar (`None` = no badge).
+    shown: Option<(u8, crate::badge::Look)>,
     /// The window, once known (an `HWND` as an integer, so this is `Send`).
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: isize,
@@ -37,12 +37,18 @@ pub struct TaskbarBadge {
 
 impl TaskbarBadge {
     /// Show `count` (0 = clear). `enabled` is `Config::taskbar_badge`;
-    /// `fill` the badge colour (`Palette::danger`). Cheap when nothing
+    /// `look` the badge colour (`Palette::danger`) and shape. Cheap when nothing
     /// changed: one comparison.
-    pub fn update(&mut self, target: Target<'_>, count: u32, enabled: bool, fill: [u8; 3]) {
+    pub fn update(
+        &mut self,
+        target: Target<'_>,
+        count: u32,
+        enabled: bool,
+        look: crate::badge::Look,
+    ) {
         let want = crate::badge::label(count)
             .filter(|_| enabled)
-            .map(|l| (l, fill));
+            .map(|l| (l, look));
         if want == self.shown {
             return;
         }
@@ -95,10 +101,13 @@ pub fn frame_target(frame: &eframe::Frame) -> Target<'static> {
     Target::None
 }
 
-/// A colour as the badge's `[r, g, b]`.
-pub fn rgb(c: eframe::egui::Color32) -> [u8; 3] {
+/// The badge's look: colour `c` in the active theme's shape.
+pub fn look(c: eframe::egui::Color32) -> crate::badge::Look {
     let [r, g, b, _] = c.to_srgba_unmultiplied();
-    [r, g, b]
+    crate::badge::Look {
+        fill: [r, g, b],
+        square: crate::theme::shape() == crate::theme::Shape::Square,
+    }
 }
 
 /// Free the badge icons and the COM object (call once on exit).
@@ -157,8 +166,8 @@ mod win {
         com: bool,
         /// Creating the COM object failed: don't retry every frame.
         failed: bool,
-        /// Badge icons by (label, colour).
-        icons: Vec<((u8, [u8; 3]), HICON)>,
+        /// Badge icons by (label, look).
+        icons: Vec<((u8, crate::badge::Look), HICON)>,
         /// Windows that have a badge, so an account window's title lookup
         /// never picks another window with the same title.
         claimed: Vec<isize>,
@@ -282,7 +291,7 @@ mod win {
             Some(self.list)
         }
 
-        fn icon(&mut self, key: (u8, [u8; 3])) -> Option<HICON> {
+        fn icon(&mut self, key: (u8, crate::badge::Look)) -> Option<HICON> {
             if let Some((_, h)) = self.icons.iter().find(|(k, _)| *k == key) {
                 return Some(*h);
             }
@@ -294,7 +303,7 @@ mod win {
 
     /// Set (or with `None` clear) the overlay. False if it didn't take
     /// (the caller tries again on a later frame).
-    pub fn set_overlay(hwnd: isize, want: Option<(u8, [u8; 3])>) -> bool {
+    pub fn set_overlay(hwnd: isize, want: Option<(u8, crate::badge::Look)>) -> bool {
         SHELL.with_borrow_mut(|s| {
             if want.is_none() && s.list.is_null() {
                 // Never showed a badge: nothing to clear, nothing to create.
@@ -324,10 +333,10 @@ mod win {
     }
 
     /// Draw the badge and turn it into an icon of the small-icon size.
-    fn make_icon(label: u8, fill: [u8; 3]) -> Option<HICON> {
+    fn make_icon(label: u8, look: crate::badge::Look) -> Option<HICON> {
         // SAFETY: GetSystemMetrics has no preconditions.
         let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 64) as u32;
-        let rgba = crate::badge::render(label, size, fill);
+        let rgba = crate::badge::render(label, size, look);
         // 32-bit DDB rows are BGRA, top to bottom; the alpha is used as is.
         let bgra: Vec<u8> = rgba
             .as_chunks::<4>()

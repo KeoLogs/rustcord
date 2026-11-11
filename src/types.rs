@@ -1027,6 +1027,9 @@ pub enum ToUi {
     // --- themes ---
     /// The theme file / folder the user picked (None = cancelled).
     ThemePicked(Option<std::path::PathBuf>),
+    // --- presets ---
+    /// Settings → Presets: a picked file or the result of an export.
+    PresetFile(crate::presets::FileEvent),
     // --- onboarding ---
     InviteResolved {
         code: String,
@@ -1316,6 +1319,14 @@ pub enum ToBackend {
     /// Settings → Themes → Import: the native file / folder picker.
     PickTheme {
         folder: bool,
+    },
+    // --- presets ---
+    /// Settings → Presets → Import: the native file picker.
+    PickPreset,
+    /// Settings → Presets → Export: save dialog, then write `text`.
+    ExportPreset {
+        file_name: String,
+        text: String,
     },
     // --- onboarding ---
     /// Invite preview (shown when an invite card appears).

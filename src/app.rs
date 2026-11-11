@@ -84,10 +84,12 @@ pub struct RustCordApp {
     applied: Option<f32>,
     /// Installed custom themes (nothing read while the module is off).
     theme_store: crate::themes::ThemeStore,
+    /// Settings → Presets folder (read only while that page is open).
+    preset_store: crate::presets::PresetStore,
     /// The theme the UI draws with.
     active_theme: crate::themes::ActiveTheme,
-    /// (custom id, module on) the active theme was built for.
-    theme_key: Option<(Option<String>, bool)>,
+    /// (custom id, module on, built-in theme) the active theme was built for.
+    theme_key: Option<(Option<String>, bool, crate::builtin_themes::BuiltinTheme)>,
     /// Status bar module's RAM reading.
     ram: RamSampler,
     /// The running session (token in memory only), to reconnect with a
@@ -110,27 +112,61 @@ pub struct RustCordApp {
     /// Demo mode only (`RUSTCORD_DEMO_OPEN=view`): a view to open once the
     /// demo data is in, for screenshots.
     demo_open: Option<String>,
-    /// A `RUSTCORD_DEMO_OPEN` run: nothing is saved (the view may change
-    /// the config, e.g. a theme, only for the screenshot).
+    /// A `RUSTCORD_DEMO_OPEN` / `_SHOT` or `RUSTCORD_MODULES` (memprobe)
+    /// run: nothing is saved (the view may change the config, e.g. a theme,
+    /// only for the screenshot).
     demo_shot: bool,
     /// Demo mode only (`RUSTCORD_DEMO_SHOT=file.png`): save a screenshot of
     /// the window after a few seconds, then quit. Works while the desktop
     /// is locked, unlike capturing the window from outside.
     demo_shot_path: Option<String>,
     demo_shot_asked: bool,
+    /// `RUSTCORD_START_MINIMIZED=1`: minimise and show on the first frame.
+    start_minimized: bool,
+    /// `RUSTCORD_FRAMETIMES=<file>` (memprobe): per-frame CPU time log.
+    /// `None` otherwise, so it costs nothing.
+    frametimes: Option<crate::frametimes::FrameRecorder>,
 }
 
 impl RustCordApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, env_token: Option<String>, demo: bool) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        env_token: Option<String>,
+        demo: bool,
+        test_account: Option<String>,
+    ) -> Self {
+        // `RUSTCORD_TEST_ACCOUNT` (memprobe live runs): that saved
+        // account's token straight from the OS credential store. The run
+        // has its own storage id (main.rs) and a memory-only vault, so it
+        // never saves or removes accounts, and the backend is read-only.
+        let test_token = test_account
+            .as_ref()
+            .filter(|_| !demo)
+            .map(|id| Vault::os().token(id).ok().flatten().ok_or(id.clone()));
+        if test_token.is_some() {
+            crate::config::live::READ_ONLY.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         // Demo screenshots (`RUSTCORD_DEMO_OPEN` / `_SHOT`) start from the
         // defaults, never from what an earlier demo run saved.
+        // `RUSTCORD_MODULES` (memprobe, demo only) is a measuring run: it
+        // also starts from the defaults and saves nothing.
+        let modules_override = demo
+            .then(|| std::env::var("RUSTCORD_MODULES").ok())
+            .flatten()
+            .map(|spec| crate::config::Modules::from_override(&spec));
         let shot = demo
             && (std::env::var("RUSTCORD_DEMO_OPEN").is_ok()
-                || std::env::var("RUSTCORD_DEMO_SHOT").is_ok());
+                || std::env::var("RUSTCORD_DEMO_SHOT").is_ok()
+                || modules_override.is_some());
         let storage = cc.storage.filter(|_| !shot);
         let mut config: Config = storage
             .and_then(|s| eframe::get_value(s, CONFIG_KEY))
             .unwrap_or_default();
+        match modules_override {
+            Some(Ok(modules)) => config.modules = modules,
+            Some(Err(e)) => eprintln!("RUSTCORD_MODULES ignored: {e}"),
+            None => {}
+        }
         if shot {
             // `RUSTCORD_DEMO_SCALE=1.25`: zoom (like a Windows display scale).
             if let Some(z) = std::env::var("RUSTCORD_DEMO_SCALE")
@@ -141,7 +177,11 @@ impl RustCordApp {
             }
         }
         // Tokens live in the OS credential store; demo runs never touch it.
-        let vault = if demo { Vault::memory() } else { Vault::os() };
+        let vault = if demo || test_token.is_some() {
+            Vault::memory()
+        } else {
+            Vault::os()
+        };
         // One-time move of the old plaintext `saved_token` into the store.
         // If the store fails, still log in with it this once; it is never
         // written back to the config file.
@@ -176,19 +216,28 @@ impl RustCordApp {
 
         // Demo screenshots (`RUSTCORD_DEMO_OPEN` / `_SHOT`) use a scratch
         // themes folder so they never touch the user's installed themes.
-        let demo_shot = demo
-            && (std::env::var("RUSTCORD_DEMO_OPEN").is_ok()
-                || std::env::var("RUSTCORD_DEMO_SHOT").is_ok());
-        let themes_dir = if demo_shot {
+        let demo_shot = shot;
+        let themes_dir = if demo_shot || test_token.is_some() {
             Some(std::env::temp_dir().join("rustcord-demo-themes"))
         } else {
             crate::themes::default_dir(demo)
         };
         let theme_store = crate::themes::ThemeStore::new(themes_dir, config.modules.custom_themes);
+        let presets_dir = if demo_shot {
+            Some(std::env::temp_dir().join("rustcord-demo-presets"))
+        } else {
+            crate::presets::default_dir(demo)
+        };
+        // The demo gets two example presets so the page has cards offline.
+        if demo && let Some(d) = &presets_dir {
+            crate::presets::seed_demo(d);
+        }
+        let preset_store = crate::presets::PresetStore::new(presets_dir);
         let active_theme = crate::themes::ActiveTheme::default_theme();
         let mut app = Self {
             screen: Screen::Login(LoginForm::new(config.remember_login, None)),
             theme_store,
+            preset_store,
             active_theme,
             theme_key: None,
             config,
@@ -212,12 +261,29 @@ impl RustCordApp {
                 .then(|| std::env::var("RUSTCORD_DEMO_SHOT").ok())
                 .flatten(),
             demo_shot_asked: false,
+            start_minimized: crate::storage::start_minimized_from_env(),
+            frametimes: crate::frametimes::FrameRecorder::from_env(),
         };
 
         // Log in straight away if we can: demo, DISCORD_TOKEN, or a saved
         // account (DISCORD_TOKEN is never saved).
         if demo {
             app.start_session(&cc.egui_ctx, Token::new(""), true, None);
+        } else if let Some(test) = test_token {
+            match test {
+                Ok(token) => {
+                    app.start_session(&cc.egui_ctx, token, false, None);
+                    if let Some(s) = &mut app.session {
+                        s.saved = true;
+                    }
+                }
+                Err(id) => {
+                    app.screen = Screen::Login(LoginForm::new(
+                        false,
+                        Some(format!("Test account {id} isn't in the credential store.")),
+                    ));
+                }
+            }
         } else if let Some(token) = env_token {
             app.start_session(&cc.egui_ctx, Token::new(token), false, None);
             if let Some(s) = &mut app.session {
@@ -605,6 +671,7 @@ impl RustCordApp {
         let section = match view {
             "modules" => Some(crate::settings::Section::Modules),
             "themes" => Some(crate::settings::Section::Themes),
+            "presets" => Some(crate::settings::Section::Presets),
             "layout" => Some(crate::settings::Section::Layout),
             _ => None,
         };
@@ -618,6 +685,18 @@ impl RustCordApp {
                     .ok()
             })
             .flatten();
+        // `…:rustcord-light`, `…:discord-dark`, `…:discord-light`: a
+        // built-in theme for the screenshot (not saved).
+        use crate::builtin_themes::BuiltinTheme;
+        let builtin = match arg {
+            "rustcord-light" => Some(BuiltinTheme::RustcordLight),
+            "discord-dark" => Some(BuiltinTheme::DiscordDark),
+            "discord-light" => Some(BuiltinTheme::DiscordLight),
+            _ => None,
+        };
+        if let Some(t) = builtin {
+            self.config.builtin_theme = t;
+        }
         if let Some(section) = section {
             let mut page = SettingsPage::new(&self.config);
             page.section = section;
@@ -699,7 +778,7 @@ impl RustCordApp {
             .custom_theme
             .clone()
             .filter(|_| cfg.modules.custom_themes);
-        let key = (custom, cfg.modules.custom_themes);
+        let key = (custom, cfg.modules.custom_themes, cfg.builtin_theme);
         if self.theme_key.as_ref() != Some(&key) {
             self.theme_store.set_enabled(cfg.modules.custom_themes);
             let (active, error) =
@@ -852,6 +931,16 @@ impl RamSampler {
 
 impl eframe::App for RustCordApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(rec) = &mut self.frametimes {
+            // The previous frame's CPU time (eframe measures it).
+            rec.push(frame.info().cpu_usage);
+        }
+        // Test launches start hidden: minimise first, then show, so the
+        // window sits in the taskbar and keeps rendering (realistic RAM).
+        if std::mem::take(&mut self.start_minimized) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
         // Taskbar badge: runs here (not in `ui`) so it also updates while
         // the window is minimised. Counted only while the setting is on.
         let count = match &self.screen {
@@ -862,7 +951,7 @@ impl eframe::App for RustCordApp {
             crate::taskbar::frame_target(frame),
             count,
             self.config.taskbar_badge,
-            crate::taskbar::rgb(self.active_theme.palette.danger),
+            crate::taskbar::look(self.active_theme.palette.danger),
         );
         let Screen::Main(state) = &mut self.screen else {
             return;
@@ -876,6 +965,15 @@ impl eframe::App for RustCordApp {
             // Small file copies; the picker itself ran in the backend.
             let _ = self.theme_store.import(&path);
         }
+        if let Some(e) = state.preset_file.take()
+            && self.config.modules.presets
+        {
+            self.preset_store.file_event(e);
+        }
+        // Presets are only kept in memory while their page is open.
+        if self.settings.is_none() || !self.config.modules.presets {
+            self.preset_store.close();
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -886,6 +984,7 @@ impl eframe::App for RustCordApp {
         main_ui(self, ui);
         let pal = self.active_theme.palette;
         crate::window_frame::end_pass(&ctx, &pal);
+        crate::anim::sweep(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -1010,16 +1109,33 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
         let Screen::Main(state) = &mut app.screen else {
             return;
         };
+        // Dev memory panel: counted only while Performance is open.
+        page.mem = (page.section == crate::settings::Section::Performance).then(|| {
+            let mut c = state.mem_counts();
+            c.fill_egui(&ctx);
+            c
+        });
         let action = page.ui(
             ui,
             &app.config,
             state.me.as_ref(),
             state.user_settings(),
             &pal,
-            &mut app.theme_store,
+            &mut crate::settings::Stores {
+                themes: &mut app.theme_store,
+                presets: &mut app.preset_store,
+                tree: &app.tree,
+            },
         );
         match action {
-            Some(SettingsAction::Save { config, sync }) => {
+            Some(SettingsAction::Save {
+                config,
+                sync,
+                layout,
+            }) => {
+                if let Some(tree) = layout {
+                    app.tree = *tree;
+                }
                 let reconnect = config.client_identity != app.config.client_identity;
                 let forget_logins = app.config.remember_login && !config.remember_login;
                 let mut config = *config;
@@ -1080,6 +1196,12 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
             Some(SettingsAction::ImportLayout(tree)) => app.tree = *tree,
             Some(SettingsAction::PickTheme { folder }) => {
                 let _ = state.tx.send(ToBackend::PickTheme { folder });
+            }
+            Some(SettingsAction::PickPreset) => {
+                let _ = state.tx.send(ToBackend::PickPreset);
+            }
+            Some(SettingsAction::ExportPreset { file_name, text }) => {
+                let _ = state.tx.send(ToBackend::ExportPreset { file_name, text });
             }
             Some(SettingsAction::LogOut) => app.log_out(None, true),
             None => {}
@@ -1374,6 +1496,7 @@ fn window_ui(w: &Mutex<AccountWindow>, ui: &mut egui::Ui) {
     window_screen(w, ui);
     let pal = w.theme.palette;
     crate::window_frame::end_pass(&ctx, &pal);
+    crate::anim::sweep(&ctx);
 }
 
 /// One pass of an account window's session and chat screen.
@@ -1394,7 +1517,7 @@ fn window_screen(w: &mut AccountWindow, ui: &mut egui::Ui) {
         Target::Title(&w.title),
         count,
         w.config.taskbar_badge,
-        crate::taskbar::rgb(w.theme.palette.danger),
+        crate::taskbar::look(w.theme.palette.danger),
     );
     let mut close = ctx.input(|i| i.viewport().close_requested());
     if let Some(reason) = state.fatal.take() {
@@ -1844,6 +1967,8 @@ pub struct State {
     /// A theme file / folder picked in Settings → Themes, for the app to
     /// import.
     picked_theme: Option<PathBuf>,
+    /// Settings → Presets file picker / export result (the app owns the store).
+    preset_file: Option<crate::presets::FileEvent>,
     last_typing_sent: Option<(String, Instant)>,
     confirm_delete: Option<(String, String)>,
 
@@ -2002,6 +2127,7 @@ impl State {
             threads: None,
             invites: None,
             picked_theme: None,
+            preset_file: None,
             last_typing_sent: None,
             confirm_delete: None,
             reads: ReadState::default(),
@@ -2625,6 +2751,7 @@ impl State {
             }
             // --- themes --- (the app imports it: it owns the ThemeStore)
             ToUi::ThemePicked(path) => self.picked_theme = path,
+            ToUi::PresetFile(e) => self.preset_file = Some(e),
             // --- onboarding ---
             ToUi::InviteResolved { code, result } => {
                 if let Some(s) = &mut self.invites {
@@ -4666,6 +4793,20 @@ impl State {
         crate::badge::guild_badge(g, &self.reads, &self.mutes, now)
     }
 
+    /// Cache sizes for the dev memory panel (Settings → Performance).
+    fn mem_counts(&self) -> crate::memstats::MemCounts {
+        crate::memstats::MemCounts {
+            cached_channels: self.messages.len(),
+            cached_messages: self.messages.values().map(Vec::len).sum(),
+            md_cache: self.md_cache.len(),
+            members: self.member_cache.len(),
+            presences: self.presences.len(),
+            profiles: self.profiles.len(),
+            user_names: self.user_names.len(),
+            ..Default::default()
+        }
+    }
+
     /// The taskbar badge count: the sum of the rail's red badges (mentions
     /// plus unread DMs, muted servers and channels left out).
     fn unread_total(&self) -> u32 {
@@ -5437,8 +5578,9 @@ impl State {
         // Status dot with a ring in the panel colour (Discord's cut-out).
         let ring = if resp.hovered() { pal.hover } else { bg };
         let c = av.right_bottom() - vec2(3.0, 3.0);
-        ui.painter().circle_filled(c, 7.0, ring);
-        ui.painter().circle_filled(c, 5.0, dot);
+        let shape = theme::shape();
+        shape.dot(ui.painter(), c, 7.0, ring);
+        shape.dot(ui.painter(), c, 5.0, dot);
         if show_text {
             let x = av.right() + 8.0;
             let max_w = hit.right() - x - 4.0;
@@ -6318,7 +6460,15 @@ impl State {
             self.messages[&channel_id]
                 .iter()
                 .map(|m| {
-                    let blocks = cache.get(&m.id, &m.content, formatting);
+                    // A link that became a GIF embed shows only the GIF
+                    // (other text stays; "Copy Link" is in the menu).
+                    let shown = if config.modules.embeds && !m.embeds.is_empty() {
+                        embed::hide_gif_links(&m.content, &m.embeds)
+                    } else {
+                        None
+                    };
+                    let content = shown.as_deref().unwrap_or(&m.content);
+                    let blocks = cache.get(&m.id, content, formatting);
                     let reply = m.reply.as_ref().map(|r| {
                         if r.content.is_empty() {
                             "Click to see attachment".to_string()
@@ -7705,17 +7855,35 @@ impl State {
         let total = list.map_or(fallback.len(), |l| l.total_rows().min(100_000));
         // Header: green "online" and grey "offline" count pills (the
         // "recently active" fallback has no meaningful counts).
+        // Blue bots box only when the count is exact: the bot-built list
+        // (under its cap), a fully loaded op 14 list, or a DM's recipients.
+        let from_bot_list = self.member_list.as_ref().is_none_or(|l| l.rows.is_empty())
+            && self
+                .bot_list
+                .as_ref()
+                .is_some_and(|b| !b.list.rows.is_empty());
         let counts = match list {
-            Some(l) => Some(l.online_offline(&self.presences)),
-            None if self.dms.channel(&channel_id).is_some() => Some(members::count_online(
-                fallback.iter().flatten(),
-                &self.presences,
-            )),
+            Some(l) => {
+                let bots = match &self.bot_list {
+                    Some(b) if from_bot_list => (b.members.len()
+                        < members::BOT_LIST_LIMIT as usize)
+                        .then(|| b.members.iter().filter(|m| m.user.bot).count() as u32),
+                    _ => l.exact_bots(),
+                };
+                let (on, off) = l.online_offline(&self.presences);
+                Some((on, off, bots))
+            }
+            None if self.dms.channel(&channel_id).is_some() => {
+                let rows = fallback.iter().flatten();
+                let (on, off) = members::count_online(rows.clone(), &self.presences);
+                Some((on, off, Some(members::count_bots(rows))))
+            }
             None => None,
         };
         match counts {
-            Some((on, off)) if on + off > 0 => {
-                members::count_pills(ui, header.left() + 16.0, header.center().y, on, off, pal)
+            Some((on, off, bots)) if on + off > 0 => {
+                let boxes = members::count_boxes_for(on, off, bots.filter(|n| *n > 0));
+                members::count_boxes(ui, header, &boxes, pal)
             }
             _ => {
                 let galley = truncated(
@@ -8902,8 +9070,10 @@ fn forget_message_images(ctx: &egui::Context, messages: &[Message]) {
 // Widgets
 // ===========================================================================
 
-/// Round avatar. With the Images module off, a coloured circle with the
-/// first letter instead (no download, no texture).
+/// Avatar in the theme's `avatar_shape` (round or square). With the
+/// Images module off, a coloured disc / square with the first letter
+/// instead (no download, no texture). Animated avatars stay still until
+/// hovered (`anim`).
 pub(crate) fn avatar(
     ui: &mut egui::Ui,
     user_id: &str,
@@ -8929,20 +9099,28 @@ pub(crate) fn paint_avatar(
     pal: &Palette,
 ) {
     let size = rect.width();
+    let radius = theme::avatar_shape().radius(size);
     if config.modules.images && !url.is_empty() {
-        // Placeholder disc while loading (or if the download fails).
-        ui.painter()
-            .circle_filled(rect.center(), size / 2.0, pal.hover);
+        // Placeholder while loading (or if the download fails).
+        ui.painter().rect_filled(rect, radius, pal.hover);
         egui::Image::from_uri(url)
-            .corner_radius(size / 2.0)
+            .corner_radius(radius)
             .show_loading_spinner(false)
             .paint_at(ui, rect);
+        // Animated avatars play while hovered, over the still frame (which
+        // stays visible while the animated copy loads).
+        if let std::borrow::Cow::Owned(anim) = crate::anim::on_hover(ui, rect, url) {
+            egui::Image::from_uri(anim)
+                .corner_radius(radius)
+                .show_loading_spinner(false)
+                .paint_at(ui, rect);
+        }
     } else {
         let hue = user_id
             .bytes()
             .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
         let col = egui::ecolor::Hsva::new((hue % 360) as f32 / 360.0, 0.45, 0.6, 1.0);
-        ui.painter().circle_filled(rect.center(), size / 2.0, col);
+        ui.painter().rect_filled(rect, radius, col);
         let letter = name
             .chars()
             .next()
@@ -9222,7 +9400,7 @@ fn channel_row(
         match c.recipients.first().filter(|_| c.kind == CHANNEL_DM) {
             Some(u) => paint_avatar(ui, a, &u.id, &u.name, &u.avatar_url, config, pal),
             None => {
-                ui.painter().circle_filled(a.center(), 16.0, pal.accent);
+                theme::avatar_shape().dot(ui.painter(), a.center(), 16.0, pal.accent);
                 ui.painter().text(
                     a.center(),
                     egui::Align2::CENTER_CENTER,
@@ -9502,7 +9680,8 @@ fn window_focused(ctx: &egui::Context) -> bool {
 fn unread_pill(ui: &egui::Ui, item: egui::Rect, height: f32, pal: &Palette) {
     let x = ui.clip_rect().left();
     let rect = egui::Rect::from_center_size(egui::pos2(x, item.center().y), vec2(8.0, height));
-    ui.painter().rect_filled(rect, 4, pal.unread);
+    ui.painter()
+        .rect_filled(rect, theme::shape().radius(8.0), pal.unread);
 }
 
 /// Red rounded badge with a count ("99+" past 99).
@@ -9525,9 +9704,13 @@ fn mention_badge(
     let size = vec2((galley.size().x + 9.0).max(16.0), 16.0);
     let rect = align.align_size_within_rect(size, egui::Rect::from_min_size(at, egui::Vec2::ZERO));
     let rect = egui::Rect::from_min_size(rect.min, size);
-    // Ring in the panel colour so it stands out over icons.
-    ui.painter().rect_filled(rect.expand(2.0), 10, ring);
-    ui.painter().rect_filled(rect, 8, pal.mention);
+    // Ring in the panel colour so it stands out over icons. Pill or
+    // square as the theme's `shape` says.
+    let shape = theme::shape();
+    ui.painter()
+        .rect_filled(rect.expand(2.0), shape.radius(size.y + 4.0), ring);
+    ui.painter()
+        .rect_filled(rect, shape.radius(size.y), pal.mention);
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
 }
@@ -9825,7 +10008,8 @@ fn rail_item(
     if h > 0.5 {
         let left = ui.clip_rect().left();
         let pill = egui::Rect::from_center_size(egui::pos2(left, rect.center().y), vec2(8.0, h));
-        ui.painter().rect_filled(pill, 4, pal.unread);
+        ui.painter()
+            .rect_filled(pill, theme::shape().radius(8.0), pal.unread);
     }
 
     if badge.mentions > 0 {
@@ -9947,14 +10131,15 @@ fn folder_item(
             );
             match &g.icon_url {
                 Some(url) if config.modules.images => {
-                    painter.circle_filled(r.center(), mini / 2.0, pal.rail_icon);
+                    let mr = theme::shape().radius(mini);
+                    painter.rect_filled(r, mr, pal.rail_icon);
                     egui::Image::from_uri(url)
-                        .corner_radius(mini / 2.0)
+                        .corner_radius(mr)
                         .show_loading_spinner(false)
                         .paint_at(ui, r);
                 }
                 _ => {
-                    painter.circle_filled(r.center(), mini / 2.0, pal.rail_icon);
+                    painter.rect_filled(r, theme::shape().radius(mini), pal.rail_icon);
                     let i: String = initials(&g.name).chars().take(1).collect();
                     painter.text(
                         r.center(),
@@ -9982,7 +10167,8 @@ fn folder_item(
     if h > 0.5 {
         let left = ui.clip_rect().left();
         let pill = egui::Rect::from_center_size(egui::pos2(left, rect.center().y), vec2(8.0, h));
-        ui.painter().rect_filled(pill, 4, pal.unread);
+        ui.painter()
+            .rect_filled(pill, theme::shape().radius(8.0), pal.unread);
     }
     if f.badge.mentions > 0 {
         mention_badge(
@@ -11405,6 +11591,16 @@ fn message_menu(
         n,
         MessageAction::Copy(m.link(menu.guild_id.as_deref())),
     );
+    // GIF links whose text is hidden under the GIF.
+    for url in embed::hidden_gif_links(&m.content, &m.embeds) {
+        pick(
+            ui,
+            icons::LINK,
+            "Copy Link",
+            n,
+            MessageAction::Copy(url.to_string()),
+        );
+    }
     for a in m.attachments.iter().filter(|a| a.is_image()) {
         let label = if m.attachments.len() == 1 {
             "Save Image".to_string()
@@ -11460,15 +11656,24 @@ fn attachment_ui(
         // `forget_message_images`); only the shown size follows the column.
         let url = a.thumbnail_url(cap_w as u32, max_h as u32);
         let max_w = widgets::media_width(ui.available_width(), cap_w);
-        let mut image = egui::Image::from_uri(url)
-            .corner_radius(6)
-            .sense(egui::Sense::click());
-        image = match a.display_size(max_w, max_h) {
-            Some((w, h)) => image.fit_to_exact_size(vec2(w, h)),
-            None => image.max_size(vec2(max_w, max_h)),
+        // GIFs autoplay while on screen (`anim`), at the same size.
+        let gif = a.display_size(max_w, max_h).and_then(|(w, h)| {
+            crate::anim::gif_image(ui, &url, None, vec2(w, h), 6.0, egui::Sense::click())
+        });
+        let resp = match gif {
+            Some(resp) => resp,
+            None => {
+                let mut image = egui::Image::from_uri(url)
+                    .corner_radius(6)
+                    .sense(egui::Sense::click());
+                image = match a.display_size(max_w, max_h) {
+                    Some((w, h)) => image.fit_to_exact_size(vec2(w, h)),
+                    None => image.max_size(vec2(max_w, max_h)),
+                };
+                ui.add(image)
+            }
         };
-        let resp = ui
-            .add(image)
+        let resp = resp
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(format!(
                 "{} ({}) · click to open full size",

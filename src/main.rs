@@ -2,17 +2,20 @@
 
 mod account_menu;
 mod accounts;
+mod anim;
 mod api;
 mod app;
 mod autocomplete;
 mod backend;
 mod badge;
+mod builtin_themes;
 mod config;
 mod demo;
 mod embed;
 mod emoji;
 mod emoji_picker;
 mod forum;
+mod frametimes;
 mod friends;
 mod gateway;
 mod gif_picker;
@@ -28,12 +31,15 @@ mod links;
 mod login;
 mod markdown;
 mod members;
+mod memstats;
 mod notify;
 mod onboarding;
 mod paste;
 mod perms;
 mod pins;
 mod presence;
+mod presets;
+mod presets_page;
 mod profile;
 mod qr_login;
 mod quick_switcher;
@@ -72,16 +78,36 @@ fn main() -> eframe::Result {
     // Optional: skip the login screen with DISCORD_TOKEN, or run offline with
     // RUSTCORD_DEMO=1.
     let demo = storage::demo_from_env();
+    // memprobe live runs: a saved account, own storage id, read-only.
+    let test_account = storage::test_account_from_env().filter(|_| !demo);
+    let app_id = match (demo, &test_account) {
+        (true, _) => storage::DEMO_APP_ID,
+        (false, Some(_)) => storage::TEST_APP_ID,
+        (false, None) => storage::APP_ID,
+    };
     let env_token = std::env::var("DISCORD_TOKEN")
         .ok()
         .filter(|t| !t.trim().is_empty());
 
+    // Test launches: never show or take focus before minimising (app.rs
+    // minimises on the first frame).
+    let start_minimized = storage::start_minimized_from_env();
+    let start_offscreen = storage::start_offscreen_from_env();
+    let mut viewport = eframe::egui::ViewportBuilder::default();
+    if start_offscreen {
+        viewport = viewport
+            .with_position([-20_000.0, -20_000.0])
+            .with_active(false);
+    }
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
+        viewport: viewport
+            .with_visible(!start_minimized)
+            .with_active(!start_minimized)
             .with_title("RustCord")
-            // Demo runs save under their own app id (storage folder), so
-            // they never read or write the real config, layout or window.
-            .with_app_id(storage::app_id(demo))
+            // Demo and test-account runs save under their own app id
+            // (storage folder), so they never read or write the real config,
+            // layout or window.
+            .with_app_id(app_id)
             .with_inner_size([1200.0, 760.0])
             // Doc §3.2: drawers take over below 700 px.
             .with_min_inner_size(responsive::WINDOW_MIN)
@@ -93,14 +119,16 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Glow,
         // Demo screenshot runs resize the window; don't let them overwrite
         // the user's saved window size or egui memory.
-        persist_window: !(demo
-            && (std::env::var("RUSTCORD_DEMO_OPEN").is_ok()
-                || std::env::var("RUSTCORD_DEMO_SHOT").is_ok())),
+        persist_window: !start_minimized
+            && !start_offscreen
+            && !(demo
+                && (std::env::var("RUSTCORD_DEMO_OPEN").is_ok()
+                    || std::env::var("RUSTCORD_DEMO_SHOT").is_ok())),
         ..Default::default()
     };
 
     eframe::run_native(
-        storage::app_id(demo),
+        app_id,
         options,
         Box::new(move |cc| {
             // Images (avatars, server icons, attachments, emoji) load
@@ -109,7 +137,12 @@ fn main() -> eframe::Result {
             // Cascadia Mono (bundled) as the UI font, Noto Sans for "sans"
             // themes; system fonts stay the fallback for other scripts.
             theme::install_fonts(&cc.egui_ctx);
-            Ok(Box::new(app::RustCordApp::new(cc, env_token, demo)))
+            Ok(Box::new(app::RustCordApp::new(
+                cc,
+                env_token,
+                demo,
+                test_account,
+            )))
         }),
     )
 }

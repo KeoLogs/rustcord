@@ -99,7 +99,7 @@ pub fn dot_item(
     }
     let fg = if hovered { Color32::WHITE } else { pal.text };
     let c = egui::pos2(rect.left() + 16.0, rect.center().y);
-    ui.painter().circle_filled(c, 5.0, dot);
+    theme::shape().dot(ui.painter(), c, 5.0, dot);
     let font = if selected {
         theme::bold_font(14.0)
     } else {
@@ -341,10 +341,14 @@ impl RailButton {
     }
 
     /// Corner radius: a circle / full pill at rest, easing to Discord's
-    /// rounded square when `active` (0..1, hovered or selected).
+    /// rounded square when `active` (0..1, hovered or selected). Square
+    /// themes (`theme::shape`) keep their ≤ 2 px corners throughout.
     pub fn radius(&self, active: f32) -> f32 {
         let size = self.icon.height();
-        egui::lerp(size / 2.0..=size / 3.0, active)
+        match crate::theme::shape() {
+            crate::theme::Shape::Square => crate::theme::Shape::Square.radius(size),
+            crate::theme::Shape::Round => egui::lerp(size / 2.0..=size / 3.0, active),
+        }
     }
 
     /// Paint the stretched pill behind the icon (nothing in the icon-only

@@ -150,6 +150,11 @@ pub struct ProfileCache {
 }
 
 impl ProfileCache {
+    /// Profiles kept (Settings → Performance).
+    pub fn len(&self) -> usize {
+        self.profiles.len()
+    }
+
     pub fn get(&self, user_id: &str, guild_id: Option<&str>) -> Option<&Profile> {
         self.profiles
             .iter()
@@ -186,11 +191,6 @@ impl ProfileCache {
         self.notes.retain(|(u, _)| u != user_id);
         self.notes.push_front((user_id.to_string(), note));
         self.notes.truncate(MAX_PROFILES);
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.profiles.len()
     }
 }
 
@@ -388,8 +388,7 @@ fn card_contents(
         egui::pos2(banner.left() + 16.0, banner.bottom() - av_size / 2.0),
         vec2(av_size, av_size),
     );
-    ui.painter()
-        .circle_filled(av_rect.center(), av_size / 2.0 + 5.0, card_bg);
+    crate::theme::avatar_shape().dot(ui.painter(), av_rect.center(), av_size / 2.0 + 5.0, card_bg);
     let mut av_ui = ui.new_child(egui::UiBuilder::new().max_rect(av_rect));
     let av = crate::app::avatar(
         &mut av_ui,
@@ -474,8 +473,7 @@ fn inner(
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             let (r, _) = ui.allocate_exact_size(vec2(10.0, 14.0), egui::Sense::hover());
-            ui.painter()
-                .circle_filled(r.center(), 4.5, p.status.color(pal));
+            crate::theme::shape().dot(ui.painter(), r.center(), 4.5, p.status.color(pal));
             let text = p.activity.as_deref().unwrap_or(p.status.label());
             ui.label(RichText::new(text));
         });
