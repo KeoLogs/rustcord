@@ -42,8 +42,20 @@ pub fn respond(r: &Request) -> Result<Value, String> {
     match r.method {
         Method::Delete => return Ok(Value::Null),
         Method::Post => {
+            let id = new_id();
             if let Some(o) = v.as_object_mut() {
-                o.insert("id".into(), json!(new_id()));
+                if r.kind == Kind::CreateInvite {
+                    // An invite: a code, its channel and no expiry maths.
+                    let channel = r.path.split('/').nth(2).unwrap_or("");
+                    o.insert("code".into(), json!(format!("demo{}", &id[14..])));
+                    o.insert(
+                        "channel".into(),
+                        json!({ "id": channel, "name": "channel", "type": 0 }),
+                    );
+                    o.insert("inviter".into(), json!({ "username": "you" }));
+                    o.insert("uses".into(), json!(0));
+                }
+                o.insert("id".into(), json!(id));
             }
         }
         _ => {
@@ -116,6 +128,15 @@ fn load(r: &Request) -> Value {
                         "global_name": "FREE NITRO" }, "reason": "Spam links" },
             { "user": { "id": "970000000000000012", "username": "raider",
                         "global_name": "Raider" }, "reason": null },
+        ]),
+        Kind::LoadInvites => json!([
+            { "code": "rustcord", "channel": { "id": "200", "name": "welcome", "type": 0 },
+              "inviter": { "username": "sam" }, "uses": 42, "max_uses": 0, "max_age": 0,
+              "expires_at": null, "temporary": false },
+            { "code": "aB3xK9q", "channel": { "id": "201", "name": "general", "type": 0 },
+              "inviter": { "username": "alex" }, "uses": 3, "max_uses": 10,
+              "max_age": 604800, "expires_at": "2026-12-01T18:00:00+00:00",
+              "temporary": false },
         ]),
         _ => Value::Null,
     }

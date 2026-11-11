@@ -28,6 +28,7 @@ use crate::types::Guild;
 
 pub mod channels;
 pub mod demo;
+pub mod invites;
 pub mod members;
 pub mod overview;
 pub mod roles;
@@ -51,6 +52,9 @@ pub enum Method {
 pub enum Kind {
     LoadGuild,
     SaveGuild,
+    LoadInvites,
+    CreateInvite,
+    RevokeInvite,
     SearchMembers,
     Kick,
     Ban,
@@ -83,6 +87,9 @@ impl Kind {
         match self {
             Kind::LoadGuild => "Loading the server settings",
             Kind::SaveGuild => "Saving the server settings",
+            Kind::LoadInvites => "Loading invites",
+            Kind::CreateInvite => "Creating the invite",
+            Kind::RevokeInvite => "Revoking the invite",
             Kind::SearchMembers => "Searching members",
             Kind::Kick => "Kicking the member",
             Kind::Ban => "Banning the member",
@@ -113,6 +120,7 @@ impl Kind {
     fn tab(self) -> Tab {
         match self {
             Kind::LoadGuild | Kind::SaveGuild => Tab::Overview,
+            Kind::LoadInvites | Kind::CreateInvite | Kind::RevokeInvite => Tab::Invites,
             Kind::LoadBans | Kind::Unban => Tab::Bans,
             Kind::SearchMembers
             | Kind::Kick
@@ -360,6 +368,7 @@ pub fn id_or_null(id: &str) -> Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,
+    Invites,
     Bans,
     Members,
     Channels,
@@ -369,13 +378,14 @@ pub enum Tab {
 /// Sidebar groups, in order.
 const NAV: &[(&str, &[Tab])] = &[
     ("Server", &[Tab::Overview, Tab::Roles, Tab::Channels]),
-    ("People", &[Tab::Members, Tab::Bans]),
+    ("People", &[Tab::Members, Tab::Invites, Tab::Bans]),
 ];
 
 impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
+            Tab::Invites => "Invites",
             Tab::Bans => "Bans",
             Tab::Members => "Members",
             Tab::Channels => "Channels",
@@ -386,6 +396,7 @@ impl Tab {
     fn icon(self) -> &'static str {
         match self {
             Tab::Overview => icons::GEAR,
+            Tab::Invites => icons::ENVELOPE,
             Tab::Bans => icons::PROHIBIT,
             Tab::Members => icons::USERS,
             Tab::Channels => icons::HASH,
@@ -400,6 +411,7 @@ impl Tab {
         let any = |bits: u64| perms & bits != 0;
         match self {
             Tab::Overview => any(perms::MANAGE_GUILD),
+            Tab::Invites => any(perms::MANAGE_GUILD),
             Tab::Bans => any(perms::BAN_MEMBERS),
             Tab::Members => any(perms::KICK_MEMBERS
                 | perms::BAN_MEMBERS
@@ -611,6 +623,7 @@ pub struct AdminPage {
     /// tab's first editor once its data is in.
     pub demo_detail: bool,
     overview: overview::State,
+    invites: invites::State,
     members: members::State,
     channels: channels::State,
     roles: roles::State,
@@ -629,6 +642,7 @@ impl AdminPage {
             confirm: None,
             demo_detail: false,
             overview: Default::default(),
+            invites: Default::default(),
             members: Default::default(),
             channels: Default::default(),
             roles: Default::default(),
@@ -655,6 +669,7 @@ impl AdminPage {
         let g = &self.guild_id;
         match tab {
             Tab::Overview => vec![overview::load(g)],
+            Tab::Invites => vec![invites::load(g)],
             Tab::Bans => vec![members::load_bans(g)],
             Tab::Members => Vec::new(),
             Tab::Channels => vec![channels::load(g)],
@@ -687,6 +702,7 @@ impl AdminPage {
         };
         match r.kind.tab() {
             Tab::Overview => self.overview.on_response(r.kind, &r.key, &v),
+            Tab::Invites => self.invites.on_response(r.kind, &r.key, &v),
             Tab::Members | Tab::Bans => self.members.on_response(r.kind, &r.key, &v),
             Tab::Channels => self.channels.on_response(r.kind, &r.key, &v),
             Tab::Roles => self.roles.on_response(r.kind, &r.key, &v),
@@ -862,6 +878,7 @@ impl AdminPage {
                         let before = out.send.len();
                         match self.tab {
                             Tab::Overview => self.overview.ui(ui, cx, &mut out),
+                            Tab::Invites => self.invites.ui(ui, cx, &mut out),
                             Tab::Bans => self.members.bans_ui(ui, cx, &mut out),
                             Tab::Members => self.members.ui(ui, cx, &mut out),
                             Tab::Channels => self.channels.ui(ui, cx, &mut out),

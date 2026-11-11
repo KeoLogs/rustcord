@@ -24,6 +24,8 @@ Settings → About). Version x.y.z:
   - Members: search members; change nicknames and roles; time out, kick and
     ban (with a delete-messages window; type the name to confirm); the bans
     list with unban. Members at or above your highest role are protected.
+  - Invites: list the server's invites, create one (channel, expiry, max
+    uses, temporary membership), copy the link and revoke.
 
 ## 0.10.0: DM core (history paging, first unread, optimistic send)
 - Chat history like Discord's (Brief A): scrolling near the top loads 50
