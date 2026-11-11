@@ -264,16 +264,7 @@ pub async fn run_session(
                                 write.send(WsMessage::Text(cmd.to_string().into())).await?;
                             }
                         }
-                        if let Some(ev) = handle_dispatch(event, d, &session.my_id) {
-                            send_ui(ev);
-                        }
-                        for ev in member_events(event, d) {
-                            send_ui(ev);
-                        }
-                        for ev in account_events(event, d) {
-                            send_ui(ev);
-                        }
-                        for ev in module_events(event, d, &session.my_id) {
+                        for ev in dispatch_events(event, d, &session.my_id) {
                             send_ui(ev);
                         }
                     }
@@ -367,6 +358,32 @@ fn my_roles(members: &Value, my_id: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Everything the UI gets for one dispatch (op 0) event. The demo's big
+/// account (`demo/big.rs`) goes through here too, via `dispatch_bytes`.
+fn dispatch_events(event: &str, d: &Value, my_id: &str) -> Vec<ToUi> {
+    let mut out: Vec<ToUi> = handle_dispatch(event, d, my_id).into_iter().collect();
+    out.extend(member_events(event, d));
+    out.extend(account_events(event, d));
+    out.extend(module_events(event, d, my_id));
+    out
+}
+
+/// Demo big account: one inflated gateway message (JSON bytes, as the
+/// `Inflater` returns them) through the same parse + dispatch as a live
+/// connection. READY sets `my_id` like the session loop does.
+pub fn dispatch_bytes(json: &[u8], my_id: &mut String) -> Result<Vec<ToUi>> {
+    let payload: Value = serde_json::from_slice(json)?;
+    if payload["op"].as_u64() != Some(OP_DISPATCH) {
+        return Ok(Vec::new());
+    }
+    let event = payload["t"].as_str().unwrap_or_default();
+    let d = &payload["d"];
+    if event == "READY" {
+        *my_id = d["user"]["id"].as_str().unwrap_or_default().to_string();
+    }
+    Ok(dispatch_events(event, d, my_id))
 }
 
 fn handle_dispatch(event: &str, d: &Value, my_id: &str) -> Option<ToUi> {
