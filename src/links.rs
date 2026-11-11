@@ -259,6 +259,55 @@ impl LinkWarning {
 }
 
 /// At most `max` characters, with "…" in the middle if cut.
+/// A `discord.com/channels/...` link: which channel (and message) to open
+/// inside RustCord instead of the browser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageLink {
+    /// Server id, or `@me` for DMs.
+    pub guild_id: String,
+    pub channel_id: String,
+    pub message_id: Option<String>,
+}
+
+/// Parse `https://(ptb.|canary.)discord(app).com/channels/<guild or @me>/
+/// <channel>[/<message>]`. Strict: only Discord's own hosts, numeric ids,
+/// nothing else in the path (a query or fragment is ignored).
+pub fn message_link(url: &str) -> Option<MessageLink> {
+    let host = host(url)?;
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let base = host
+        .strip_prefix("ptb.")
+        .or_else(|| host.strip_prefix("canary."))
+        .unwrap_or(host);
+    if base != "discord.com" && base != "discordapp.com" {
+        return None;
+    }
+    let url = url.trim();
+    let after_scheme = url.split_once("://")?.1;
+    let path = after_scheme.split_once('/')?.1;
+    let path = path.split(['?', '#']).next()?.trim_end_matches('/');
+    let mut parts = path.split('/');
+    if parts.next()? != "channels" {
+        return None;
+    }
+    let numeric = |s: &str| !s.is_empty() && s.len() <= 20 && s.bytes().all(|b| b.is_ascii_digit());
+    let guild_id = parts.next().filter(|g| *g == "@me" || numeric(g))?;
+    let channel_id = parts.next().filter(|c| numeric(c))?;
+    let message_id = match parts.next() {
+        Some(m) if numeric(m) => Some(m.to_string()),
+        Some(_) => return None,
+        None => None,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(MessageLink {
+        guild_id: guild_id.to_string(),
+        channel_id: channel_id.to_string(),
+        message_id,
+    })
+}
+
 fn shorten(s: &str, max: usize) -> String {
     let n = s.chars().count();
     if n <= max {
@@ -413,5 +462,37 @@ mod tests {
         let s = shorten(&"x".repeat(50), 10);
         assert_eq!(s.chars().count(), 11);
         assert!(s.contains('…'));
+    }
+
+    #[test]
+    fn discord_message_links_are_parsed() {
+        let l = message_link("https://discord.com/channels/100/206/640").unwrap();
+        assert_eq!(l.guild_id, "100");
+        assert_eq!(l.channel_id, "206");
+        assert_eq!(l.message_id.as_deref(), Some("640"));
+        // DMs, channel-only links, other Discord hosts, query / slash.
+        let dm = message_link("https://discord.com/channels/@me/401/94").unwrap();
+        assert_eq!(dm.guild_id, "@me");
+        let ch = message_link("https://canary.discord.com/channels/100/206/").unwrap();
+        assert_eq!(ch.message_id, None);
+        assert!(message_link("https://ptb.discordapp.com/channels/1/2/3?x=1").is_some());
+        assert!(message_link("http://www.discord.com/channels/1/2/3#top").is_some());
+    }
+
+    #[test]
+    fn other_links_are_not_message_links() {
+        for url in [
+            "https://discord.com/channels/100",
+            "https://discord.com/channels/100/abc/1",
+            "https://discord.com/channels/100/206/640/extra",
+            "https://discord.com/invite/abc",
+            "https://evil.example/channels/100/206/640",
+            "https://discord.com.evil.example/channels/1/2/3",
+            "https://discord.com@evil.example/channels/1/2/3",
+            "discord.com/channels/1/2/3",
+            "https://discord.gg/channels/1/2/3",
+        ] {
+            assert_eq!(message_link(url), None, "{url}");
+        }
     }
 }

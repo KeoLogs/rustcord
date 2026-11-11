@@ -932,6 +932,16 @@ impl SettingsPage {
                     "https://github.com/KeoLogs/rustcord",
                 );
                 ui.add_space(8.0);
+                // Discord Messenger credit (MIT): RustCord ports its features.
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Many features are ported from");
+                    ui.hyperlink_to(
+                        "Discord Messenger",
+                        "https://github.com/DiscordMessenger/dm",
+                    );
+                    ui.label("by iProgramInCpp (MIT licence). Thank you!");
+                });
+                ui.add_space(8.0);
                 hint(
                     ui,
                     pal,

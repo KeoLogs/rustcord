@@ -41,6 +41,13 @@ improvements, z fixes). It has:
   join or create a thread when you click
 - **Taskbar unread badge** (Windows): mentions + unread DMs as a red count on
   the taskbar icon, capped at 9+; muted servers don't count
+- **History like Discord's**: older messages load as you scroll up (the
+  view doesn't jump), "Load more" fills gaps after a jump, "Jump to present"
+  takes you back; channels open at the first unread message (red NEW line);
+  your messages show at once, faded until sent, and a failed one offers
+  Retry / Delete; discord.com message links open inside RustCord; a
+  character counter near the limit; Copy Image / Copy Link on images; a
+  Reconnect button in the connection status
 - **Paste media** (Ctrl+V images or copied files into the upload cards; never
   sent until you press Enter) and **favourite GIFs** (star a GIF, Favourites
   tab); both are modules
@@ -279,7 +286,8 @@ base64 of the `.rctheme` text.
 | `src/emoji.rs` | Splits text into text + emoji images |
 | `src/markdown.rs` | Discord markdown: parser, renderer, parse cache |
 | `src/embed.rs` | Embeds / link previews: parsing and drawing |
-| `src/links.rs` | Trusted domains and the "Leaving RustCord" link warning |
+| `src/links.rs` | Trusted domains, the "Leaving RustCord" link warning, discord.com message links |
+| `src/history.rs` | History paging (`before=`, gaps, scroll hold), first unread, nonces for optimistic sends, the character limit |
 | `src/pins.rs` | Pinned messages popup |
 | `src/perms.rs` | Permission bits (Manage Messages for pinning) |
 | `src/settings_proto.rs` | Discord's synced settings (protobuf): status, folders, privacy, compact |
@@ -293,7 +301,7 @@ base64 of the `.rctheme` text.
 | `src/profile.rs` | Profiles, notes and the profile popout card |
 | `src/backend.rs` | Tokio runtime thread; runs the gateway and handles UI requests |
 | `src/gateway.rs` | WebSocket connection to Discord's gateway (identify / resume, zlib-stream) |
-| `src/api.rs` | REST calls: history, send / edit / delete, typing, acks, profiles, notes, pins, settings, leave server |
+| `src/api.rs` | REST calls: history (pages, around), send (with nonce) / edit / delete, typing, acks, profiles, notes, pins, settings, leave server |
 | `src/types.rs` | Guild / Channel / Message types and UI↔backend messages |
 | `src/icons.rs` | Phosphor icon codepoints (monochrome icon font) |
 | `src/widgets.rs` | Shared Discord-style widgets: menu rows, icon buttons, menu frame |

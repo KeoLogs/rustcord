@@ -23,6 +23,7 @@ use crate::friends::{
     RequestAction, RequestStore, RequestsCtx,
 };
 use crate::gif_picker::{Gif, GifAction, GifPicker};
+use crate::history;
 use crate::home::{self, HomeAction, HomeCtx, HomeSelected, HomeState};
 use crate::invites::{self, AddServerAction, AddServerDialog, CardCtx, InviteAction, InviteCache};
 use crate::layout::{self, HostState, LAYOUT_KEY, LayoutBehavior, Pane};
@@ -802,7 +803,7 @@ impl RustCordApp {
 
     /// Thin bar across the top, only while editing the layout or while not
     /// connected (like Discord's "Connecting…" notice; the Status bar module
-    /// shows the connection state instead).
+    /// shows the connection state instead). True when Reconnect was clicked.
     fn top_bar(
         ui: &mut egui::Ui,
         pal: &Palette,
@@ -811,11 +812,12 @@ impl RustCordApp {
         config: &Config,
         editing: &mut bool,
         tree: &mut egui_tiles::Tree<Pane>,
-    ) {
+    ) -> bool {
         let notice = !connected && !config.modules.status_bar;
         if !*editing && !notice {
-            return;
+            return false;
         }
+        let mut reconnect = false;
         egui::Panel::top("top_bar")
             .frame(
                 egui::Frame::new()
@@ -849,20 +851,38 @@ impl RustCordApp {
                         }
                     }
                     if notice {
-                        ui.with_layout(
-                            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                            |ui| {
-                                ui.label(
-                                    RichText::new(status)
-                                        .size(13.0)
-                                        .bold()
+                        // Reconnect on the right, the status centred.
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            reconnect = ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(icons::label(
+                                            icons::ARROW_CLOCKWISE,
+                                            "Reconnect",
+                                        ))
+                                        .size(12.0)
                                         .color(Color32::WHITE),
-                                );
-                            },
-                        );
+                                    )
+                                    .frame(false),
+                                )
+                                .on_hover_text("Connect to Discord again now")
+                                .clicked();
+                            ui.with_layout(
+                                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(status)
+                                            .size(13.0)
+                                            .bold()
+                                            .color(Color32::WHITE),
+                                    );
+                                },
+                            );
+                        });
                     }
                 });
             });
+        reconnect
     }
 }
 
@@ -1231,7 +1251,7 @@ fn chat_screen(ui: &mut egui::Ui, state: &mut State, f: ChatFrame<'_>) {
         *f.editing = false;
     }
     let status = state.status.clone();
-    RustCordApp::top_bar(
+    let reconnect = RustCordApp::top_bar(
         ui,
         &pal,
         &status,
@@ -1240,6 +1260,10 @@ fn chat_screen(ui: &mut egui::Ui, state: &mut State, f: ChatFrame<'_>) {
         f.editing,
         f.tree,
     );
+    if reconnect {
+        // Only from the button: drop the connection and connect again now.
+        let _ = state.tx.send(ToBackend::Reconnect);
+    }
     if f.config.modules.status_bar {
         let ram = f.ram.sample();
         state.status_bar(ui, f.config, &pal, ram);
@@ -1689,7 +1713,26 @@ enum MessageAction {
     React(String, ReactionAction),
     /// Clicked a thread card (type 18 message): open that thread.
     OpenThread(Box<Thread>),
+    /// Retry a failed send (nonce). Only from the click.
+    RetrySend(String),
+    /// Throw away a failed send (nonce).
+    DiscardSend(String),
+    /// "Copy Image" on an image (url).
+    CopyImage(String),
 }
+
+/// A send waiting for its echo, kept so Retry can send it again.
+struct Outgoing {
+    channel_id: String,
+    content: String,
+    reply_to: Option<String>,
+    reply_ping: bool,
+    files: Vec<PathBuf>,
+    spoilers: Vec<bool>,
+}
+
+/// Unconfirmed sends kept for Retry.
+const OUTBOX_CAP: usize = 50;
 
 /// Changes to the saved config that come from the chat UI; the app applies
 /// them (State only gets `&Config`).
@@ -1859,6 +1902,27 @@ pub struct State {
 
     /// channel_id -> messages (oldest first)
     messages: HashMap<String, Vec<Message>>,
+    /// Paging state per loaded channel (gaps, start reached, loading).
+    timelines: HashMap<String, history::Timeline>,
+    /// Per drawn list (chat, thread panel): its top message row (message
+    /// id, content y) and the pass it was drawn in, so a page put in above
+    /// it keeps the view still.
+    scroll_anchors: HashMap<String, (String, f32, u64)>,
+    /// Scroll offset to apply on the next pass (holding the position).
+    scroll_set: Option<(String, f32)>,
+    /// "Jump to present": scroll this channel to the bottom.
+    scroll_bottom: Option<String>,
+    /// Open this channel at its first unread message (once loaded).
+    open_unread: Option<String>,
+    /// Messages around the last read one were asked for (channel, id), so
+    /// opening at the first unread doesn't flash it like a jump.
+    unread_around: Option<(String, String)>,
+    /// My sends not confirmed yet, by nonce (for Retry). Capped.
+    outbox: HashMap<String, Outgoing>,
+    /// Counter mixed into nonces sent in the same millisecond.
+    nonce_seq: u64,
+    /// Sent while the present wasn't loaded: reload it (needs a ctx).
+    reload_present: Option<String>,
     /// Most recently viewed channels first; used to free old channels.
     recent_channels: VecDeque<String>,
     /// channel_id -> people typing there
@@ -2034,6 +2098,15 @@ impl State {
             selected_guild: None,
             selected_channel: None,
             messages: HashMap::new(),
+            timelines: HashMap::new(),
+            scroll_anchors: HashMap::new(),
+            scroll_set: None,
+            scroll_bottom: None,
+            open_unread: None,
+            unread_around: None,
+            outbox: HashMap::new(),
+            nonce_seq: 0,
+            reload_present: None,
             recent_channels: VecDeque::new(),
             typing: HashMap::new(),
             draft: String::new(),
@@ -2232,7 +2305,77 @@ impl State {
                 self.request_unknown_authors(&channel_id, &messages);
                 self.remember_users(&mut messages, config);
                 self.channel_errors.remove(&channel_id);
-                self.messages.insert(channel_id, messages);
+                // Merge: a jump (`around=`) may have arrived first.
+                let list = self.messages.entry(channel_id.clone()).or_default();
+                let tl = self.timelines.entry(channel_id).or_default();
+                history::apply_latest(list, tl, messages);
+                let cap = config.max_messages_per_channel.max(10);
+                let removed = history::trim(list, tl, cap, tl.gaps.is_empty());
+                forget_message_images(ctx, &removed);
+            }
+            ToUi::Page {
+                channel_id,
+                before,
+                mut messages,
+            } => {
+                // The channel was dropped meanwhile: nothing to page.
+                if !self.messages.contains_key(&channel_id) {
+                    return;
+                }
+                self.request_unknown_authors(&channel_id, &messages);
+                self.remember_users(&mut messages, config);
+                let before_id: Option<u64> = before.as_deref().and_then(|b| b.parse().ok());
+                let list = self.messages.entry(channel_id.clone()).or_default();
+                let tl = self.timelines.entry(channel_id).or_default();
+                // Paging up past the cap drops the newest (the present
+                // becomes a gap; "Jump to present" reloads it).
+                let paging_up = before_id.is_some()
+                    && list.iter().find(|m| m.local.is_none()).map(history::id_of) == before_id;
+                history::apply_page(list, tl, before_id, messages);
+                let cap = config.max_messages_per_channel.max(10);
+                let removed = history::trim(list, tl, cap, !paging_up);
+                forget_message_images(ctx, &removed);
+            }
+            ToUi::PageFailed { channel_id, error } => {
+                if let Some(tl) = self.timelines.get_mut(&channel_id) {
+                    tl.loading = false;
+                    tl.failed = true;
+                }
+                self.status = error;
+            }
+            ToUi::Sent {
+                channel_id,
+                nonce,
+                message,
+            } => {
+                self.outbox.remove(&nonce);
+                self.md_cache.remove(&nonce);
+                let tl = self.timelines.get(&channel_id).cloned().unwrap_or_default();
+                if let Some(list) = self.messages.get_mut(&channel_id)
+                    && !history::reconcile(list, &message)
+                    && !history::detached(list, &tl)
+                {
+                    history::insert_sorted(list, vec![*message]);
+                }
+            }
+            ToUi::SendFailed {
+                channel_id,
+                nonce,
+                error,
+            } => {
+                let marked = self
+                    .messages
+                    .get_mut(&channel_id)
+                    .is_some_and(|list| history::mark_failed(list, &nonce, &error));
+                if !marked {
+                    // Not on screen (channel dropped): say so instead.
+                    self.outbox.remove(&nonce);
+                    self.toast = Some((format!("Couldn't send: {error}"), Instant::now()));
+                }
+            }
+            ToUi::CopyImage(img) => {
+                ctx.copy_image(*img);
+                self.toast = Some(("Image copied".into(), Instant::now()));
             }
             ToUi::HistoryFailed {
                 channel_id,
@@ -2260,10 +2403,26 @@ impl State {
             } => {
                 self.request_unknown_authors(&channel_id, &messages);
                 self.remember_users(&mut messages, config);
-                if let Some(old) = self.messages.insert(channel_id.clone(), messages) {
-                    forget_message_images(ctx, &old);
+                self.channel_errors.remove(&channel_id);
+                let channel_last = self
+                    .find_channel(&channel_id)
+                    .map_or(0, |(_, c)| c.last_message_id);
+                let list = self.messages.entry(channel_id.clone()).or_default();
+                let tl = self.timelines.entry(channel_id.clone()).or_default();
+                history::apply_around(list, tl, messages, channel_last);
+                // Keep the jumped-to page; the newest go past the cap.
+                let cap = config.max_messages_per_channel.max(10);
+                let removed = history::trim(list, tl, cap, false);
+                forget_message_images(ctx, &removed);
+                // Opening at the first unread scrolls to the NEW line
+                // instead (no flash).
+                let for_unread =
+                    self.unread_around.as_ref() == Some(&(channel_id.clone(), message_id.clone()));
+                if for_unread {
+                    self.unread_around = None;
+                } else {
+                    self.scroll_to = Some((channel_id, message_id));
                 }
-                self.scroll_to = Some((channel_id, message_id));
             }
             ToUi::FilesPicked(paths) => {
                 // Files for an opened thread's message box go there.
@@ -2308,14 +2467,28 @@ impl State {
                     c.last_message_id = msg.id.parse().unwrap_or(c.last_message_id);
                     self.dms.sort_channels();
                 }
-                // Only keep live messages for channels we have cached.
-                if let Some(list) = self.messages.get_mut(&msg.channel_id)
-                    && !list.iter().any(|m| m.id == msg.id)
+                // My own message coming back: it takes its faded copy's
+                // place (matched by nonce).
+                if let Some(n) = &msg.nonce
+                    && self.outbox.remove(n).is_some()
                 {
-                    list.push(*msg);
-                    let cap = config.max_messages_per_channel.max(10);
-                    if list.len() > cap {
-                        let removed: Vec<Message> = list.drain(..list.len() - cap).collect();
+                    self.md_cache.remove(n);
+                }
+                // Only keep live messages for channels we have cached, and
+                // not while the present isn't loaded (a jump far back).
+                if let Some(list) = self.messages.get_mut(&msg.channel_id)
+                    && !history::reconcile(list, &msg)
+                {
+                    let tl = self.timelines.entry(msg.channel_id.clone()).or_default();
+                    if !history::detached(list, tl) {
+                        // Before my own unsent messages, which stay last.
+                        let at = list
+                            .iter()
+                            .rposition(|m| m.local.is_none())
+                            .map_or(0, |i| i + 1);
+                        list.insert(at, *msg);
+                        let cap = config.max_messages_per_channel.max(10);
+                        let removed = history::trim(list, tl, cap, true);
                         forget_message_images(ctx, &removed);
                     }
                 }
@@ -4952,11 +5125,14 @@ impl State {
         if self.selected_channel.as_ref() != Some(&channel_id) {
             self.compose = Compose::New;
             self.pending_files.clear();
-            // Red "NEW" line above the first unread message.
+            // Red "NEW" line above the first unread message, and open
+            // there (no read state: at the bottom).
             self.new_marker = self
                 .reads
                 .is_unread(&channel_id)
                 .then(|| (channel_id.clone(), self.reads.last_acked(&channel_id)));
+            self.open_unread = self.new_marker.as_ref().map(|(c, _)| c.clone());
+            self.unread_around = None;
         }
         // Opening a channel reads it (user action, so ack right away),
         // except message requests: viewing one never acks it.
@@ -4972,6 +5148,8 @@ impl State {
             if let Some(old) = self.recent_channels.pop_back()
                 && let Some(msgs) = self.messages.remove(&old)
             {
+                self.timelines.remove(&old);
+                self.outbox.retain(|_, o| o.channel_id != old);
                 forget_message_images(ctx, &msgs);
                 // Parsed markdown of the dropped channel goes too.
                 self.md_cache.clear();
@@ -6152,6 +6330,11 @@ impl State {
         config: &Config,
         pal: &Palette,
     ) {
+        if self.reload_present.as_ref() == Some(&channel_id) {
+            self.reload_present = None;
+            let ctx = ui.ctx().clone();
+            self.reload_present(&channel_id, &ctx);
+        }
         let Some(count) = self.messages.get(&channel_id).map(Vec::len) else {
             match self.channel_error(&channel_id) {
                 // Doc §4.1: a centred state that fills the column, never a
@@ -6208,6 +6391,50 @@ impl State {
             return;
         }
 
+        // Paging (history.rs): where the first unread is, gaps, the top.
+        let tl = self.timelines.get(&channel_id).cloned().unwrap_or_default();
+        let msgs = &self.messages[&channel_id];
+        let detached = history::detached(msgs, &tl);
+        let mut unread_at = None;
+        if self.open_unread.as_ref() == Some(&channel_id) {
+            let acked = self
+                .new_marker
+                .as_ref()
+                .filter(|(c, _)| *c == channel_id)
+                .map_or(0, |(_, a)| *a);
+            let my_id = self.me.as_ref().map(|u| u.id.as_str()).unwrap_or_default();
+            match history::first_unread(msgs, &tl, acked, my_id) {
+                history::Unread::At(i) => unread_at = Some(i),
+                history::Unread::None => self.open_unread = None,
+                // Older than the newest page: load around the last read
+                // message (once), then open there.
+                history::Unread::NotLoaded => {
+                    let key = (channel_id.clone(), acked.to_string());
+                    if self.unread_around.as_ref() != Some(&key) {
+                        let _ = self.tx.send(ToBackend::LoadAround {
+                            channel_id: key.0.clone(),
+                            message_id: key.1.clone(),
+                        });
+                        self.unread_around = Some(key);
+                    }
+                }
+            }
+        }
+        // Drawn in the last couple of passes: settled (not a channel's
+        // first frame), and its anchor still means something.
+        let pass = ui.ctx().cumulative_pass_nr();
+        let anchor = self
+            .scroll_anchors
+            .get(&channel_id)
+            .filter(|(_, _, at)| pass.saturating_sub(*at) <= 2)
+            .map(|(id, y, _)| (id.clone(), *y));
+        let settled = anchor.is_some();
+        let set_offset = self
+            .scroll_set
+            .take()
+            .filter(|(c, _)| *c == channel_id)
+            .map(|(_, y)| y);
+        let to_bottom = self.scroll_bottom.as_ref() == Some(&channel_id);
         let formatting = !config.disable_formatting;
         let my_id = self.me.as_ref().map(|u| u.id.clone()).unwrap_or_default();
         self.refresh_emoji_groups();
@@ -6355,148 +6582,249 @@ impl State {
             .map(|(_, acked)| *acked);
         let hide_blocked = !config.show_blocked_messages;
 
-        egui::ScrollArea::vertical()
+        let hold_still = scroll_id.is_some() || self.open_unread.as_ref() == Some(&channel_id);
+        let mut area = egui::ScrollArea::vertical()
             .id_salt(("messages", &channel_id))
             .auto_shrink(false)
-            .stick_to_bottom(scroll_id.is_none())
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                // Message text at 15 px (Discord: 16 px at 100%).
-                ui.style_mut()
-                    .text_styles
-                    .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
-                ui.add_space(8.0);
-                let mut prev: Option<&Message> = None;
-                let mut revealed_run = false;
-                let mut i = 0;
-                while i < messages.len() {
-                    let m = &messages[i];
-                    let day = timefmt::local_day(m.time);
-                    let new_day =
-                        day.is_some() && prev.and_then(|p| timefmt::local_day(p.time)) != day;
-                    // Discord groups messages by the same person sent within 7 minutes.
-                    let mut grouped = m.reply.is_none()
-                        && !new_day
-                        && !config.compact_messages
-                        && prev.is_some_and(|p| {
-                            sysmsg::is_normal(p.kind)
-                                && p.author.id == m.author.id
-                                && (m.time - p.time).abs() < 7 * 60
-                        });
-                    if let (true, Some(day)) = (new_day, day) {
-                        date_divider(ui, &timefmt::day_label(day), pal);
+            .stick_to_bottom(!hold_still && set_offset.is_none());
+        if let Some(y) = set_offset {
+            area = area.vertical_scroll_offset(y);
+        } else if to_bottom {
+            // Clamped to the bottom by egui.
+            area = area.vertical_scroll_offset(1.0e7);
+        }
+        // Filled in while drawing: the old top row's new y, this frame's
+        // top row, a clicked gap / retry, and the scroll to the NEW line.
+        let mut anchor_y = None;
+        let mut top_row: Option<(String, f32)> = None;
+        let mut load_before: Option<String> = None;
+        let mut unread_done = false;
+
+        let out = area.show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // Message text at 15 px (Discord: 16 px at 100%).
+            ui.style_mut()
+                .text_styles
+                .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
+            let origin = ui.min_rect().top();
+            ui.add_space(8.0);
+            // Top of the history: the start, a spinner, or a retry.
+            if history_top(ui, &tl, pal) {
+                load_before = messages
+                    .iter()
+                    .find(|m| m.local.is_none())
+                    .map(|m| m.id.clone());
+            }
+            let mut prev: Option<&Message> = None;
+            let mut revealed_run = false;
+            let mut i = 0;
+            while i < messages.len() {
+                let m = &messages[i];
+                let day = timefmt::local_day(m.time);
+                let new_day = day.is_some() && prev.and_then(|p| timefmt::local_day(p.time)) != day;
+                // Discord groups messages by the same person sent within 7 minutes.
+                let mut grouped = m.reply.is_none()
+                    && !new_day
+                    && !config.compact_messages
+                    && prev.is_some_and(|p| {
+                        sysmsg::is_normal(p.kind)
+                            && p.author.id == m.author.id
+                            && (m.time - p.time).abs() < 7 * 60
+                    });
+                if let (true, Some(day)) = (new_day, day) {
+                    date_divider(ui, &timefmt::day_label(day), pal);
+                }
+                if let Some(acked) = new_after
+                    && m.local.is_none()
+                    && m.id.parse::<u64>().is_ok_and(|id| id > acked)
+                    && m.author.id != my_id
+                {
+                    let line = new_divider(ui, pal);
+                    new_after = None;
+                    grouped = false;
+                    // Open at the first unread: the NEW line near the
+                    // top of the view.
+                    if unread_at.is_some() {
+                        ui.scroll_to_rect(line.expand2(vec2(0.0, 40.0)), Some(egui::Align::TOP));
+                        unread_done = true;
                     }
-                    if let Some(acked) = new_after
-                        && m.id.parse::<u64>().is_ok_and(|id| id > acked)
-                        && m.author.id != my_id
+                }
+                // Rows' content y, to hold the view when a page goes
+                // in above.
+                let row_y = ui.cursor().top() - origin;
+                if top_row.is_none() {
+                    top_row = Some((m.id.clone(), row_y));
+                }
+                if anchor.as_ref().is_some_and(|(id, _)| *id == m.id) {
+                    anchor_y = Some(row_y);
+                }
+
+                // Blocked people: one "N blocked messages — Show" line
+                // per run, unless shown.
+                let blocked = self.blocked.contains(&m.author.id);
+                if !blocked {
+                    revealed_run = false;
+                } else if hide_blocked && !revealed_run && scroll_id.as_ref() != Some(&m.id) {
+                    if self.revealed_blocked.contains(&m.id) {
+                        revealed_run = true;
+                    } else {
+                        let start = i;
+                        while i < messages.len() && self.blocked.contains(&messages[i].author.id) {
+                            i += 1;
+                        }
+                        if blocked_row(ui, i - start, pal) {
+                            action = Some(MessageAction::ShowBlocked(m.id.clone()));
+                        }
+                        prev = None;
+                        continue;
+                    }
+                }
+
+                let author = self.author_style(guild, &m.author);
+                // A thread start: one bordered card that opens it.
+                if let Some((_, card)) = cards.iter().find(|(ci, _)| *ci == i) {
+                    let last_name = card
+                        .preview
+                        .last
+                        .as_ref()
+                        .map(|l| self.author_style(guild, &l.author).name);
+                    if thread_card(ui, m, author.name, card, last_name, config, pal)
+                        && let Some(t) = &card.thread
                     {
-                        new_divider(ui, pal);
-                        new_after = None;
-                        grouped = false;
-                    }
-
-                    // Blocked people: one "N blocked messages — Show" line
-                    // per run, unless shown.
-                    let blocked = self.blocked.contains(&m.author.id);
-                    if !blocked {
-                        revealed_run = false;
-                    } else if hide_blocked && !revealed_run && scroll_id.as_ref() != Some(&m.id) {
-                        if self.revealed_blocked.contains(&m.id) {
-                            revealed_run = true;
-                        } else {
-                            let start = i;
-                            while i < messages.len()
-                                && self.blocked.contains(&messages[i].author.id)
-                            {
-                                i += 1;
-                            }
-                            if blocked_row(ui, i - start, pal) {
-                                action = Some(MessageAction::ShowBlocked(m.id.clone()));
-                            }
-                            prev = None;
-                            continue;
-                        }
-                    }
-
-                    let author = self.author_style(guild, &m.author);
-                    // A thread start: one bordered card that opens it.
-                    if let Some((_, card)) = cards.iter().find(|(ci, _)| *ci == i) {
-                        let last_name = card
-                            .preview
-                            .last
-                            .as_ref()
-                            .map(|l| self.author_style(guild, &l.author).name);
-                        if thread_card(ui, m, author.name, card, last_name, config, pal)
-                            && let Some(t) = &card.thread
-                        {
-                            action =
-                                Some(MessageAction::OpenThread(Box::new(t.clone().into_owned())));
-                        }
-                        prev = Some(m);
-                        i += 1;
-                        continue;
-                    }
-                    // Joins, pins, calls, boosts…: one muted line.
-                    if !sysmsg::is_normal(m.kind) {
-                        let target = m.mention_names.first().map(|(_, n)| n.as_str());
-                        let server = guild.map_or("", |g| g.name.as_str());
-                        if let Some(line) = sysmsg::system_line(
-                            m.kind,
-                            author.name,
-                            target,
-                            &m.content,
-                            server,
-                            &m.id,
-                        ) && let Some(a) = system_row(ui, m, &line, pal)
-                        {
-                            action = Some(a);
-                        }
-                        prev = Some(m);
-                        i += 1;
-                        continue;
-                    }
-                    let mentions_me = !my_id.is_empty()
-                        && m.author.id != my_id
-                        && (m.mention_everyone || m.mentions.contains(&my_id));
-                    let menu = MenuCtx {
-                        mine: m.author.id == my_id,
-                        guild_id: menu.guild_id.clone(),
-                        can_pin: menu.can_pin,
-                        can_thread: menu.can_thread,
-                    };
-                    let rc = RowCtx {
-                        grouped,
-                        mentions_me,
-                        compact: config.compact_messages,
-                        highlight: flash.as_ref() == Some(&m.id),
-                        menu: &menu,
-                        reactions: react_parts.as_ref(),
-                        invites: invite_parts.as_ref(),
-                    };
-                    let body = Body {
-                        blocks: &parsed[i].0,
-                        reply: parsed[i].1.as_deref(),
-                        forwarded: parsed[i].2.as_deref(),
-                        lookup: &lookup,
-                    };
-                    let (a, rect) = message_row(ui, m, &body, &author, &rc, config, pal);
-                    if a.is_some() {
-                        action = a;
-                    }
-                    if scroll_id.as_ref() == Some(&m.id) {
-                        ui.scroll_to_rect(rect, Some(egui::Align::Center));
-                        scrolled = true;
+                        action = Some(MessageAction::OpenThread(Box::new(t.clone().into_owned())));
                     }
                     prev = Some(m);
                     i += 1;
+                    continue;
                 }
-                ui.add_space(20.0);
-            });
+                // Joins, pins, calls, boosts…: one muted line.
+                if !sysmsg::is_normal(m.kind) {
+                    let target = m.mention_names.first().map(|(_, n)| n.as_str());
+                    let server = guild.map_or("", |g| g.name.as_str());
+                    if let Some(line) =
+                        sysmsg::system_line(m.kind, author.name, target, &m.content, server, &m.id)
+                        && let Some(a) = system_row(ui, m, &line, pal)
+                    {
+                        action = Some(a);
+                    }
+                    prev = Some(m);
+                    i += 1;
+                    continue;
+                }
+                let mentions_me = !my_id.is_empty()
+                    && m.author.id != my_id
+                    && (m.mention_everyone || m.mentions.contains(&my_id));
+                let menu = MenuCtx {
+                    mine: m.author.id == my_id,
+                    guild_id: menu.guild_id.clone(),
+                    can_pin: menu.can_pin,
+                    can_thread: menu.can_thread,
+                };
+                let rc = RowCtx {
+                    grouped,
+                    mentions_me,
+                    compact: config.compact_messages,
+                    highlight: flash.as_ref() == Some(&m.id),
+                    menu: &menu,
+                    reactions: react_parts.as_ref(),
+                    invites: invite_parts.as_ref(),
+                };
+                let body = Body {
+                    blocks: &parsed[i].0,
+                    reply: parsed[i].1.as_deref(),
+                    forwarded: parsed[i].2.as_deref(),
+                    lookup: &lookup,
+                };
+                let (a, rect) = message_row(ui, m, &body, &author, &rc, config, pal);
+                if a.is_some() {
+                    action = a;
+                }
+                if scroll_id.as_ref() == Some(&m.id) {
+                    ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                    scrolled = true;
+                }
+                prev = Some(m);
+                i += 1;
+                // Missing messages after this one: "Load more".
+                if m.local.is_none()
+                    && tl.gaps.contains(&history::id_of(m))
+                    && let Some(next) = messages[i..].iter().find(|n| n.local.is_none())
+                {
+                    if gap_row(ui, tl.loading, pal) {
+                        load_before = Some(next.id.clone());
+                    }
+                    prev = None;
+                }
+            }
+            ui.add_space(20.0);
+        });
         if scrolled && let Some((_, id)) = self.scroll_to.take() {
             self.highlight = Some((id, Instant::now()));
         }
+        if unread_done {
+            self.open_unread = None;
+        }
+        if to_bottom {
+            self.scroll_bottom = None;
+        }
 
+        // Paging after the list is laid out.
+        let offset = out.state.clamped_offset().y;
+        let view_h = out.inner_rect.height();
         let ctx = ui.ctx().clone();
+        // A page went in above the old top row: keep it where it was
+        // (re-run this pass at the new offset, so nothing jumps).
+        let first_id = messages.first().map(|m| m.id.clone());
+        if let (Some((id, old_y)), Some(new_y)) = (&anchor, anchor_y)
+            && first_id.as_ref() != Some(id)
+            && (new_y - old_y).abs() > 0.5
+        {
+            let y = history::hold_offset(offset, *old_y, new_y);
+            self.scroll_set = Some((channel_id.clone(), y));
+            ctx.request_discard("keep the scroll position after loading older messages");
+        }
+        self.scroll_anchors
+            .retain(|_, (_, _, at)| pass.saturating_sub(*at) <= 2);
+        if let Some((id, y)) = top_row {
+            self.scroll_anchors
+                .insert(channel_id.clone(), (id, y, pass));
+        }
+        // Near the top: the next 50 older (not on a channel's first frame,
+        // before it has settled at the bottom).
+        if load_before.is_none()
+            && settled
+            && !hold_still
+            && history::should_load_older(&tl, offset, !messages.is_empty())
+        {
+            load_before = messages
+                .iter()
+                .find(|m| m.local.is_none())
+                .map(|m| m.id.clone());
+        }
+        if let Some(before) = load_before
+            && !tl.loading
+        {
+            let t = self.timelines.entry(channel_id.clone()).or_default();
+            t.loading = true;
+            t.failed = false;
+            let _ = self.tx.send(ToBackend::LoadPage {
+                channel_id: channel_id.clone(),
+                before: Some(before),
+            });
+        }
+        // Well above the newest message (or the present isn't loaded):
+        // "Jump to present".
+        let distance = out.content_size.y - view_h - offset;
+        if history::show_jump_to_present(distance, view_h, detached)
+            && jump_to_present_bar(ui, out.inner_rect, pal)
+        {
+            if detached {
+                self.reload_present(&channel_id, &ctx);
+            }
+            self.scroll_to = None;
+            self.scroll_bottom = Some(channel_id.clone());
+        }
+
         match action {
             Some(MessageAction::Reply(id, author)) => {
                 self.compose = Compose::Reply {
@@ -6548,6 +6876,13 @@ impl State {
                 self.open_thread(*t, &ctx, config);
             }
             Some(MessageAction::OpenThread(_)) => {}
+            Some(MessageAction::RetrySend(nonce)) => self.retry_send(&channel_id, &nonce, true),
+            Some(MessageAction::DiscardSend(nonce)) => {
+                self.retry_send(&channel_id, &nonce, false);
+            }
+            Some(MessageAction::CopyImage(url)) => {
+                let _ = self.tx.send(ToBackend::CopyImage { url });
+            }
             None => {}
         }
     }
@@ -6619,6 +6954,19 @@ impl State {
     /// Open a link: straight away if trusted (or warnings are off),
     /// otherwise via the "Leaving RustCord" dialog.
     fn open_link(&mut self, url: &str, ctx: &egui::Context, config: &Config) {
+        // A Discord message / channel link to a channel we have: open it
+        // here (loading around the message if needed).
+        if let Some(l) = links::message_link(url)
+            && self.find_channel(&l.channel_id).is_some()
+        {
+            self.go_to_channel(&l.channel_id, ctx, config);
+            if let Some(mid) = l.message_id {
+                // Don't open at the first unread over the jump.
+                self.open_unread = None;
+                self.jump_to(l.channel_id, mid);
+            }
+            return;
+        }
         match links::check(url, config.warn_before_links, &config.trusted_domains) {
             LinkCheck::Open(u) => ctx.open_url(egui::OpenUrl::new_tab(u)),
             LinkCheck::Ask(w) => self.link_warning = Some(w),
@@ -7043,6 +7391,21 @@ impl State {
                 .rect
             })
             .inner;
+
+        // Near the limit (2,000, or 4,000 with Nitro): "1850/2000" in the
+        // row's top-right corner, red past it (sending is refused).
+        if let Some((text, over)) = history::char_counter(
+            self.draft.chars().count(),
+            history::char_limit(self.premium_type),
+        ) {
+            ui.painter().text(
+                egui::pos2(box_rect.right() - 6.0, box_rect.top() + 2.0),
+                egui::Align2::RIGHT_TOP,
+                text,
+                egui::FontId::proportional(11.0),
+                if over { pal.danger } else { pal.muted },
+            );
+        }
 
         // Above the row (floating over the chat, bottom up): who's typing,
         // the reply / edit banner, then the files waiting to upload.
@@ -7827,34 +8190,174 @@ impl State {
         if content.is_empty() && files.is_empty() {
             return;
         }
-        let req = match std::mem::replace(&mut self.compose, Compose::New) {
-            Compose::Edit { message_id } => ToBackend::Edit {
-                channel_id,
-                message_id,
-                content,
-            },
-            Compose::New => ToBackend::Send {
+        // Over the limit: keep the draft and say so (Discord refuses it).
+        let limit = history::char_limit(self.premium_type);
+        let len = content.chars().count();
+        if len > limit {
+            self.pending_files = files;
+            self.pending_spoilers = spoiler_set;
+            self.toast = Some((
+                format!("Your message is too long ({len}/{limit} characters)"),
+                Instant::now(),
+            ));
+            return;
+        }
+        match std::mem::replace(&mut self.compose, Compose::New) {
+            Compose::Edit { message_id } => {
+                let _ = self.tx.send(ToBackend::Edit {
+                    channel_id,
+                    message_id,
+                    content,
+                });
+            }
+            Compose::New => self.send_message(Outgoing {
                 channel_id,
                 content,
                 reply_to: None,
                 reply_ping: false,
                 files,
                 spoilers,
-            },
+            }),
             Compose::Reply {
                 message_id, ping, ..
-            } => ToBackend::Send {
+            } => self.send_message(Outgoing {
                 channel_id,
                 content,
                 reply_to: Some(message_id),
                 reply_ping: ping,
                 files,
                 spoilers,
-            },
-        };
-        let _ = self.tx.send(req);
+            }),
+        }
         self.draft.clear();
         self.last_typing_sent = None;
+    }
+
+    /// Load a channel's newest page again from scratch (the present wasn't
+    /// loaded after a jump). My unsent messages stay.
+    fn reload_present(&mut self, channel_id: &str, ctx: &egui::Context) {
+        let Some(old) = self.messages.remove(channel_id) else {
+            return;
+        };
+        let (locals, old): (Vec<Message>, Vec<Message>) =
+            old.into_iter().partition(|m| m.local.is_some());
+        forget_message_images(ctx, &old);
+        self.timelines.remove(channel_id);
+        self.channel_errors.remove(channel_id);
+        self.messages.insert(channel_id.to_string(), locals);
+        let _ = self.tx.send(ToBackend::LoadHistory {
+            channel_id: channel_id.to_string(),
+        });
+    }
+
+    /// Send a message the user just sent (Enter, Send, a GIF click): it
+    /// shows at once, faded, until Discord confirms it (matched by nonce).
+    fn send_message(&mut self, out: Outgoing) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        self.nonce_seq = self.nonce_seq.wrapping_add(1);
+        let nonce = history::make_nonce(now.as_millis() as u64, self.nonce_seq);
+        // Like Discord, sending takes you to the present: reload it first if
+        // a jump left it unloaded.
+        let detached = self.messages.get(&out.channel_id).is_some_and(|l| {
+            history::detached(
+                l,
+                &self
+                    .timelines
+                    .get(&out.channel_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        });
+        if detached {
+            self.reload_present = Some(out.channel_id.clone());
+        }
+        self.scroll_to = None;
+        self.scroll_bottom = Some(out.channel_id.clone());
+        if let (Some(me), Some(list)) = (&self.me, self.messages.get_mut(&out.channel_id)) {
+            let mut m = Message::from_json(&serde_json::json!({
+                "id": nonce, "channel_id": out.channel_id, "content": out.content,
+            }));
+            m.author = me.clone();
+            m.time = now.as_secs() as i64;
+            m.nonce = Some(nonce.clone());
+            m.local = Some(Box::new(crate::types::LocalSend {
+                error: None,
+                files: out
+                    .files
+                    .iter()
+                    .map(|p| {
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    })
+                    .collect(),
+            }));
+            if let Some(rid) = &out.reply_to {
+                m.kind = 19;
+                m.reply = list
+                    .iter()
+                    .find(|r| &r.id == rid)
+                    .map(|r| crate::types::ReplyPreview {
+                        id: r.id.clone(),
+                        author: r.author.name.clone(),
+                        author_id: r.author.id.clone(),
+                        avatar_url: r.author.avatar_url.clone(),
+                        content: r.content.chars().take(300).collect(),
+                    });
+            }
+            list.push(m);
+        }
+        if self.outbox.len() >= OUTBOX_CAP {
+            // The oldest (smallest nonce) goes; its row just stays faded.
+            if let Some(k) = self
+                .outbox
+                .keys()
+                .min_by_key(|k| k.parse::<u64>().unwrap_or(0))
+                .cloned()
+            {
+                self.outbox.remove(&k);
+            }
+        }
+        self.send_outgoing(&nonce, &out);
+        self.outbox.insert(nonce, out);
+    }
+
+    fn send_outgoing(&self, nonce: &str, out: &Outgoing) {
+        let _ = self.tx.send(ToBackend::Send {
+            channel_id: out.channel_id.clone(),
+            nonce: nonce.to_string(),
+            content: out.content.clone(),
+            reply_to: out.reply_to.clone(),
+            reply_ping: out.reply_ping,
+            files: out.files.clone(),
+            spoilers: out.spoilers.clone(),
+        });
+    }
+
+    /// Retry (the user clicked it): faded again and sent with the same
+    /// nonce. Delete: the failed message just goes.
+    fn retry_send(&mut self, channel_id: &str, nonce: &str, retry: bool) {
+        let Some(list) = self.messages.get_mut(channel_id) else {
+            return;
+        };
+        if !retry {
+            list.retain(|m| !(m.local.is_some() && m.id == nonce));
+            self.outbox.remove(nonce);
+            self.md_cache.remove(nonce);
+            return;
+        }
+        if let Some(l) = list
+            .iter_mut()
+            .find(|m| m.id == nonce)
+            .and_then(|m| m.local.as_mut())
+        {
+            l.error = None;
+        }
+        if let Some(out) = self.outbox.get(nonce) {
+            self.send_outgoing(nonce, out);
+        }
     }
 
     /// Status bar module: a thin bar at the bottom like Discord Messenger's
@@ -7888,6 +8391,21 @@ impl State {
                     };
                     ui.label(RichText::new(icon).size(14.0).color(col));
                     ui.label(small(&self.status));
+                    // Manual reconnect (resumes if it can); only on click.
+                    if widgets::icon_button_sized(
+                        ui,
+                        icons::ARROW_CLOCKWISE,
+                        "Reconnect",
+                        false,
+                        true,
+                        20.0,
+                        14.0,
+                        pal,
+                    )
+                    .clicked()
+                    {
+                        let _ = self.tx.send(ToBackend::Reconnect);
+                    }
                     if let Some(cid) = &self.selected_channel
                         && let Some((g, c)) = self.find_channel(cid)
                     {
@@ -8028,7 +8546,7 @@ impl State {
                     // The user clicked this GIF: send its link, like Discord.
                     let target = self.gif_target.take();
                     if let Some(cid) = target.or_else(|| self.selected_channel.clone()) {
-                        let _ = self.tx.send(ToBackend::Send {
+                        self.send_message(Outgoing {
                             channel_id: cid,
                             content: url,
                             reply_to: None,
@@ -9198,7 +9716,143 @@ fn mention_badge(
 }
 
 /// Red "NEW" line above the first unread message.
-fn new_divider(ui: &mut egui::Ui, pal: &Palette) {
+/// Top of a channel's loaded history: the start of the conversation, a
+/// spinner while older messages load, or a retry after a failure. True when
+/// "Try again" was clicked.
+fn history_top(ui: &mut egui::Ui, tl: &history::Timeline, pal: &Palette) -> bool {
+    let mut retry = false;
+    ui.horizontal(|ui| {
+        ui.add_space(MSG_PAD);
+        ui.spacing_mut().item_spacing.x = 6.0;
+        if tl.loading {
+            ui.add(egui::Spinner::new().size(14.0).color(pal.muted));
+            ui.label(
+                RichText::new("Loading older messages…")
+                    .size(12.0)
+                    .color(pal.muted),
+            );
+        } else if tl.failed {
+            ui.label(RichText::new(icons::WARNING).size(14.0).color(pal.danger));
+            ui.label(
+                RichText::new("Couldn't load older messages")
+                    .size(12.0)
+                    .color(pal.muted),
+            );
+            retry = ui
+                .link(RichText::new("Try again").size(12.0))
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked();
+        } else if tl.at_start {
+            ui.label(
+                RichText::new(icons::CHAT_CIRCLE)
+                    .size(14.0)
+                    .color(pal.muted),
+            );
+            ui.label(
+                RichText::new("This is the start of the conversation.")
+                    .size(12.0)
+                    .color(pal.muted),
+            );
+        }
+    });
+    retry
+}
+
+/// "Load more" between two loaded batches with messages missing between
+/// them. True when clicked.
+fn gap_row(ui: &mut egui::Ui, loading: bool, pal: &Palette) -> bool {
+    ui.add_space(8.0);
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 28.0), egui::Sense::click());
+    let rect = rect.shrink2(vec2(MSG_PAD, 0.0));
+    let hovered = resp.hovered() && !loading;
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        theme::corner(6),
+        if hovered { pal.hover } else { pal.sidebar },
+        egui::Stroke::new(1.0, pal.divider),
+        egui::StrokeKind::Inside,
+    );
+    let (icon, text) = if loading {
+        (icons::CLOCK, "Loading…")
+    } else {
+        (icons::ARROW_DOWN, "Load more messages")
+    };
+    painter.text(
+        rect.center() - vec2(4.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        icon,
+        icons::font(14.0),
+        pal.muted,
+    );
+    painter.text(
+        rect.center() + vec2(4.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        text,
+        egui::FontId::proportional(13.0),
+        if hovered { pal.strong } else { pal.text },
+    );
+    ui.add_space(8.0);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Some messages here aren't loaded")
+        .clicked()
+        && !loading
+}
+
+/// Discord's "You're viewing older messages · Jump to present" bar over the
+/// bottom of the chat. True when clicked.
+fn jump_to_present_bar(ui: &mut egui::Ui, area: egui::Rect, pal: &Palette) -> bool {
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(area.left() + 12.0, area.bottom() - 36.0),
+        egui::pos2(area.right() - 12.0, area.bottom() - 8.0),
+    );
+    if rect.width() < 120.0 {
+        return false;
+    }
+    let resp = ui
+        .interact(
+            rect,
+            ui.scope_id().with("jump_to_present"),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        theme::corner(8),
+        pal.menu_bg(),
+        egui::Stroke::new(1.0, pal.divider),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        egui::pos2(rect.left() + 12.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "You're viewing older messages",
+        egui::FontId::proportional(13.0),
+        pal.muted,
+    );
+    let color = if resp.hovered() { pal.strong } else { pal.text };
+    let label = painter.text(
+        egui::pos2(rect.right() - 30.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        "Jump to present",
+        theme::bold_font(13.0),
+        color,
+    );
+    painter.text(
+        egui::pos2(label.right() + 6.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        icons::ARROW_DOWN,
+        icons::font(14.0),
+        color,
+    );
+    resp.clicked()
+}
+
+/// The red "NEW" line; returns its rect (opening at the first unread
+/// scrolls to it).
+fn new_divider(ui: &mut egui::Ui, pal: &Palette) -> egui::Rect {
     ui.add_space(10.0);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 12.0), egui::Sense::hover());
     let rect = rect.shrink2(vec2(MSG_PAD, 0.0));
@@ -9220,6 +9874,7 @@ fn new_divider(ui: &mut egui::Ui, pal: &Palette) {
         theme::bold_font(9.5),
         Color32::WHITE,
     );
+    rect
 }
 
 /// One mention in the inbox popup.
@@ -9712,6 +10367,10 @@ fn message_row(
             .id_salt(("msg", &m.id))
             .sense(egui::Sense::click()),
         |ui| {
+            // My message on its way: faded until Discord confirms it.
+            if m.local.as_ref().is_some_and(|l| l.error.is_none()) {
+                ui.multiply_opacity(0.5);
+            }
             let bg = ui.painter().add(egui::Shape::Noop);
             let full = ui.available_rect_before_wrap();
             let mut gutter = egui::Rect::NOTHING;
@@ -9732,6 +10391,7 @@ fn message_row(
                     }
                     if rc.compact {
                         compact_line(ui, m, body, author, rc, config, pal, &mut action);
+                        local_status(ui, m, pal, &mut action);
                         return;
                     }
                     ui.horizontal_top(|ui| {
@@ -9798,6 +10458,7 @@ fn message_row(
                                 });
                             }
                             message_content(ui, m, body, rc, config, pal, &mut action);
+                            local_status(ui, m, pal, &mut action);
                             if let Some(ip) = rc.invites
                                 && let Some(a) = invite_cards(ui, m, ip, pal)
                             {
@@ -9862,6 +10523,10 @@ fn message_row(
         );
     }
 
+    // Not on Discord yet: no menu or hover bar (nothing to reply to).
+    if m.local.is_some() {
+        return (action, rect);
+    }
     egui::Popup::context_menu(&resp)
         .frame(widgets::menu_frame(pal))
         .show(|ui| message_menu(ui, m, rc.menu, &mut action, pal));
@@ -9875,6 +10540,51 @@ fn message_row(
         hover_bar(ui, m, rc, rect, ids, &mut action, pal);
     }
     (action, rect)
+}
+
+/// Under an unsent message: the files uploading, or (failed) the reason in
+/// red with Retry and Delete. Retry only ever happens on the click.
+fn local_status(ui: &mut egui::Ui, m: &Message, pal: &Palette, action: &mut Option<MessageAction>) {
+    let Some(local) = &m.local else {
+        return;
+    };
+    if !local.files.is_empty() && local.error.is_none() {
+        ui.label(
+            RichText::new(format!(
+                "{} Uploading {}…",
+                icons::PAPERCLIP,
+                local.files.join(", ")
+            ))
+            .size(12.0)
+            .color(pal.muted),
+        );
+    }
+    let Some(error) = &local.error else {
+        return;
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(
+            RichText::new(format!("{} Message not sent: {error}", icons::WARNING))
+                .size(12.0)
+                .color(pal.danger),
+        );
+        if ui
+            .link(RichText::new("Retry").size(12.0))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            *action = Some(MessageAction::RetrySend(m.id.clone()));
+        }
+        ui.label(RichText::new("·").size(12.0).color(pal.muted));
+        if ui
+            .link(RichText::new("Delete").size(12.0).color(pal.danger))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            *action = Some(MessageAction::DiscardSend(m.id.clone()));
+        }
+    });
 }
 
 /// Width of Discord's BOT tag plus its gap (reserved before the name).
@@ -10034,8 +10744,8 @@ fn message_content(
         }
     }
     for a in &m.attachments {
-        if let Some(url) = attachment_ui(ui, a, config, pal) {
-            *action = Some(MessageAction::OpenLink(url));
+        if let Some(a) = attachment_ui(ui, a, config, pal) {
+            *action = Some(a);
         }
     }
     for st in &m.stickers {
@@ -10416,8 +11126,8 @@ fn forwarded_ui(
                 }
             }
             for a in &f.attachments {
-                if let Some(url) = attachment_ui(ui, a, config, pal) {
-                    *action = Some(MessageAction::OpenLink(url));
+                if let Some(a) = attachment_ui(ui, a, config, pal) {
+                    *action = Some(a);
                 }
             }
             for st in &f.stickers {
@@ -10931,14 +11641,14 @@ fn message_menu(
     );
 }
 
-/// An image (click: open full size) or a file card. Returns a link the user
-/// clicked; the caller opens it through the link warning.
+/// An image (click: open full size; right-click: Copy Image / Copy Link /
+/// Save Image) or a file card. Links go through the link warning.
 fn attachment_ui(
     ui: &mut egui::Ui,
     a: &Attachment,
     config: &Config,
     pal: &Palette,
-) -> Option<String> {
+) -> Option<MessageAction> {
     let mut clicked = None;
     if a.is_image() && config.modules.images {
         let (cap_w, max_h) = IMAGE_MAX;
@@ -10971,8 +11681,33 @@ fn attachment_ui(
                 a.human_size()
             ));
         if resp.clicked() {
-            clicked = Some(a.url.clone());
+            clicked = Some(MessageAction::OpenLink(a.url.clone()));
         }
+        egui::Popup::context_menu(&resp)
+            .frame(widgets::menu_frame(pal))
+            .show(|ui| {
+                let items = [
+                    (
+                        icons::COPY,
+                        "Copy Image",
+                        MessageAction::CopyImage(a.url.clone()),
+                    ),
+                    (icons::LINK, "Copy Link", MessageAction::Copy(a.url.clone())),
+                    (
+                        icons::DOWNLOAD,
+                        "Save Image",
+                        MessageAction::SaveImage(a.url.clone(), a.filename.clone()),
+                    ),
+                ];
+                for (icon, label, act) in items {
+                    if widgets::menu_item(ui, Some(icon), label, widgets::Tone::Normal, pal)
+                        .clicked()
+                    {
+                        clicked = Some(act);
+                        ui.close();
+                    }
+                }
+            });
     } else {
         // Discord's file card is 432 wide; narrower columns shrink it and
         // the name is cut with "…" (full name and URL on hover).
@@ -10998,7 +11733,7 @@ fn attachment_ui(
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text(format!("{}\n{}", a.filename, a.url));
                         if link.clicked() {
-                            clicked = Some(a.url.clone());
+                            clicked = Some(MessageAction::OpenLink(a.url.clone()));
                         }
                         ui.label(RichText::new(a.human_size()).small().color(pal.muted));
                     });

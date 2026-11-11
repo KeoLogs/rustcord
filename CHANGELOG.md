@@ -6,6 +6,20 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## 0.10.0: DM core (history paging, first unread, optimistic send)
+- Chat history like Discord's (Brief A): scrolling near the top loads 50
+  older messages at a time and the view stays where it was; a "Load more"
+  row marks messages missing between two loaded batches; a "Jump to present"
+  bar shows when you're well above the newest message. Channels open at the
+  first unread message under the red NEW line (at the bottom if there's no
+  read state). Sent messages show at once, faded, until Discord confirms
+  them (matched by nonce); a failed send turns red with Retry and Delete
+  (never retried on its own). Clicking a discord.com message link opens it
+  inside RustCord. Also: a character counter near the limit (2,000, or 4,000
+  with Nitro), Copy Image / Copy Link on an image's right-click menu, a
+  Reconnect button in the connection status, and the Discord Messenger
+  credit in Settings → About.
+
 ## 0.9.0: Your own presets
 - Your own presets (Settings → Presets, "Presets" module): save your layout,
   theme and modules as a preset, apply it from its card (the card shows the

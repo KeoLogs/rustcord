@@ -205,10 +205,14 @@ async fn run(
     // Ops for the gateway (op 14 / op 8) from UI requests.
     let (gw_tx, mut gw_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
 
+    // "Reconnect" in the connection status wakes the gateway task.
+    let reconnect = std::sync::Arc::new(tokio::sync::Notify::new());
+
     // Gateway task: reconnects with backoff until a fatal error, or until
     // the UI goes away (then it closes the connection cleanly).
     let gateway = {
         let tx = tx.clone();
+        let reconnect = reconnect.clone();
         let ctx = egui_ctx.clone();
         tokio::spawn(async move {
             let cfg = GatewayConfig {
@@ -222,14 +226,23 @@ async fn run(
             let mut session = Session::default();
             let mut backoff = 1u64;
             loop {
-                match gateway::run_session(&cfg, &mut session, &tx, &mut gw_rx, &repaint).await {
+                // A manual Reconnect drops this connection (no close frame,
+                // so the session can still be resumed).
+                let ended = tokio::select! {
+                    r = gateway::run_session(&cfg, &mut session, &tx, &mut gw_rx, &repaint) => r,
+                    _ = reconnect.notified() => {
+                        backoff = 0;
+                        Ok(SessionEnd::Retry)
+                    }
+                };
+                match ended {
                     Ok(SessionEnd::Fatal(reason)) => {
                         let _ = tx.send(ToUi::Fatal(reason));
                         repaint();
                         return;
                     }
                     Ok(SessionEnd::Shutdown) => return,
-                    Ok(SessionEnd::Retry) => backoff = 1,
+                    Ok(SessionEnd::Retry) => backoff = backoff.min(1),
                     Err(e) => {
                         let _ = tx.send(ToUi::Status(format!("Disconnected: {e}")));
                         repaint();
@@ -239,8 +252,12 @@ async fn run(
                 if gw_rx.is_closed() {
                     return;
                 }
-                tokio::time::sleep(Duration::from_secs(backoff)).await;
-                backoff = (backoff * 2).min(60);
+                // Reconnect cuts the wait short.
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
+                    _ = reconnect.notified() => {}
+                }
+                backoff = (backoff * 2).clamp(1, 60);
             }
         })
     };
@@ -253,6 +270,10 @@ async fn run(
             continue;
         }
         // Gateway ops are just forwarded (sent once the session is ready).
+        if matches!(req, ToBackend::Reconnect) {
+            reconnect.notify_one();
+            continue;
+        }
         let op = match &req {
             // Op 14 is for user accounts only.
             ToBackend::SubscribeMembers { .. } if is_bot => continue,
@@ -300,16 +321,60 @@ async fn run(
                         })),
                     }
                 }
+                ToBackend::LoadPage { channel_id, before } => {
+                    match api
+                        .history_before(&channel_id, before.as_deref(), PAGE_LIMIT)
+                        .await
+                    {
+                        Ok(messages) => Ok(Some(ToUi::Page {
+                            channel_id,
+                            before,
+                            messages,
+                        })),
+                        Err(e) => {
+                            if let Some(rl) = crate::ratelimit::rate_limited(&e) {
+                                let _ = tx.send(ToUi::RateLimited(rl));
+                            }
+                            Ok(Some(ToUi::PageFailed {
+                                channel_id,
+                                error: crate::ratelimit::user_message(&e),
+                            }))
+                        }
+                    }
+                }
+                // Handled above (never reaches here).
+                ToBackend::Reconnect => Ok(None),
+                ToBackend::CopyImage { url } => {
+                    // Discord's CDN only: the token never goes anywhere.
+                    match api.download(&url).await {
+                        Ok(bytes) => {
+                            let decoded = tokio::task::spawn_blocking(move || decode_image(&bytes))
+                                .await
+                                .ok()
+                                .flatten();
+                            Ok(Some(match decoded {
+                                Some(img) => ToUi::CopyImage(Box::new(img)),
+                                None => ToUi::Notice("Couldn't copy that image".into()),
+                            }))
+                        }
+                        Err(e) => Ok(Some(ToUi::Notice(format!(
+                            "Couldn't copy the image: {}",
+                            crate::ratelimit::user_message(&e)
+                        )))),
+                    }
+                }
                 ToBackend::Send {
                     channel_id,
+                    nonce,
                     content,
                     reply_to,
                     reply_ping,
                     files,
                     spoilers,
-                } => api
+                } => match api
                     .send_message(
                         &channel_id,
+                        &nonce,
                         &content,
                         reply_to.as_deref(),
                         reply_ping,
@@ -317,7 +382,25 @@ async fn run(
                         &spoilers,
                     )
                     .await
-                    .map(|_| None),
+                {
+                    Ok(message) => Ok(Some(ToUi::Sent {
+                        channel_id,
+                        nonce,
+                        message: Box::new(message),
+                    })),
+                    // Shown red under the message with Retry / Delete;
+                    // never retried on its own.
+                    Err(e) => {
+                        if let Some(rl) = crate::ratelimit::rate_limited(&e) {
+                            let _ = tx.send(ToUi::RateLimited(rl));
+                        }
+                        Ok(Some(ToUi::SendFailed {
+                            channel_id,
+                            nonce,
+                            error: crate::ratelimit::user_message(&e),
+                        }))
+                    }
+                },
                 ToBackend::CloseDm { channel_id } => api.close_dm(&channel_id).await.map(|_| None),
                 ToBackend::LoadGifs { .. } if is_bot => Ok(Some(ToUi::GifsFailed {
                     error: "GIF search needs a user account".into(),
@@ -706,6 +789,19 @@ async fn run(
     let _ = tokio::time::timeout(Duration::from_secs(3), gateway).await;
 }
 
+/// Messages per history page (Discord's maximum).
+const PAGE_LIMIT: u8 = crate::history::PAGE_SIZE as u8;
+
+/// Decode a downloaded picture for the clipboard ("Copy Image").
+fn decode_image(bytes: &[u8]) -> Option<eframe::egui::ColorImage> {
+    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    Some(eframe::egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        img.as_raw(),
+    ))
+}
+
 /// What a read-only test-account run (`RUSTCORD_TEST_ACCOUNT`) may still
 /// do: load things and gateway reads. Everything that would send, ack,
 /// type, react, join, edit or change settings is dropped.
@@ -713,7 +809,10 @@ fn read_only_ok(req: &ToBackend) -> bool {
     matches!(
         req,
         ToBackend::LoadHistory { .. }
+            | ToBackend::LoadPage { .. }
             | ToBackend::LoadAround { .. }
+            | ToBackend::CopyImage { .. }
+            | ToBackend::Reconnect
             | ToBackend::LoadPins { .. }
             | ToBackend::LoadGifs { .. }
             | ToBackend::LoadProfile { .. }
