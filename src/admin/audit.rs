@@ -249,7 +249,13 @@ impl State {
                     if let Some(first) = label.get_mut(0..1) {
                         first.make_ascii_uppercase();
                     }
-                    (*k, label.trim_end_matches(" for").trim_end_matches(" by").to_string())
+                    (
+                        *k,
+                        label
+                            .trim_end_matches(" for")
+                            .trim_end_matches(" by")
+                            .to_string(),
+                    )
                 }));
                 aui::select(ui, pal, "audit_action", &mut self.filter_action, &actions);
             });

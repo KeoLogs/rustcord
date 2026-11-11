@@ -28,6 +28,8 @@ Settings → About). Version x.y.z:
     uses, temporary membership), copy the link and revoke.
   - Emoji and stickers: upload (pick a file, name it, then Add), rename and
     delete, with Discord's size limits checked before anything is sent.
+  - Audit log: who changed what, with the changes and reason on each entry,
+    filters by user and by action, and "Load more".
 
 ## 0.10.0: DM core (history paging, first unread, optimistic send)
 - Chat history like Discord's (Brief A): scrolling near the top loads 50

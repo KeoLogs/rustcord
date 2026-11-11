@@ -153,8 +153,62 @@ fn load(r: &Request) -> Value {
             { "id": "811", "name": "Ship It", "description": "", "tags": "rocket",
               "format_type": 1, "user": { "id": "460000000000000001", "username": "you" } },
         ]),
+        Kind::LoadAudit | Kind::LoadAuditMore => audit(&r.path),
         _ => Value::Null,
     }
+}
+
+/// Demo audit log, filtered by the `user_id` / `action_type` in `path`.
+fn audit(path: &str) -> Value {
+    let param = |name: &str| {
+        path.split_once(&format!("{name}="))
+            .map(|(_, v)| v.split('&').next().unwrap_or("").to_string())
+    };
+    if param("before").is_some() {
+        return json!({ "audit_log_entries": [] });
+    }
+    let (sam, alex, you, troll) = (
+        "300000000000000002",
+        "520000000000000003",
+        "460000000000000001",
+        "950000000000000010",
+    );
+    // Ids are snowflakes a few hours apart (November 2026).
+    let all = [
+        json!({ "id": "1437000000000000000", "user_id": alex, "target_id": troll,
+                "action_type": 22, "reason": "Spam after two warnings" }),
+        json!({ "id": "1436900000000000000", "user_id": sam, "target_id": "201",
+                "action_type": 11, "changes": [
+                    { "key": "rate_limit_per_user", "old_value": 0, "new_value": 5 },
+                    { "key": "topic", "old_value": "Chat",
+                      "new_value": "Chat about anything. Be nice, no spoilers without tags." }] }),
+        json!({ "id": "1436800000000000000", "user_id": you, "target_id": "504",
+                "action_type": 30, "changes": [
+                    { "key": "name", "new_value": "Rustacean" },
+                    { "key": "color", "new_value": 15105570 }] }),
+        json!({ "id": "1436700000000000000", "user_id": sam, "target_id": you,
+                "action_type": 25, "changes": [
+                    { "key": "$add", "new_value": [{ "id": "505", "name": "Manager" }] }] }),
+        json!({ "id": "1436600000000000000", "user_id": alex, "target_id": "0",
+                "action_type": 42, "changes": [{ "key": "code", "old_value": "oldInvite" }] }),
+        json!({ "id": "1436500000000000000", "user_id": sam, "target_id": "100",
+                "action_type": 1, "changes": [
+                    { "key": "verification_level", "old_value": 0, "new_value": 1 }] }),
+    ];
+    let entries: Vec<Value> = all
+        .into_iter()
+        .filter(|e| param("user_id").is_none_or(|u| e["user_id"] == u.as_str()))
+        .filter(|e| param("action_type").is_none_or(|a| e["action_type"].to_string() == a))
+        .collect();
+    json!({
+        "audit_log_entries": entries,
+        "users": [
+            { "id": sam, "username": "sam", "global_name": "Sam" },
+            { "id": alex, "username": "alex", "global_name": "Alex" },
+            { "id": you, "username": "you", "global_name": "You" },
+            { "id": troll, "username": "troll", "global_name": "xX_Troll_Xx" },
+        ],
+    })
 }
 
 /// Demo members; `path` may carry a `query=` to filter by.
