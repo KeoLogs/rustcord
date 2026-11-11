@@ -1071,6 +1071,7 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
     app.sync_windows(&ctx);
     app.update_title(&ctx);
     timefmt::set_12_hour(app.config.use_12_hour_time);
+    crate::image_cache::set_limit_mb(app.config.image_cache_mb);
     let pal = app.active_theme.palette;
 
     // ---- Login screen

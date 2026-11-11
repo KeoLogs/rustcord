@@ -912,6 +912,31 @@ impl SettingsPage {
                      and images are freed. Lower = less RAM, more reloading.",
                 );
                 ui.add_space(8.0);
+                label(ui, pal, "IMAGE CACHE ON DISK");
+                ui.add(
+                    egui::Slider::new(&mut config.image_cache_mb, 0..=crate::image_cache::MAX_MB)
+                        .suffix(" MB"),
+                );
+                hint(
+                    ui,
+                    pal,
+                    "Pictures you've already seen are kept on this PC so they aren't                      downloaded again. The least recently used ones are deleted past this                      size. It uses disk space, not RAM; 0 turns it off.",
+                );
+                ui.add_space(4.0);
+                let used = crate::image_cache::used_bytes();
+                if ui
+                    .add_enabled(
+                        used > 0,
+                        egui::Button::new(icons::label(
+                            icons::TRASH,
+                            &format!("Clear cache ({:.0} MB)", used as f64 / 1_048_576.0),
+                        )),
+                    )
+                    .clicked()
+                {
+                    crate::image_cache::clear_async(ui.ctx());
+                }
+                ui.add_space(8.0);
                 hint(
                     ui,
                     pal,

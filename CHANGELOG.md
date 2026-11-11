@@ -6,6 +6,12 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## Unreleased
+- Disk image cache: pictures you've already seen are kept on this PC (up to
+  200 MB, least recently used deleted first) so they aren't downloaded
+  again. Settings → Performance has the size (0 = off) and a
+  "Clear cache (X MB)" button. It uses disk space, not RAM.
+
 ## 0.10.0: DM core (history paging, first unread, optimistic send)
 - Chat history like Discord's (Brief A): scrolling near the top loads 50
   older messages at a time and the view stays where it was; a "Load more"

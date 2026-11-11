@@ -99,6 +99,8 @@ pub struct Config {
     /// clicking a GIF's star.
     #[serde(default)]
     pub favourite_gifs: Vec<crate::gif_picker::Gif>,
+    /// Disk image cache size in MB (`image_cache.rs`); 0 turns it off.
+    pub image_cache_mb: u32,
 }
 
 impl Default for Config {
@@ -134,6 +136,7 @@ impl Default for Config {
             recent_emoji: Default::default(),
             skin_tone: 0,
             favourite_gifs: Vec::new(),
+            image_cache_mb: crate::image_cache::DEFAULT_MB,
         }
     }
 }

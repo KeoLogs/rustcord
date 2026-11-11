@@ -3777,6 +3777,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "egui_tiles",
+ "ehttp",
  "emojis",
  "flate2",
  "futures-util",

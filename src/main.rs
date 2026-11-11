@@ -23,6 +23,7 @@ mod history;
 mod home;
 mod http_error;
 mod icons;
+mod image_cache;
 mod invites;
 mod layout;
 mod layout_presets;
@@ -134,6 +135,9 @@ fn main() -> eframe::Result {
             // Images (avatars, server icons, attachments, emoji) load
             // straight from Discord's CDN / Twemoji.
             egui_extras::install_image_loaders(&cc.egui_ctx);
+            // http(s) images go through the disk cache (asked before
+            // egui_extras' own http loader).
+            image_cache::install(&cc.egui_ctx, storage::data_dir(demo));
             // Cascadia Mono (bundled) as the UI font, Noto Sans for "sans"
             // themes; system fonts stay the fallback for other scripts.
             theme::install_fonts(&cc.egui_ctx);
