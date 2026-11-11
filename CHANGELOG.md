@@ -36,6 +36,9 @@ Settings → About). Version x.y.z:
   - Webhooks and integrations: list, create, edit and delete webhooks. A
     webhook URL is hidden until you click Reveal, Copy URL copies it, and
     it is never logged. Integrations can be listed and removed.
+  - Community (Community servers only): rules and updates channels and the
+    server language, the welcome screen, and onboarding (default channels,
+    questions and answers with the roles and channels they give).
 
 ## 0.10.0: DM core (history paging, first unread, optimistic send)
 - Chat history like Discord's (Brief A): scrolling near the top loads 50

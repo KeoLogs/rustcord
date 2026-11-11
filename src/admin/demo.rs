@@ -190,6 +190,35 @@ fn load(r: &Request) -> Value {
             { "id": "651", "name": "RustCord Streams", "type": "twitch", "enabled": false,
               "user": { "username": "alex" } },
         ]),
+        Kind::LoadCommunity => json!({
+            "id": r.guild_id, "rules_channel_id": "200", "public_updates_channel_id": "203",
+            "preferred_locale": "en-GB",
+        }),
+        Kind::LoadWelcome => json!({
+            "enabled": true,
+            "description": "A place to test RustCord, a fast Discord client written in Rust.",
+            "welcome_channels": [
+                { "channel_id": "200", "description": "Read the rules first",
+                  "emoji_id": null, "emoji_name": "\u{1F4DC}" },
+                { "channel_id": "201", "description": "Say hello",
+                  "emoji_id": null, "emoji_name": "\u{1F44B}" },
+            ],
+        }),
+        Kind::LoadOnboarding => json!({
+            "enabled": true, "mode": 0, "default_channel_ids": ["200", "201"],
+            "prompts": [{
+                "id": "840", "title": "What brings you here?", "type": 0,
+                "single_select": false, "required": false, "in_onboarding": true,
+                "options": [
+                    { "id": "841", "title": "Writing Rust", "description": "Dev talk and PRs",
+                      "role_ids": ["504"], "channel_ids": ["203"],
+                      "emoji": { "id": null, "name": "\u{1F980}", "animated": false } },
+                    { "id": "842", "title": "Just chatting", "description": "",
+                      "role_ids": [], "channel_ids": ["202"],
+                      "emoji": { "id": null, "name": null, "animated": false } },
+                ],
+            }],
+        }),
         _ => Value::Null,
     }
 }

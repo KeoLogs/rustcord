@@ -29,6 +29,7 @@ use crate::types::Guild;
 pub mod audit;
 pub mod automod;
 pub mod channels;
+pub mod community;
 pub mod demo;
 pub mod emojis;
 pub mod invites;
@@ -56,6 +57,12 @@ pub enum Method {
 pub enum Kind {
     LoadGuild,
     SaveGuild,
+    LoadCommunity,
+    SaveCommunity,
+    LoadWelcome,
+    SaveWelcome,
+    LoadOnboarding,
+    SaveOnboarding,
     LoadWebhooks,
     CreateWebhook,
     SaveWebhook,
@@ -111,6 +118,12 @@ impl Kind {
         match self {
             Kind::LoadGuild => "Loading the server settings",
             Kind::SaveGuild => "Saving the server settings",
+            Kind::LoadCommunity => "Loading community settings",
+            Kind::SaveCommunity => "Saving community settings",
+            Kind::LoadWelcome => "Loading the welcome screen",
+            Kind::SaveWelcome => "Saving the welcome screen",
+            Kind::LoadOnboarding => "Loading onboarding",
+            Kind::SaveOnboarding => "Saving onboarding",
             Kind::LoadWebhooks => "Loading webhooks",
             Kind::CreateWebhook => "Creating the webhook",
             Kind::SaveWebhook => "Saving the webhook",
@@ -164,6 +177,12 @@ impl Kind {
     fn tab(self) -> Tab {
         match self {
             Kind::LoadGuild | Kind::SaveGuild => Tab::Overview,
+            Kind::LoadCommunity
+            | Kind::SaveCommunity
+            | Kind::LoadWelcome
+            | Kind::SaveWelcome
+            | Kind::LoadOnboarding
+            | Kind::SaveOnboarding => Tab::Community,
             Kind::LoadIntegrations | Kind::DeleteIntegration => Tab::Integrations,
             Kind::LoadWebhooks | Kind::CreateWebhook | Kind::SaveWebhook | Kind::DeleteWebhook => {
                 Tab::Webhooks
@@ -427,6 +446,7 @@ pub fn id_or_null(id: &str) -> Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,
+    Community,
     Integrations,
     Webhooks,
     AutoMod,
@@ -447,12 +467,14 @@ const NAV: &[(&str, &[Tab])] = &[
     ("People", &[Tab::Members, Tab::Invites, Tab::Bans]),
     ("Moderation", &[Tab::AuditLog, Tab::AutoMod]),
     ("Apps", &[Tab::Webhooks, Tab::Integrations]),
+    ("Community", &[Tab::Community]),
 ];
 
 impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
+            Tab::Community => "Community",
             Tab::Integrations => "Integrations",
             Tab::Webhooks => "Webhooks",
             Tab::AutoMod => "AutoMod",
@@ -470,6 +492,7 @@ impl Tab {
     fn icon(self) -> &'static str {
         match self {
             Tab::Overview => icons::GEAR,
+            Tab::Community => icons::MEGAPHONE,
             Tab::Integrations => icons::PUZZLE,
             Tab::Webhooks => icons::LINK,
             Tab::AutoMod => icons::SHIELD,
@@ -491,6 +514,9 @@ impl Tab {
         let any = |bits: u64| perms & bits != 0;
         match self {
             Tab::Overview => any(perms::MANAGE_GUILD),
+            Tab::Community => {
+                any(perms::MANAGE_GUILD) && features.iter().any(|f| f == community::FEATURE)
+            }
             Tab::Integrations => any(perms::MANAGE_GUILD),
             Tab::Webhooks => any(perms::MANAGE_WEBHOOKS),
             Tab::AutoMod => any(perms::MANAGE_GUILD),
@@ -712,6 +738,7 @@ pub struct AdminPage {
     /// tab's first editor once its data is in.
     pub demo_detail: bool,
     overview: overview::State,
+    community: community::State,
     webhooks: webhooks::State,
     automod: automod::State,
     audit: audit::State,
@@ -735,6 +762,7 @@ impl AdminPage {
             confirm: None,
             demo_detail: false,
             overview: Default::default(),
+            community: Default::default(),
             webhooks: Default::default(),
             automod: Default::default(),
             audit: Default::default(),
@@ -766,6 +794,11 @@ impl AdminPage {
         let g = &self.guild_id;
         match tab {
             Tab::Overview => vec![overview::load(g)],
+            Tab::Community => vec![
+                community::load_settings(g),
+                community::load_welcome(g),
+                community::load_onboarding(g),
+            ],
             Tab::Integrations => vec![webhooks::load_integrations(g)],
             Tab::Webhooks => vec![webhooks::load(g)],
             Tab::AutoMod => vec![automod::load(g)],
@@ -805,6 +838,7 @@ impl AdminPage {
         };
         match r.kind.tab() {
             Tab::Overview => self.overview.on_response(r.kind, &r.key, &v),
+            Tab::Community => self.community.on_response(r.kind, &r.key, &v),
             Tab::Webhooks | Tab::Integrations => self.webhooks.on_response(r.kind, &r.key, &v),
             Tab::AutoMod => self.automod.on_response(r.kind, &r.key, &v),
             Tab::AuditLog => self.audit.on_response(r.kind, &r.key, &v),
@@ -992,6 +1026,7 @@ impl AdminPage {
                         let before = out.send.len();
                         match self.tab {
                             Tab::Overview => self.overview.ui(ui, cx, &mut out),
+                            Tab::Community => self.community.ui(ui, cx, &mut out),
                             Tab::Integrations => self.webhooks.integrations_ui(ui, cx, &mut out),
                             Tab::Webhooks => self.webhooks.ui(ui, cx, &mut out),
                             Tab::AutoMod => self.automod.ui(ui, cx, &mut out),
