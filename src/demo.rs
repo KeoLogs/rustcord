@@ -716,6 +716,17 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                     crate::themes::pick_import_source(folder).await,
                 ));
             }
+            // --- presets --- (local files; work offline too)
+            ToBackend::PickPreset => {
+                if let Some(e) = crate::presets::pick_file().await {
+                    send(ToUi::PresetFile(e));
+                }
+            }
+            ToBackend::ExportPreset { file_name, text } => {
+                if let Some(e) = crate::presets::export_file(&file_name, text).await {
+                    send(ToUi::PresetFile(e));
+                }
+            }
             // --- onboarding --- (preview works; joining is off in the demo)
             ToBackend::ResolveInvite { code } => send(ToUi::InviteResolved {
                 result: crate::invites::classify_fetch(

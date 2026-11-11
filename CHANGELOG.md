@@ -6,6 +6,15 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## 0.9.0: Your own presets
+- Your own presets (Settings → Presets, "Presets" module): save your layout,
+  theme and modules as a preset, apply it from its card (the card shows the
+  theme, a layout thumbnail and how many modules change; Save Changes keeps
+  it), delete with a confirm, import / export `.rcpreset` files, copy a
+  preset or theme as code, and paste preset or theme code to save it as a
+  preset or a theme. Presets never contain account data. The demo has two
+  example presets.
+
 ## 0.8.0: Looks
 - Four built-in themes in Settings → Themes, shown as cards next to your
   imported ones, each with Apply; they can't be deleted:

@@ -112,8 +112,8 @@ improvements, z fixes). It has:
 - **Layout editor** (Settings → Layout → Edit layout): panels glow on hover,
   hold and drag anywhere to move (they grow as you pick them up), drag gaps
   to resize. Saved between runs; *Reset to default* and copy / import of a
-  layout. There are no preset pickers: one default look, everything else is
-  yours.
+  layout. There are no built-in preset pickers: one default look, everything
+  else is yours.
 - **Modules**: switch optional parts off to save memory (Settings → Modules),
   or on: e.g. the **Status bar** (connection, channel, typing, RAM; off by
   default)
@@ -151,6 +151,12 @@ improvements, z fixes). It has:
   `.rctheme` file, a theme folder or a `.zip`; colours, rounded corners,
   square or round avatars and badges, shadows, gradients, glass panels, a
   chat background image. See [Themes](#themes) for the format
+- **your own presets** (Settings → Presets, "Presets" module): save your
+  layout, theme and modules as a preset card (layout thumbnail, theme name,
+  how many modules change) and apply it with one click (Save Changes keeps
+  it). Import / Export `.rcpreset` files; right-click Export (or a card's ⋯)
+  to copy a preset as one-line code; paste preset or theme code and save it
+  as a preset or a theme. See [Presets](#presets)
 
 What's next: lower memory use (modules that are off cost almost nothing),
 server settings and roles, the rest of the
@@ -235,6 +241,21 @@ They aren't installed by default, aren't compiled into the binary and aren't
 part of release builds. Import one with Settings → Themes → *Import
 folder…* (or *Import theme…* and pick its `theme.rctheme`).
 
+## Presets
+
+A preset (`.rcpreset`) is one JSON file: a manifest (name, author,
+description), the layout (the same text as Settings → Layout → Copy layout),
+the theme (`null` for the default look, else its id, name and the
+`.rctheme` text so it travels with the preset) and the module switches. It
+never holds account data, tokens or server / channel ids; unknown fields are
+refused. Files are capped at 192 KB, theme ids must be plain `[a-z0-9-]`
+names, and themes that need a background image are only referenced by id
+(import their folder or `.zip` separately). Saved presets live in RustCord's
+data folder under `presets/<id>.rcpreset`. The format is documented at the
+top of [`src/presets.rs`](src/presets.rs). "Copy preset code" gives
+`rcpreset1:` + base64 of the JSON; "Copy theme code" gives `rctheme1:` +
+base64 of the `.rctheme` text.
+
 ## Layout of the code
 
 | File | What it does |
@@ -250,6 +271,8 @@ folder…* (or *Import theme…* and pick its `theme.rctheme`).
 | `src/theme_file.rs` | The `.rctheme` format: parsing, validation, fallbacks to the base theme |
 | `src/themes.rs` | Theme folder (import / delete / list), the active theme, gradient / glass / background painting |
 | `src/themes_page.rs` | Settings → Themes page: theme cards with previews, import, delete |
+| `src/presets.rs` | The `.rcpreset` format, preset / theme codes, the presets folder |
+| `src/presets_page.rs` | Settings → Presets page: preset cards, save / import / export, paste box |
 | `src/builtin_themes.rs` | The four built-in themes (RustCord Dark / Light, Discord Dark / Light) |
 | `src/anim.rs` | GIF autoplay: animated URIs, hover-to-play avatars / emoji, freeing off-screen GIFs |
 | `src/timefmt.rs` | Local-time message timestamps and date-divider labels |

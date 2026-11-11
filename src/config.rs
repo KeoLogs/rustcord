@@ -267,6 +267,9 @@ pub struct Modules {
     /// The star on GIFs and the GIF picker's Favourites tab.
     #[serde(default = "on")]
     pub favourite_gifs: bool,
+    /// Settings, Presets: save / import / apply your own setups (`.rcpreset`).
+    #[serde(default = "on")]
+    pub presets: bool,
 }
 
 impl Default for Modules {
@@ -291,6 +294,7 @@ impl Default for Modules {
             custom_themes: true,
             paste_media: true,
             favourite_gifs: true,
+            presets: true,
         }
     }
 }
@@ -528,6 +532,12 @@ pub const MODULES: &[ModuleInfo] = &[
         category: ModuleCategory::Messaging,
         description: "A star on each GIF and a Favourites tab in the GIF picker. Off = no star or tab; saved favourites are kept for later.",
         get: |m| &mut m.favourite_gifs,
+    },
+    ModuleInfo {
+        name: crate::presets::PRESETS_MODULE,
+        category: ModuleCategory::Appearance,
+        description: "Save your layout, theme and modules as a preset, share it as a .rcpreset file or code, and apply presets (Settings, Presets). Off = the Presets page is hidden and no preset files are read.",
+        get: |m| &mut m.presets,
     },
 ];
 

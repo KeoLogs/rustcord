@@ -21,6 +21,7 @@ pub enum Section {
     Modules,
     Layout,
     Themes,
+    Presets,
     Performance,
     About,
 }
@@ -47,6 +48,7 @@ const SECTIONS: &[(&str, &[NavItem])] = &[
             (Section::Modules, "Modules", icons::PUZZLE),
             (Section::Layout, "Layout", icons::LAYOUT),
             (Section::Themes, "Themes", icons::PALETTE),
+            (Section::Presets, "Presets", icons::SQUARES_FOUR),
             (Section::Performance, "Performance", icons::GAUGE),
             (Section::About, "About", icons::INFO),
         ],
@@ -65,13 +67,30 @@ pub enum SettingsAction {
     PickTheme {
         folder: bool,
     },
+    /// Settings → Presets → Import: open the file picker (backend).
+    PickPreset,
+    /// Settings → Presets → Export: save dialog + write (backend).
+    ExportPreset {
+        file_name: String,
+        text: String,
+    },
     LogOut,
     /// "Save Changes" (or Ctrl+S): the new config, plus synced settings to
     /// PATCH (user accounts). Nothing is applied or sent before this.
     Save {
         config: Box<Config>,
         sync: Vec<SyncChange>,
+        /// A layout from an applied preset (Settings → Presets).
+        layout: Option<Box<egui_tiles::Tree<crate::layout::Pane>>>,
     },
+}
+
+/// What the settings page reads and edits besides the config: the themes
+/// and presets folders and the live layout.
+pub struct Stores<'a> {
+    pub themes: &'a mut crate::themes::ThemeStore,
+    pub presets: &'a mut crate::presets::PresetStore,
+    pub tree: &'a egui_tiles::Tree<crate::layout::Pane>,
 }
 
 /// A synced (settings-proto) setting the user changed.
@@ -113,6 +132,10 @@ pub struct SettingsPage {
     import: Option<Result<egui_tiles::Tree<crate::layout::Pane>, String>>,
     /// The themes folder was re-read since this page opened.
     themes_read: bool,
+    /// Settings → Presets UI state.
+    presets_page: crate::presets_page::PresetsPage,
+    /// Layout of a preset applied but not saved yet.
+    pending_layout: Option<egui_tiles::Tree<crate::layout::Pane>>,
     /// Cache sizes for the memory panel, set by the app each frame while
     /// Performance is open (`None` otherwise).
     pub mem: Option<crate::memstats::MemCounts>,
@@ -131,6 +154,8 @@ impl SettingsPage {
             import_text: String::new(),
             import: None,
             themes_read: false,
+            presets_page: Default::default(),
+            pending_layout: None,
             mem: None,
             mem_sample: None,
         }
@@ -138,13 +163,14 @@ impl SettingsPage {
 
     /// Unsaved changes?
     pub fn dirty(&self) -> bool {
-        self.draft != self.base || !self.synced.is_empty()
+        self.draft != self.base || !self.synced.is_empty() || self.pending_layout.is_some()
     }
 
     /// Throw the edits away.
     pub fn reset(&mut self) {
         self.draft = self.base.clone();
         self.synced = SyncedDraft::default();
+        self.pending_layout = None;
     }
 
     /// Build the Save action (and treat the draft as saved).
@@ -167,7 +193,56 @@ impl SettingsPage {
         SettingsAction::Save {
             config: Box::new(self.draft.clone()),
             sync,
+            layout: self.pending_layout.take().map(Box::new),
         }
+    }
+
+    /// Settings → Presets → Apply: theme and modules go into the draft (the
+    /// theme previews live), the layout waits for Save Changes like the rest.
+    fn apply_preset(
+        &mut self,
+        p: &crate::presets::Preset,
+        themes: &mut crate::themes::ThemeStore,
+        presets: &mut crate::presets::PresetStore,
+    ) {
+        use crate::presets::Notice;
+        let config = &mut self.draft;
+        config.modules = p.modules_for(&config.modules);
+        let mut warn = None;
+        config.custom_theme = match &p.theme {
+            None => None,
+            Some(t) => match &t.file {
+                // The preset carries the theme: install it (or reuse the
+                // installed copy with the same text).
+                Some(text) => match themes.install_text(text) {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        warn = Some(format!("its theme couldn't be installed ({e:#})"));
+                        None
+                    }
+                },
+                None if themes.is_installed(&t.id) => Some(t.id.clone()),
+                None => {
+                    warn = Some(format!(
+                        "\"{}\" isn't installed, so it uses the default look",
+                        t.name
+                    ));
+                    None
+                }
+            },
+        };
+        themes.sync_with(config);
+        self.pending_layout = Some(p.tree.clone());
+        presets.notice = Some(match warn {
+            None => Notice::Ok(format!(
+                "Applied \"{}\". Press Save Changes to keep it (Reset undoes it).",
+                p.name
+            )),
+            Some(w) => Notice::Err(format!(
+                "Applied \"{}\", but {w}. Press Save Changes to keep it.",
+                p.name
+            )),
+        });
     }
 
     /// Trying to leave with unsaved changes: shake the bar instead.
@@ -187,7 +262,7 @@ impl SettingsPage {
         me: Option<&User>,
         synced: Option<&UserSettings>,
         pal: &Palette,
-        themes: &mut crate::themes::ThemeStore,
+        stores: &mut Stores<'_>,
     ) -> Option<SettingsAction> {
         // The real config changed underneath (e.g. synced compact mode from
         // another device): follow it unless the user is editing.
@@ -245,6 +320,9 @@ impl SettingsPage {
                         });
                         ui.add_space(2.0);
                         for (section, label, icon) in *items {
+                            if *section == Section::Presets && !self.base.modules.presets {
+                                continue;
+                            }
                             let selected = self.section == *section;
                             if nav_item(ui, icon, label, selected, pal.text, pal).clicked() {
                                 self.section = *section;
@@ -298,7 +376,7 @@ impl SettingsPage {
                         // At most 680 px, narrower with the window.
                         ui.set_max_width(ui.available_width().min(680.0));
                         ui.spacing_mut().item_spacing.y = 6.0;
-                        if let Some(a) = self.section_ui(ui, me, synced, pal, themes) {
+                        if let Some(a) = self.section_ui(ui, me, synced, pal, stores) {
                             action = Some(a);
                         }
                         // Room so the unsaved-changes bar never covers the end.
@@ -437,9 +515,12 @@ impl SettingsPage {
         me: Option<&User>,
         synced: Option<&UserSettings>,
         pal: &Palette,
-        themes: &mut crate::themes::ThemeStore,
+        stores: &mut Stores<'_>,
     ) -> Option<SettingsAction> {
         let mut action = None;
+        let themes = &mut *stores.themes;
+        let presets = &mut *stores.presets;
+        let tree = stores.tree;
         let config = &mut self.draft;
         match self.section {
             Section::Account => account(ui, me, pal),
@@ -723,6 +804,68 @@ impl SettingsPage {
                         if let Some(dir) = themes.dir() {
                             let _ = crate::themes::open_folder(dir);
                         }
+                    }
+                    None => {}
+                }
+            }
+            Section::Presets => {
+                if !self.base.modules.presets {
+                    hint(ui, pal, "Turn on the Presets module to use presets.");
+                    return None;
+                }
+                themes.sync_with(config);
+                if !std::mem::replace(&mut self.themes_read, true) {
+                    themes.refresh();
+                }
+                // Compared with the presets' (sanitized) trees on the cards.
+                let shown_tree = self.pending_layout.as_ref().unwrap_or(tree);
+                let shown_tree = &crate::layout_presets::sanitize(shown_tree)
+                    .unwrap_or_else(|_| shown_tree.clone());
+                let page_action = {
+                    let themes_ref = &*themes;
+                    let cfg = &*config;
+                    let installed = |id: &str| themes_ref.is_installed(id);
+                    let capture = |name: &str| {
+                        let id = cfg.custom_theme.as_deref().unwrap_or_default();
+                        crate::presets::Preset::capture(
+                            name,
+                            cfg,
+                            shown_tree,
+                            themes_ref.get(id).map(|t| t.meta.name.as_str()),
+                            themes_ref.theme_text(id),
+                        )
+                    };
+                    let now = crate::presets_page::Current {
+                        modules: &cfg.modules,
+                        theme: cfg
+                            .custom_theme
+                            .as_deref()
+                            .filter(|_| cfg.modules.custom_themes),
+                        tree: shown_tree,
+                        installed: &installed,
+                        capture: &capture,
+                    };
+                    self.presets_page.show(ui, pal, presets, &now)
+                };
+                use crate::presets_page::PresetsAction;
+                match page_action {
+                    Some(PresetsAction::Apply(p)) => {
+                        self.apply_preset(&p, themes, presets);
+                    }
+                    Some(PresetsAction::PickFile) => action = Some(SettingsAction::PickPreset),
+                    Some(PresetsAction::ExportFile { file_name, text }) => {
+                        action = Some(SettingsAction::ExportPreset { file_name, text });
+                    }
+                    Some(PresetsAction::SaveTheme(text)) => {
+                        presets.notice = Some(match themes.install_text(&text) {
+                            Ok(id) => crate::presets::Notice::Ok(format!(
+                                "Saved theme \"{}\" (Settings → Themes)",
+                                themes.get(&id).map(|t| t.meta.name.as_str()).unwrap_or(&id)
+                            )),
+                            Err(e) => crate::presets::Notice::Err(format!(
+                                "Couldn't save the theme: {e:#}"
+                            )),
+                        });
                     }
                     None => {}
                 }
