@@ -19,6 +19,7 @@ pub enum Target<'a> {
     Hwnd(isize),
     /// An account window (a deferred viewport, which has no `Frame`): found
     /// once by its title among this thread's windows, then remembered.
+    #[cfg_attr(not(windows), allow(dead_code))]
     Title(&'a str),
     /// No window (e.g. no handle available).
     None,

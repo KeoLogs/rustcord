@@ -82,6 +82,7 @@ pub fn label(count: u32) -> Option<u8> {
 pub const NINE_PLUS: u8 = 10;
 
 /// Text of a label ("1".."9", "9+").
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn label_text(label: u8) -> String {
     if label >= NINE_PLUS {
         "9+".into()
@@ -91,10 +92,12 @@ pub fn label_text(label: u8) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Badge picture
+// Badge picture (only `taskbar.rs` on Windows draws it; tests run it
+// everywhere)
 // ---------------------------------------------------------------------------
 
 /// 5x7 glyphs, one row per byte (bit 4 = left column).
+#[cfg_attr(not(windows), allow(dead_code))]
 fn glyph(c: char) -> [u8; 7] {
     match c {
         '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
@@ -113,6 +116,7 @@ fn glyph(c: char) -> [u8; 7] {
 }
 
 /// Glyph cell `(x, y)` of `rows` is ink (out of range = no ink).
+#[cfg_attr(not(windows), allow(dead_code))]
 fn ink(rows: &[u8; 7], x: f32, y: f32) -> bool {
     if !(0.0..5.0).contains(&x) || !(0.0..7.0).contains(&y) {
         return false;
@@ -121,13 +125,16 @@ fn ink(rows: &[u8; 7], x: f32, y: f32) -> bool {
 }
 
 /// Supersamples per pixel side.
+#[cfg_attr(not(windows), allow(dead_code))]
 const SS: u32 = 4;
 /// Strokes are thickened by this much (in glyph units) on each side so the
 /// count stays readable at 16 px.
+#[cfg_attr(not(windows), allow(dead_code))]
 const BOLD: f32 = 0.18;
 
 /// Draw the badge for `label` as `size` x `size` RGBA (straight alpha, rows
 /// top to bottom): a `fill` circle with the count in white, anti-aliased.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn render(label: u8, size: u32, fill: [u8; 3]) -> Vec<u8> {
     let text = label_text(label);
     let glyphs: Vec<[u8; 7]> = text.chars().map(glyph).collect();
@@ -146,7 +153,7 @@ pub fn render(label: u8, size: u32, fill: [u8; 3]) -> Vec<u8> {
     let is_ink = |px: f32, py: f32| {
         let gx = (px - left) / unit;
         let gy = (py - top) / unit;
-        if gy < -BOLD || gy >= 7.0 + BOLD {
+        if !(-BOLD..7.0 + BOLD).contains(&gy) {
             return false;
         }
         // Thickened strokes can reach just past a glyph's own cell.
@@ -192,6 +199,7 @@ pub fn render(label: u8, size: u32, fill: [u8; 3]) -> Vec<u8> {
 
 /// Ink of glyph `i` (as f32 index) at glyph-space `(gx, gy)`, strokes
 /// thickened by [`BOLD`].
+#[cfg_attr(not(windows), allow(dead_code))]
 fn is_glyph_ink(glyphs: &[[u8; 7]], i: f32, gx: f32, gy: f32) -> bool {
     let rows = &glyphs[i as usize];
     let lx = gx - i.floor() * 6.0;
