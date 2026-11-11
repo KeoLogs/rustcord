@@ -67,10 +67,25 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
 - `src/settings.rs` is the settings page, `src/login.rs` the login screen,
   `src/theme.rs` the Discord palette (use `Palette` colours, not hard-coded
   ones) and fonts, `src/emoji.rs` text/emoji segmentation (has unit tests).
-- No preset pickers: one default look (Discord Dark + `default_tree`) with
-  "Reset to default" for layout and theme. Other themes (Discord Light
-  included) are `.rctheme` files in `examples/themes/`, imported by the
-  user; `layout_presets::Preset` is internal (default tree, v2 migration).
+- No preset pickers: one default layout (`default_tree`) with "Reset to
+  default". The only exception: exactly four built-in themes
+  (`src/builtin_themes.rs`, `Config::builtin_theme`): RustCord Dark (the
+  default, what "Reset to default" applies), RustCord Light, Discord Dark,
+  Discord Light. They show as cards in Settings → Themes, can't be deleted
+  and work with the Custom themes module off. Don't add more; every other
+  theme is a `.rctheme` file in `examples/themes/`, imported by the user.
+  The Discord built-ins must match `examples/themes/discord-classic` /
+  `discord-light` (tested). `layout_presets::Preset` is internal (default
+  tree, v2 migration).
+- Shapes: `.rctheme` `[style] shape` (badges, status dots, count boxes) and
+  `avatar_shape` (`"square"` ≤ 2 px corners, or `"round"`). Read them via
+  `theme::shape()` / `theme::avatar_shape()` (`Shape::radius`,
+  `Shape::dot`); never hard-code a circle for an avatar, badge or dot.
+- GIFs: `src/anim.rs`. Message / embed GIFs autoplay through
+  `anim::gif_image` (only while on screen; `anim::sweep` at the end of
+  every pass frees the rest, frame textures included). Avatars and emoji
+  stay still and use `anim::on_hover`. Links that became a GIF embed are
+  hidden (`embed::hide_gif_links`); "Copy Link" stays in the message menu.
 - Fonts: Cascadia Mono (variable, the default UI font; a theme's
   `font_family = "sans"` picks Noto Sans instead) and Noto Sans Regular +
   SemiBold are bundled (`assets/fonts/`, OFL) and installed by
@@ -91,7 +106,8 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   (hover background via a placeholder shape, the hover bar is an `Area`
   whose rect is kept in egui memory), `reply_preview`, `date_divider`.
   The members header button hides the Members tile with egui_tiles
-  visibility (`layout::toggle_pane`), « in the channel header hides the
+  visibility (`layout::toggle_pane`); its count boxes (`members::count_boxes`)
+  sit right-aligned left of – □ X, bots only when exact. « in the channel header hides the
   Channels tile (» in the chat header brings it back); hidden state is saved
   with the layout. Members draws the same 48 px `header_bar` as the chat.
 - Icons: `src/icons.rs` (Phosphor icon font, MIT, bundled; regular weight
@@ -207,7 +223,8 @@ next) so it matches what the app does.
 - Default look (PR1b): blocky bordered panes with notch labels
   (`[style.frame]` in .rctheme), no OS title bar: – □ X live in the
   top-right pane header (`src/window_frame.rs`); "Use system title bar"
-  restores the native frame. The old look is `examples/themes/discord-classic`.
+  restores the native frame. The old flat look is the built-in Discord Dark
+  theme (same as `examples/themes/discord-classic`).
 
 ## Before finishing any change
 

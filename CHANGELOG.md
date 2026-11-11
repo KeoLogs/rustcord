@@ -6,6 +6,36 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## 0.8.0: Looks
+- Four built-in themes in Settings → Themes, shown as cards next to your
+  imported ones, each with Apply; they can't be deleted:
+  - **RustCord Dark** (the default): bordered panes with labels,
+    monospace, square corners.
+  - **RustCord Light**: the same blocky look in light colours.
+  - **Discord Dark** and **Discord Light**: the classic flat Discord look
+    with Noto Sans and round shapes.
+  "Reset to default" goes back to RustCord Dark. They work with the Custom
+  themes module off. Old settings load as RustCord Dark.
+- GIFs play by themselves in messages and link previews (Tenor, Giphy,
+  Klipy and plain `.gif` files), at the same size as before. Only GIFs on
+  screen keep their frames in memory; scrolled-away ones are freed.
+  Animated avatars and emoji stay still until you hover them.
+- A message that is only a GIF link shows just the GIF: the link text is
+  hidden (other words in the message stay). Right-click → *Copy Link*
+  still copies it.
+- Square everything in the RustCord themes: avatars (user panel, members,
+  DMs, chat, profile card), server icons and the DM button, mention and
+  unread badges, the taskbar badge and status dots. The Discord themes keep
+  them round. Themes choose with the new `.rctheme` tokens
+  `[style] shape` and `avatar_shape` (`"square"` or `"round"`).
+- Members header: the online / offline counts are small square boxes in
+  their own spot left of – □ X. Hover one and it widens smoothly to read
+  "7 online". A blue bots box shows when the count is exact (the whole
+  list is loaded); otherwise it's left out rather than showing a partial
+  number.
+- The window buttons now stay in a narrow Members header instead of
+  floating over it.
+
 ## 0.6.1: Composer and user panel match the blocky look
 - The message box has no bubble any more: one flat row with a plain +,
   the message field, and GIF and emoji icons on the right.

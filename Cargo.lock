@@ -3767,7 +3767,7 @@ dependencies = [
 
 [[package]]
 name = "rustcord"
-version = "0.6.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arboard",
