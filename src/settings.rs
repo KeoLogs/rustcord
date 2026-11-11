@@ -23,6 +23,7 @@ pub enum Section {
     Themes,
     Presets,
     Performance,
+    Developer,
     About,
 }
 
@@ -50,6 +51,7 @@ const SECTIONS: &[(&str, &[NavItem])] = &[
             (Section::Themes, "Themes", icons::PALETTE),
             (Section::Presets, "Presets", icons::SQUARES_FOUR),
             (Section::Performance, "Performance", icons::GAUGE),
+            (Section::Developer, "Developer", icons::CODE),
             (Section::About, "About", icons::INFO),
         ],
     ),
@@ -965,6 +967,7 @@ impl SettingsPage {
                 );
                 memory_panel(ui, pal, self.mem_sample.map(|(_, m)| m), self.mem.as_ref());
             }
+            Section::Developer => developer(ui, config, pal),
             Section::About => {
                 ui.label(
                     RichText::new(format!("RustCord {}", env!("CARGO_PKG_VERSION")))
@@ -1319,6 +1322,105 @@ fn notifications(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
         pal,
         "Notification levels and mutes come from your Discord account: right-click a \
          server or channel and pick Notification Settings. Bot accounts only notify on mentions and DMs.          Recent mentions are listed under the bell in the chat header.",
+    );
+}
+
+/// One base-URL field with its check result under it.
+fn base_url_field(ui: &mut egui::Ui, value: &mut String, default: &str, pal: &Palette) {
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .hint_text(default)
+            .desired_width(420.0),
+    );
+    match crate::endpoints::normalize(value) {
+        Ok(None) => hint(ui, pal, "Empty: Discord's own address is used."),
+        Ok(Some(url)) => hint(ui, pal, &format!("Will use {url}")),
+        Err(e) => {
+            ui.label(
+                RichText::new(format!(
+                    "{e} Discord's own address is used until this is fixed."
+                ))
+                .small()
+                .color(pal.danger),
+            );
+        }
+    }
+}
+
+/// Developer options: custom API / CDN base URLs and the crash log test.
+fn developer(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
+    ui.label(
+        RichText::new(icons::label(
+            icons::WARNING,
+            "For developers. Leave these empty unless you know you need them.",
+        ))
+        .color(pal.danger),
+    );
+    hint(
+        ui,
+        pal,
+        "A custom API address receives everything RustCord sends to Discord, including \
+         your login token. Only use a server you run yourself. It must be https:// \
+         (http:// works for localhost only); certificate checks always stay on.",
+    );
+    ui.add_space(10.0);
+    label(ui, pal, "API BASE URL");
+    base_url_field(
+        ui,
+        &mut config.api_base_url,
+        crate::endpoints::DEFAULT_API,
+        pal,
+    );
+    hint(ui, pal, "Applies the next time you log in.");
+    ui.add_space(10.0);
+    label(ui, pal, "CDN BASE URL");
+    base_url_field(
+        ui,
+        &mut config.cdn_base_url,
+        crate::endpoints::DEFAULT_CDN,
+        pal,
+    );
+    hint(
+        ui,
+        pal,
+        "Avatars, icons, emoji and attachments on cdn.discordapp.com load from here.",
+    );
+    ui.add_space(8.0);
+    if ui
+        .add_enabled(
+            !config.api_base_url.is_empty() || !config.cdn_base_url.is_empty(),
+            egui::Button::new(icons::label(icons::RESET, "Reset to Discord's")),
+        )
+        .clicked()
+    {
+        config.api_base_url.clear();
+        config.cdn_base_url.clear();
+    }
+    ui.add_space(14.0);
+    label(ui, pal, "CRASH LOG");
+    let note_id = egui::Id::unique("rc_dev_crash_note");
+    if ui
+        .button(icons::label(icons::BUG, "Write a test crash report"))
+        .on_hover_text("RustCord doesn't crash; it only writes a sample report")
+        .clicked()
+    {
+        let note = match crate::crash_report::write_test_report() {
+            Ok(path) => format!(
+                "Written to {}. Restart RustCord to see the notice.",
+                path.display()
+            ),
+            Err(e) => format!("Couldn't write it: {e}"),
+        };
+        ui.data_mut(|d| d.insert_temp(note_id, note));
+    }
+    let note = ui.data(|d| d.get_temp::<String>(note_id));
+    if let Some(note) = note {
+        hint(ui, pal, &note);
+    }
+    hint(
+        ui,
+        pal,
+        "Crash reports stay on this PC, with your token cut out. Nothing is uploaded.",
     );
 }
 

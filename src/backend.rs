@@ -130,8 +130,10 @@ async fn thread_request(
 }
 
 /// Options read from the config at login.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct Options {
+    /// Developer options: custom API base URL (`None` = Discord's).
+    pub api_base: Option<String>,
     /// Bots: ask for the Server Members + Presence intents.
     pub bot_member_intents: bool,
     /// "Show as" (IDENTIFY properties; user accounts).
@@ -196,7 +198,7 @@ async fn run(
     };
 
     let api = match Api::new(auth) {
-        Ok(api) => api,
+        Ok(api) => api.with_base(options.api_base.clone()),
         Err(e) => {
             let _ = tx.send(ToUi::Status(format!("HTTP client error: {e}")));
             return;

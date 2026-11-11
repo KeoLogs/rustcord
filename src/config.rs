@@ -101,6 +101,11 @@ pub struct Config {
     pub favourite_gifs: Vec<crate::gif_picker::Gif>,
     /// Disk image cache size in MB (`image_cache.rs`); 0 turns it off.
     pub image_cache_mb: u32,
+    /// Developer options: custom REST API base URL (empty = Discord's).
+    /// Used from the next login (`endpoints.rs`).
+    pub api_base_url: String,
+    /// Developer options: custom CDN base URL (empty = Discord's).
+    pub cdn_base_url: String,
     /// Play a sound with each notification (Notifications module).
     pub notification_sound: bool,
     /// The user's own sound file (wav / ogg / mp3, 1 MB at most) instead of
@@ -153,6 +158,8 @@ impl Default for Config {
             skin_tone: 0,
             favourite_gifs: Vec::new(),
             image_cache_mb: crate::image_cache::DEFAULT_MB,
+            api_base_url: String::new(),
+            cdn_base_url: String::new(),
             notification_sound: true,
             notification_sound_file: None,
             notification_volume: crate::sound::DEFAULT_VOLUME,

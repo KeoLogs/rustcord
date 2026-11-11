@@ -7,6 +7,10 @@ Settings → About). Version x.y.z:
 - z: bug and issue fixes
 
 ## Unreleased
+- Developer options (Settings → Developer): custom API and CDN base URLs
+  (https only, http for localhost; empty = Discord's). The API address
+  applies from the next login. Also a "Write a test crash report" button.
+  There is no switch to turn certificate checks off.
 - Local crash log: if RustCord crashes, a short report (version, where,
   the error) is written to its data folder with your token cut out. The
   next start shows "RustCord closed unexpectedly last time" with

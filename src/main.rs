@@ -15,6 +15,7 @@ mod demo;
 mod embed;
 mod emoji;
 mod emoji_picker;
+mod endpoints;
 mod forum;
 mod frametimes;
 mod friends;

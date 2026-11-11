@@ -237,7 +237,9 @@ fn fetch(uri: &str) -> Result<File, String> {
             mime,
         });
     }
-    let response = ehttp::fetch_blocking(&ehttp::Request::get(uri))
+    // Developer options: a custom CDN base (the cache key stays the same).
+    let url = crate::endpoints::cdn_url(uri);
+    let response = ehttp::fetch_blocking(&ehttp::Request::get(url.as_ref()))
         .map_err(|_| "Failed to load image".to_owned())?;
     if !response.ok {
         return Err(format!("Failed to load image ({})", response.status));

@@ -1085,6 +1085,7 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
     app.update_title(&ctx);
     timefmt::set_12_hour(app.config.use_12_hour_time);
     crate::image_cache::set_limit_mb(app.config.image_cache_mb);
+    crate::endpoints::set_cdn(&app.config.cdn_base_url);
     let pal = app.active_theme.palette;
 
     // ---- Login screen
@@ -1443,6 +1444,7 @@ fn spawn_session(
     // A crash report must never contain this token.
     crate::crash_report::register_secret(token.expose());
     let options = crate::backend::Options {
+        api_base: crate::endpoints::usable(&config.api_base_url),
         bot_member_intents: config.bot_member_intents,
         identity,
     };

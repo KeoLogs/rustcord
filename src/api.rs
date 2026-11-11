@@ -15,7 +15,7 @@ use crate::search::{SearchQuery, SearchResponse, SearchScope};
 use crate::threads::{CHANNEL_PRIVATE_THREAD, CHANNEL_PUBLIC_THREAD, Thread, ThreadPage};
 use crate::types::{Message, User};
 
-const API_BASE: &str = "https://discord.com/api/v10";
+const API_BASE: &str = crate::endpoints::DEFAULT_API;
 
 #[derive(Clone)]
 pub struct Api {
@@ -24,6 +24,9 @@ pub struct Api {
     auth: String,
     /// Shared 429 state (per-route buckets + global lock).
     limiter: Arc<Limiter>,
+    /// Developer options: a custom API base that replaces [`API_BASE`]
+    /// in every request (`endpoints.rs`).
+    base: Option<Arc<str>>,
 }
 
 impl Api {
@@ -35,7 +38,14 @@ impl Api {
             http,
             auth,
             limiter: Arc::default(),
+            base: None,
         })
+    }
+
+    /// Use a custom API base (already checked by `endpoints::usable`).
+    pub fn with_base(mut self, base: Option<String>) -> Self {
+        self.base = base.map(Arc::from);
+        self
     }
 
     /// Every Discord API request goes through here (the shared 429 layer).
@@ -43,9 +53,17 @@ impl Api {
     /// GETs wait for a known reset and retry once after a 429; writes are
     /// never retried and fail with a typed [`RateLimited`] instead.
     async fn send(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::Response> {
-        let req = rb.build()?;
+        let mut req = rb.build()?;
         let is_get = req.method() == reqwest::Method::GET;
         let (route, major) = ratelimit::route_key(req.method().as_str(), req.url().path());
+        // Developer options: send it to the custom API base instead.
+        if let Some(base) = &self.base
+            && let std::borrow::Cow::Owned(url) =
+                crate::endpoints::rewrite(req.url().as_str(), API_BASE, Some(base))
+            && let Ok(url) = url.parse()
+        {
+            *req.url_mut() = url;
+        }
         let max_wait = if is_get {
             ratelimit::MAX_GET_WAIT
         } else {
@@ -179,7 +197,13 @@ impl Api {
     /// Download a file from Discord's CDN (no auth header: CDN links are
     /// signed and the token must never go to other hosts).
     pub async fn download(&self, url: &str) -> Result<Vec<u8>> {
-        let resp = self.http.get(url).send().await.context("download failed")?;
+        let url = crate::endpoints::cdn_url(url);
+        let resp = self
+            .http
+            .get(url.as_ref())
+            .send()
+            .await
+            .context("download failed")?;
         Ok(Self::check(resp, "Downloading")
             .await?
             .bytes()
