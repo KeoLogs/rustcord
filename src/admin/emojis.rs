@@ -7,7 +7,9 @@ use std::sync::Arc;
 use eframe::egui::{self, RichText, vec2};
 use serde_json::{Value, json};
 
-use super::{Confirm, Cx, Kind, Method, Out, PickSlot, Picked, Request, Upload, b, n, s, ui as aui};
+use super::{
+    Confirm, Cx, Kind, Method, Out, PickSlot, Picked, Request, Upload, b, n, s, ui as aui,
+};
 use crate::icons;
 use crate::perms;
 use crate::theme::Bold;
@@ -143,7 +145,12 @@ pub fn create_sticker(guild_id: &str, d: &StickerDraft, file: &Picked) -> Option
     Some(r)
 }
 
-pub fn save_sticker(guild_id: &str, id: &str, base: &StickerDraft, d: &StickerDraft) -> Option<Request> {
+pub fn save_sticker(
+    guild_id: &str,
+    id: &str,
+    base: &StickerDraft,
+    d: &StickerDraft,
+) -> Option<Request> {
     (d.valid() && d != base).then(|| {
         Request::new(
             guild_id,
@@ -171,8 +178,12 @@ fn sticker_url(v: &Value) -> Option<String> {
     match n(v, "format_type") {
         // Lottie stickers are JSON animations, not pictures.
         3 => None,
-        4 => Some(format!("https://media.discordapp.net/stickers/{id}.gif?size=160")),
-        _ => Some(format!("https://media.discordapp.net/stickers/{id}.png?size=160")),
+        4 => Some(format!(
+            "https://media.discordapp.net/stickers/{id}.gif?size=160"
+        )),
+        _ => Some(format!(
+            "https://media.discordapp.net/stickers/{id}.png?size=160"
+        )),
     }
 }
 
@@ -316,7 +327,12 @@ impl State {
             return;
         };
         if emojis.is_empty() {
-            aui::empty(ui, pal, icons::SMILEY, "This server has no custom emoji yet.");
+            aui::empty(
+                ui,
+                pal,
+                icons::SMILEY,
+                "This server has no custom emoji yet.",
+            );
             return;
         }
         aui::label(ui, pal, &format!("Emoji ({})", emojis.len()));
@@ -346,8 +362,13 @@ impl State {
                                 .desired_width(180.0)
                                 .char_limit(32),
                         );
-                        if aui::save(ui, pal, "Save", valid_emoji_name(name) && name != s(e, "name"))
-                            .clicked()
+                        if aui::save(
+                            ui,
+                            pal,
+                            "Save",
+                            valid_emoji_name(name) && name != s(e, "name"),
+                        )
+                        .clicked()
                         {
                             out.send.extend(rename_emoji(&cx.guild.id, id, name));
                         }
@@ -557,7 +578,12 @@ fn sticker_fields(ui: &mut egui::Ui, cx: &Cx, d: &mut StickerDraft) {
     aui::label(ui, pal, "Related emoji");
     aui::text(ui, &mut d.tags, "An emoji name, e.g. wave", 200);
     aui::label(ui, pal, "Description");
-    aui::text(ui, &mut d.description, "Optional; helps people using screen readers", 100);
+    aui::text(
+        ui,
+        &mut d.description,
+        "Optional; helps people using screen readers",
+        100,
+    );
     ui.add_space(6.0);
 }
 
@@ -587,12 +613,18 @@ mod tests {
     #[test]
     fn emoji_requests() {
         let c = create_emoji("1", "cat", &pic(3)).unwrap();
-        assert_eq!((c.method, c.path.as_str()), (Method::Post, "/guilds/1/emojis"));
+        assert_eq!(
+            (c.method, c.path.as_str()),
+            (Method::Post, "/guilds/1/emojis")
+        );
         assert_eq!(c.body.unwrap()["image"], "data:image/png;base64,AAAA");
         assert!(create_emoji("1", "bad name", &pic(3)).is_none());
         assert!(create_emoji("1", "cat", &pic(EMOJI_MAX_BYTES + 1)).is_none());
         let r = rename_emoji("1", "9", "dog").unwrap();
-        assert_eq!((r.method, r.path.as_str()), (Method::Patch, "/guilds/1/emojis/9"));
+        assert_eq!(
+            (r.method, r.path.as_str()),
+            (Method::Patch, "/guilds/1/emojis/9")
+        );
         assert!(rename_emoji("1", "9", "!").is_none());
         let d = delete_emoji("1", "9");
         assert_eq!((d.method, d.key.as_str()), (Method::Delete, "9"));

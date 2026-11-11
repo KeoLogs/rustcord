@@ -26,6 +26,8 @@ Settings → About). Version x.y.z:
     list with unban. Members at or above your highest role are protected.
   - Invites: list the server's invites, create one (channel, expiry, max
     uses, temporary membership), copy the link and revoke.
+  - Emoji and stickers: upload (pick a file, name it, then Add), rename and
+    delete, with Discord's size limits checked before anything is sent.
 
 ## 0.10.0: DM core (history paging, first unread, optimistic send)
 - Chat history like Discord's (Brief A): scrolling near the top loads 50

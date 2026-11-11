@@ -28,6 +28,7 @@ use crate::types::Guild;
 
 pub mod channels;
 pub mod demo;
+pub mod emojis;
 pub mod invites;
 pub mod members;
 pub mod overview;
@@ -52,6 +53,14 @@ pub enum Method {
 pub enum Kind {
     LoadGuild,
     SaveGuild,
+    LoadEmojis,
+    CreateEmoji,
+    RenameEmoji,
+    DeleteEmoji,
+    LoadStickers,
+    CreateSticker,
+    SaveSticker,
+    DeleteSticker,
     LoadInvites,
     CreateInvite,
     RevokeInvite,
@@ -87,6 +96,14 @@ impl Kind {
         match self {
             Kind::LoadGuild => "Loading the server settings",
             Kind::SaveGuild => "Saving the server settings",
+            Kind::LoadEmojis => "Loading emoji",
+            Kind::CreateEmoji => "Uploading the emoji",
+            Kind::RenameEmoji => "Renaming the emoji",
+            Kind::DeleteEmoji => "Deleting the emoji",
+            Kind::LoadStickers => "Loading stickers",
+            Kind::CreateSticker => "Uploading the sticker",
+            Kind::SaveSticker => "Saving the sticker",
+            Kind::DeleteSticker => "Deleting the sticker",
             Kind::LoadInvites => "Loading invites",
             Kind::CreateInvite => "Creating the invite",
             Kind::RevokeInvite => "Revoking the invite",
@@ -120,6 +137,12 @@ impl Kind {
     fn tab(self) -> Tab {
         match self {
             Kind::LoadGuild | Kind::SaveGuild => Tab::Overview,
+            Kind::LoadStickers | Kind::CreateSticker | Kind::SaveSticker | Kind::DeleteSticker => {
+                Tab::Stickers
+            }
+            Kind::LoadEmojis | Kind::CreateEmoji | Kind::RenameEmoji | Kind::DeleteEmoji => {
+                Tab::Emoji
+            }
             Kind::LoadInvites | Kind::CreateInvite | Kind::RevokeInvite => Tab::Invites,
             Kind::LoadBans | Kind::Unban => Tab::Bans,
             Kind::SearchMembers
@@ -237,6 +260,8 @@ impl std::fmt::Debug for Response {
 pub enum PickSlot {
     Icon,
     Banner,
+    Sticker,
+    Emoji,
     RoleIcon,
 }
 
@@ -368,6 +393,8 @@ pub fn id_or_null(id: &str) -> Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,
+    Stickers,
+    Emoji,
     Invites,
     Bans,
     Members,
@@ -378,6 +405,7 @@ pub enum Tab {
 /// Sidebar groups, in order.
 const NAV: &[(&str, &[Tab])] = &[
     ("Server", &[Tab::Overview, Tab::Roles, Tab::Channels]),
+    ("Expressions", &[Tab::Emoji, Tab::Stickers]),
     ("People", &[Tab::Members, Tab::Invites, Tab::Bans]),
 ];
 
@@ -385,6 +413,8 @@ impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
+            Tab::Stickers => "Stickers",
+            Tab::Emoji => "Emoji",
             Tab::Invites => "Invites",
             Tab::Bans => "Bans",
             Tab::Members => "Members",
@@ -396,6 +426,8 @@ impl Tab {
     fn icon(self) -> &'static str {
         match self {
             Tab::Overview => icons::GEAR,
+            Tab::Stickers => icons::STICKER,
+            Tab::Emoji => icons::SMILEY,
             Tab::Invites => icons::ENVELOPE,
             Tab::Bans => icons::PROHIBIT,
             Tab::Members => icons::USERS,
@@ -411,6 +443,8 @@ impl Tab {
         let any = |bits: u64| perms & bits != 0;
         match self {
             Tab::Overview => any(perms::MANAGE_GUILD),
+            Tab::Stickers => any(perms::MANAGE_EXPRESSIONS | (1 << 43)),
+            Tab::Emoji => any(perms::MANAGE_EXPRESSIONS | (1 << 43)),
             Tab::Invites => any(perms::MANAGE_GUILD),
             Tab::Bans => any(perms::BAN_MEMBERS),
             Tab::Members => any(perms::KICK_MEMBERS
@@ -452,6 +486,8 @@ pub struct Cx<'a> {
     pub top: i64,
     pub owner: bool,
     pub pal: &'a Palette,
+    /// The Images and emoji-image modules are on: pictures may be loaded.
+    pub images: bool,
 }
 
 impl<'a> Cx<'a> {
@@ -467,6 +503,7 @@ impl<'a> Cx<'a> {
             top: perms::top_role_position(&guild.roles, &guild.my_roles),
             owner: !guild.owner_id.is_empty() && guild.owner_id == me_id,
             pal,
+            images: false,
         }
     }
 
@@ -623,6 +660,7 @@ pub struct AdminPage {
     /// tab's first editor once its data is in.
     pub demo_detail: bool,
     overview: overview::State,
+    emojis: emojis::State,
     invites: invites::State,
     members: members::State,
     channels: channels::State,
@@ -642,6 +680,7 @@ impl AdminPage {
             confirm: None,
             demo_detail: false,
             overview: Default::default(),
+            emojis: Default::default(),
             invites: Default::default(),
             members: Default::default(),
             channels: Default::default(),
@@ -669,6 +708,8 @@ impl AdminPage {
         let g = &self.guild_id;
         match tab {
             Tab::Overview => vec![overview::load(g)],
+            Tab::Stickers => vec![emojis::load_stickers(g)],
+            Tab::Emoji => vec![emojis::load_emojis(g)],
             Tab::Invites => vec![invites::load(g)],
             Tab::Bans => vec![members::load_bans(g)],
             Tab::Members => Vec::new(),
@@ -702,6 +743,7 @@ impl AdminPage {
         };
         match r.kind.tab() {
             Tab::Overview => self.overview.on_response(r.kind, &r.key, &v),
+            Tab::Emoji | Tab::Stickers => self.emojis.on_response(r.kind, &r.key, &v),
             Tab::Invites => self.invites.on_response(r.kind, &r.key, &v),
             Tab::Members | Tab::Bans => self.members.on_response(r.kind, &r.key, &v),
             Tab::Channels => self.channels.on_response(r.kind, &r.key, &v),
@@ -714,6 +756,11 @@ impl AdminPage {
                 _ => {}
             }
         }
+    }
+
+    /// Image URIs the page may have loaded; the app frees them on close.
+    pub fn image_uris(&self) -> Vec<String> {
+        self.emojis.image_uris()
     }
 
     /// Demo screenshots: a tab's detail view that needs no reply first.
@@ -729,6 +776,7 @@ impl AdminPage {
         let p = Arc::new(p);
         match p.slot {
             PickSlot::Icon | PickSlot::Banner => self.overview.on_picked(p),
+            PickSlot::Emoji | PickSlot::Sticker => self.emojis.on_picked(p),
             PickSlot::RoleIcon => self.roles.on_picked(p),
         }
     }
@@ -878,6 +926,8 @@ impl AdminPage {
                         let before = out.send.len();
                         match self.tab {
                             Tab::Overview => self.overview.ui(ui, cx, &mut out),
+                            Tab::Stickers => self.emojis.sticker_ui(ui, cx, &mut out),
+                            Tab::Emoji => self.emojis.emoji_ui(ui, cx, &mut out),
                             Tab::Invites => self.invites.ui(ui, cx, &mut out),
                             Tab::Bans => self.members.bans_ui(ui, cx, &mut out),
                             Tab::Members => self.members.ui(ui, cx, &mut out),

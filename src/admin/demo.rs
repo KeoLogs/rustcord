@@ -138,6 +138,21 @@ fn load(r: &Request) -> Value {
               "max_age": 604800, "expires_at": "2026-12-01T18:00:00+00:00",
               "temporary": false },
         ]),
+        Kind::LoadEmojis => json!([
+            { "id": "123", "name": "pepe", "animated": false,
+              "user": { "id": "300000000000000002", "username": "sam" } },
+            { "id": "124", "name": "party_cat", "animated": true,
+              "user": { "id": "520000000000000003", "username": "alex" } },
+            { "id": "125", "name": "ferris", "animated": false,
+              "user": { "id": "460000000000000001", "username": "you" } },
+        ]),
+        Kind::LoadStickers => json!([
+            { "id": "810", "name": "Ferris Wave", "description": "Ferris the crab waving",
+              "tags": "wave", "format_type": 1,
+              "user": { "id": "300000000000000002", "username": "sam" } },
+            { "id": "811", "name": "Ship It", "description": "", "tags": "rocket",
+              "format_type": 1, "user": { "id": "460000000000000001", "username": "you" } },
+        ]),
         _ => Value::Null,
     }
 }

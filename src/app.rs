@@ -1113,7 +1113,11 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
         && let Screen::Main(state) = &mut app.screen
         && state.admin_open()
     {
-        state.admin_ui(ui, &pal);
+        state.admin_ui(
+            ui,
+            &pal,
+            app.config.modules.images && app.config.modules.emoji_images,
+        );
         return;
     }
 
@@ -7193,7 +7197,7 @@ impl State {
     }
 
     /// Draw the Server Settings page and send what the user asked for.
-    pub fn admin_ui(&mut self, ui: &mut egui::Ui, pal: &Palette) {
+    pub fn admin_ui(&mut self, ui: &mut egui::Ui, pal: &Palette, images: bool) {
         let Some(mut page) = self.admin.take() else {
             return;
         };
@@ -7204,7 +7208,8 @@ impl State {
             // The server is gone (left, kicked): close.
             return;
         };
-        let cx = crate::admin::Cx::new(g, &me.id, pal);
+        let mut cx = crate::admin::Cx::new(g, &me.id, pal);
+        cx.images = images;
         let out = page.ui(ui, &cx);
         for r in out.send {
             let _ = self.tx.send(ToBackend::Admin(Box::new(r)));
@@ -7212,7 +7217,12 @@ impl State {
         if let Some(slot) = out.pick {
             let _ = self.tx.send(ToBackend::AdminPick(slot));
         }
-        if !out.close {
+        if out.close {
+            // Free the emoji / sticker pictures the page showed.
+            for uri in page.image_uris() {
+                ui.ctx().forget_image(&uri);
+            }
+        } else {
             self.admin = Some(page);
         }
     }
