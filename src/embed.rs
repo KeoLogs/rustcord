@@ -215,6 +215,104 @@ impl EmbedMedia {
     }
 }
 
+/// Hosts whose links Discord turns into GIF embeds; their link text is
+/// hidden under the GIF (`hide_gif_links`).
+const GIF_HOSTS: [&str; 4] = ["tenor.com", "giphy.com", "klipy.com", "gfycat.com"];
+
+fn host_is(host: &str, domain: &str) -> bool {
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
+/// The animated `.gif` for a GIF provider's media URL (Tenor, Giphy,
+/// Klipy), or `None`.
+///
+/// - Tenor: `media.tenor.com/<11-char id><5-char format>/<name>.<ext>`;
+///   format `AAAAC` is the full-size GIF (mp4 is `AAAPo`, stills `AAAAe`).
+/// - Giphy: `media*.giphy.com/media/…/<id>/giphy.mp4` (or `giphy_s.gif`,
+///   the still) → `…/giphy.gif`; `i.giphy.com/<id>.webp` → `<id>.gif`.
+/// - Klipy: the same file as `.gif`.
+pub fn provider_gif(url: &str) -> Option<String> {
+    let host = crate::links::host(url)?;
+    let path_end = url.find(['?', '#']).unwrap_or(url.len());
+    let path = &url[..path_end];
+    let (dir, file) = path.rsplit_once('/')?;
+    let stem = file.rsplit_once('.').map_or(file, |(s, _)| s);
+    if stem.is_empty() {
+        return None;
+    }
+    if host_is(&host, "tenor.com") && host.starts_with("media") {
+        let (root, id) = dir.rsplit_once('/')?;
+        if id.len() < 12 || !id.is_ascii() || !root.ends_with(&host) {
+            return None;
+        }
+        return Some(format!("{root}/{}AAAAC/{stem}.gif", &id[..id.len() - 5]));
+    }
+    if host_is(&host, "giphy.com") {
+        if host == "i.giphy.com" {
+            return Some(format!("{dir}/{stem}.gif"));
+        }
+        if stem.starts_with("giphy") && dir.contains("/media/") {
+            return Some(format!("{dir}/giphy.gif"));
+        }
+        return None;
+    }
+    if host_is(&host, "klipy.com") {
+        return Some(format!("{dir}/{stem}.gif"));
+    }
+    None
+}
+
+/// The links in `content` that only point at a GIF the embeds already
+/// show (Tenor, Giphy, Klipy and other `gifv` links, or a bare `.gif`
+/// image embed). Discord hides their text; so do we.
+pub fn hidden_gif_links<'a>(content: &'a str, embeds: &[Embed]) -> Vec<&'a str> {
+    let gif_embed_urls: Vec<&str> = embeds
+        .iter()
+        .filter(|e| match e.kind {
+            EmbedKind::Gifv => true,
+            EmbedKind::Image => e.gif_url().is_some() || e.url.as_deref().is_some_and(is_gif_site),
+            _ => false,
+        })
+        .filter_map(|e| e.url.as_deref())
+        .collect();
+    if gif_embed_urls.is_empty() {
+        return Vec::new();
+    }
+    let same = |a: &str, b: &str| a.trim_end_matches('/') == b.trim_end_matches('/');
+    content
+        .split_whitespace()
+        .filter(|w| w.starts_with("http://") || w.starts_with("https://"))
+        .filter(|w| gif_embed_urls.iter().any(|u| same(w, u)))
+        .collect()
+}
+
+/// `content` without the links in [`hidden_gif_links`] (other text kept,
+/// blank lines left by them dropped), or `None` if nothing is hidden.
+pub fn hide_gif_links(content: &str, embeds: &[Embed]) -> Option<String> {
+    let hidden = hidden_gif_links(content, embeds);
+    if hidden.is_empty() {
+        return None;
+    }
+    let mut out: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if !words.iter().any(|w| hidden.contains(w)) {
+            out.push(line.to_string());
+            continue;
+        }
+        let kept: Vec<&str> = words.into_iter().filter(|w| !hidden.contains(w)).collect();
+        if !kept.is_empty() {
+            out.push(kept.join(" "));
+        }
+    }
+    Some(out.join("\n").trim().to_string())
+}
+
+/// Is this a link to a GIF site (Tenor, Giphy, Klipy, Gfycat)?
+pub fn is_gif_site(url: &str) -> bool {
+    crate::links::host(url).is_some_and(|h| GIF_HOSTS.iter().any(|d| host_is(&h, d)))
+}
+
 /// media.discordapp.net / images-ext-N.discordapp.net accept width/height.
 fn is_discord_proxy(url: &str) -> bool {
     crate::links::host(url).is_some_and(|h| h.ends_with(".discordapp.net"))
@@ -296,6 +394,32 @@ impl Embed {
     /// Image / GIF link previews are drawn as the bare picture, no card.
     pub fn is_bare_media(&self) -> bool {
         matches!(self.kind, EmbedKind::Image | EmbedKind::Gifv) && self.main_media().is_some()
+    }
+
+    /// A URL that plays this embed as an animated GIF, if there is one:
+    /// GIF links (`gifv` from Tenor, Giphy, Klipy…) come with an mp4 and a
+    /// still preview, and an image embed may be a `.gif` itself. Tenor and
+    /// Giphy GIFs load from their own CDN (like the GIF picker); a plain
+    /// `.gif` loads through Discord's proxy.
+    pub fn gif_url(&self) -> Option<String> {
+        if !matches!(self.kind, EmbedKind::Gifv | EmbedKind::Image) {
+            return None;
+        }
+        let originals = [&self.video, &self.thumbnail, &self.image];
+        if self.kind == EmbedKind::Gifv {
+            for m in originals.iter().copied().flatten() {
+                if let Some(g) = provider_gif(&m.url) {
+                    return Some(g);
+                }
+            }
+        }
+        // A `.gif` file (proxy copy first).
+        [&self.image, &self.thumbnail, &self.video]
+            .into_iter()
+            .flatten()
+            .flat_map(|m| [m.source(), m.url.as_str()])
+            .find(|u| crate::anim::is_gif_url(u))
+            .map(str::to_string)
     }
 
     /// The picture for a bare image/GIF embed or a video preview.
@@ -711,16 +835,28 @@ fn media_image(
     // The URL depends only on `max`, so `Embed::image_uris` can list it.
     let url = media.sized_url(max.0, max.1);
     let fit_w = max.0.min(avail_w).min(ui.available_width()).max(16.0);
-    let mut image = egui::Image::from_uri(url)
-        .corner_radius(4)
-        .sense(egui::Sense::click());
-    image = match media.display_size(fit_w, max.1) {
-        Some((w, h)) => image.fit_to_exact_size(vec2(w, h)),
-        None => image.max_size(vec2(fit_w, max.1)),
+    // GIFs autoplay while on screen, at the size the still was shown at.
+    let gif = match (embed.gif_url(), media.display_size(fit_w, max.1)) {
+        (Some(gif), Some((w, h))) => {
+            crate::anim::gif_image(ui, &gif, Some(&url), vec2(w, h), 4.0, egui::Sense::click())
+        }
+        _ => None,
+    };
+    let resp = match gif {
+        Some(resp) => resp,
+        None => {
+            let mut image = egui::Image::from_uri(url)
+                .corner_radius(4)
+                .sense(egui::Sense::click());
+            image = match media.display_size(fit_w, max.1) {
+                Some((w, h)) => image.fit_to_exact_size(vec2(w, h)),
+                None => image.max_size(vec2(fit_w, max.1)),
+            };
+            ui.add(image)
+        }
     };
     let link = embed.media_link(media);
-    let resp = ui
-        .add(image)
+    let resp = resp
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(&link);
     if gif_badge {
@@ -952,6 +1088,114 @@ mod tests {
             ]
         );
         assert_eq!(e.summary(), "Image");
+    }
+
+    /// A Tenor link as Discord embeds it (real URL shapes).
+    fn tenor_real() -> Value {
+        json!({
+            "type": "gifv",
+            "url": "https://tenor.com/view/cat-typing-gif-12345",
+            "provider": { "name": "Tenor", "url": "https://tenor.co" },
+            "thumbnail": {
+                "url": "https://media.tenor.com/x8v1oNUOmg4AAAAe/cat-typing.png",
+                "proxy_url": "https://images-ext-1.discordapp.net/external/T/https/media.tenor.com/x8v1oNUOmg4AAAAe/cat-typing.png",
+                "width": 498,
+                "height": 373
+            },
+            "video": {
+                "url": "https://media.tenor.com/x8v1oNUOmg4AAAPo/cat-typing.mp4",
+                "proxy_url": "https://images-ext-1.discordapp.net/external/V/https/media.tenor.com/x8v1oNUOmg4AAAPo/cat-typing.mp4",
+                "width": 498,
+                "height": 373
+            }
+        })
+    }
+
+    #[test]
+    fn gif_urls_for_providers() {
+        let e = Embed::from_json(&tenor_real());
+        assert_eq!(
+            e.gif_url().as_deref(),
+            Some("https://media.tenor.com/x8v1oNUOmg4AAAAC/cat-typing.gif")
+        );
+        assert_eq!(
+            provider_gif("https://media.giphy.com/media/v1.Y2lk/abc123/giphy.mp4").as_deref(),
+            Some("https://media.giphy.com/media/v1.Y2lk/abc123/giphy.gif")
+        );
+        assert_eq!(
+            provider_gif("https://media2.giphy.com/media/abc123/giphy_s.gif?cid=1").as_deref(),
+            Some("https://media2.giphy.com/media/abc123/giphy.gif")
+        );
+        assert_eq!(
+            provider_gif("https://i.giphy.com/abc123.webp").as_deref(),
+            Some("https://i.giphy.com/abc123.gif")
+        );
+        assert_eq!(
+            provider_gif("https://static.klipy.com/ii/abc/de/cat.mp4").as_deref(),
+            Some("https://static.klipy.com/ii/abc/de/cat.gif")
+        );
+        // Not a provider, or not a media URL.
+        assert_eq!(provider_gif("https://example.com/x.mp4"), None);
+        assert_eq!(provider_gif("https://tenor.com/view/cat-gif-1"), None);
+        assert_eq!(provider_gif("https://media.tenor.com/short/x.mp4"), None);
+        // An image embed of a .gif plays its proxy copy.
+        let img = Embed::from_json(&json!({
+            "type": "image",
+            "url": "https://example.com/dance.gif",
+            "thumbnail": {
+                "url": "https://example.com/dance.gif",
+                "proxy_url": "https://images-ext-1.discordapp.net/external/D/https/example.com/dance.gif",
+                "width": 200, "height": 200
+            }
+        }));
+        assert_eq!(
+            img.gif_url().as_deref(),
+            Some("https://images-ext-1.discordapp.net/external/D/https/example.com/dance.gif")
+        );
+        // A still image doesn't.
+        let png = Embed::from_json(&json!({
+            "type": "image",
+            "url": "https://example.com/a.png",
+            "thumbnail": { "url": "https://example.com/a.png", "width": 2, "height": 2 }
+        }));
+        assert_eq!(png.gif_url(), None);
+        // Rich embeds never play.
+        assert_eq!(Embed::from_json(&youtube()).gif_url(), None);
+    }
+
+    #[test]
+    fn gif_link_text_is_hidden() {
+        let embeds = vec![Embed::from_json(&tenor_real())];
+        let link = "https://tenor.com/view/cat-typing-gif-12345";
+        // Only the link: nothing left to show.
+        assert_eq!(hide_gif_links(link, &embeds).as_deref(), Some(""));
+        // Other text stays.
+        assert_eq!(
+            hide_gif_links(&format!("look {link} lol"), &embeds).as_deref(),
+            Some("look lol")
+        );
+        assert_eq!(
+            hide_gif_links(&format!("first line\n{link}\nlast"), &embeds).as_deref(),
+            Some("first line\nlast")
+        );
+        // Other links stay, and so does a message without GIF embeds.
+        assert_eq!(
+            hide_gif_links(&format!("{link} https://example.com"), &embeds).as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(hide_gif_links("https://example.com", &embeds), None);
+        assert_eq!(hide_gif_links(link, &[Embed::from_json(&youtube())]), None);
+        assert_eq!(hide_gif_links(link, &[]), None);
+        // The hidden links (for "Copy Link").
+        assert_eq!(hidden_gif_links(&format!("hi {link}"), &embeds), vec![link]);
+        // Trailing slash differences still match.
+        assert_eq!(
+            hidden_gif_links(&format!("{link}/"), &embeds),
+            vec![format!("{link}/").as_str()]
+        );
+        assert!(is_gif_site("https://media.giphy.com/x.gif"));
+        assert!(is_gif_site("https://klipy.com/gifs/cat"));
+        assert!(!is_gif_site("https://example.com/x.gif"));
     }
 
     #[test]

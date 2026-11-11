@@ -2,11 +2,13 @@
 
 mod account_menu;
 mod accounts;
+mod anim;
 mod api;
 mod app;
 mod autocomplete;
 mod backend;
 mod badge;
+mod builtin_themes;
 mod config;
 mod demo;
 mod embed;

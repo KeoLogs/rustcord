@@ -27,6 +27,10 @@
 //! accent_gradient = { top = "#..", bottom = "#.." }        # primary buttons
 //! corner_scale = 0.25             # 0 – 2, multiplies every corner radius
 //! font_family = "mono"            # "mono" (Cascadia Mono, default) or "sans" (Noto Sans)
+//! shape = "square"                # badges, status dots, count boxes: "square" (≤ 2 px
+//!                                 # corners) or "round"; default: square when framed,
+//!                                 # round for flat themes (frame.enabled = false)
+//! avatar_shape = "square"         # avatars everywhere; default: the same as `shape`
 //!
 //! [style.frame]                   # bordered panes (the default look)
 //! enabled = true                  # false = flat panes, no borders or gaps
@@ -59,7 +63,7 @@ use eframe::egui::{Color32, Shadow};
 use serde::Deserialize;
 
 use crate::layout::Pane;
-use crate::theme::{Palette, ThemeChoice, UiFont};
+use crate::theme::{Palette, Shape, ThemeChoice, UiFont};
 
 /// Theme format this build reads.
 pub const FORMAT: i64 = 1;
@@ -225,6 +229,10 @@ pub struct ThemeStyle {
     pub frame: PaneFrame,
     /// The UI font.
     pub font: UiFont,
+    /// Badges, status dots and count boxes.
+    pub shape: Shape,
+    /// Avatars (user panel, members, DMs, chat, profile card, rail).
+    pub avatar_shape: Shape,
 }
 
 /// The blocky look: each pane is a box with a 1 px border, its name cut
@@ -276,6 +284,8 @@ impl Default for ThemeStyle {
             corner_scale: 0.25,
             frame: PaneFrame::default(),
             font: UiFont::Mono,
+            shape: Shape::Square,
+            avatar_shape: Shape::Square,
         }
     }
 }
@@ -335,6 +345,8 @@ struct RawStyle {
     accent_gradient: Option<RawGradient>,
     corner_scale: Option<f32>,
     font_family: Option<String>,
+    shape: Option<String>,
+    avatar_shape: Option<String>,
     frame: Option<RawFrame>,
     #[serde(default)]
     panes: BTreeMap<String, RawPane>,
@@ -465,6 +477,15 @@ fn range(key: &str, v: f32, lo: f32, hi: f32) -> Result<f32> {
         bail!("{key}: {v} must be between {lo} and {hi}");
     }
     Ok(v)
+}
+
+/// `"square"` or `"round"`.
+fn parse_shape(key: &str, v: &str) -> Result<Shape> {
+    match v.trim() {
+        "square" => Ok(Shape::Square),
+        "round" => Ok(Shape::Round),
+        other => bail!("{key}: \"{other}\" must be \"square\" or \"round\""),
+    }
 }
 
 /// A path inside the theme folder: relative, no `..`, png/jpg.
@@ -656,6 +677,20 @@ pub fn parse_theme(text: &str) -> Result<ThemeDef> {
             gap: max("[style.frame] gap", f.gap.unwrap_or(d.gap), 24)?,
         };
     }
+    // Shapes: flat themes from before the token keep their round look.
+    let default_shape = if style.frame.enabled {
+        Shape::Square
+    } else {
+        Shape::Round
+    };
+    style.shape = match s.shape.as_deref() {
+        Some(v) => parse_shape("[style] shape", v)?,
+        None => default_shape,
+    };
+    style.avatar_shape = match s.avatar_shape.as_deref() {
+        Some(v) => parse_shape("[style] avatar_shape", v)?,
+        None => style.shape,
+    };
     for (key, p) in &s.panes {
         let Some(i) = PANE_KEYS.iter().position(|k| k == key) else {
             bail!(
@@ -966,6 +1001,8 @@ gap = 12
         let classic = ThemeStyle {
             corner_scale: 1.0,
             font: UiFont::Sans,
+            shape: Shape::Round,
+            avatar_shape: Shape::Round,
             frame: PaneFrame {
                 enabled: false,
                 ..PaneFrame::default()
@@ -973,6 +1010,39 @@ gap = 12
             ..ThemeStyle::default()
         };
         assert_eq!(t.style, classic);
+    }
+
+    #[test]
+    fn shape_tokens() {
+        let d = ThemeStyle::default();
+        assert_eq!((d.shape, d.avatar_shape), (Shape::Square, Shape::Square));
+        // No token: square when framed, round for flat themes.
+        assert_eq!(parse_theme(MIN).unwrap().style.shape, Shape::Square);
+        let flat = parse_theme(&format!("{MIN}[style]\nframe = {{ enabled = false }}\n")).unwrap();
+        assert_eq!(
+            (flat.style.shape, flat.style.avatar_shape),
+            (Shape::Round, Shape::Round)
+        );
+        // avatar_shape follows shape unless set.
+        let t = parse_theme(&format!("{MIN}[style]\nshape = \"round\"\n")).unwrap();
+        assert_eq!(
+            (t.style.shape, t.style.avatar_shape),
+            (Shape::Round, Shape::Round)
+        );
+        let t = parse_theme(&format!(
+            "{MIN}[style]\nshape = \"round\"\navatar_shape = \"square\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            (t.style.shape, t.style.avatar_shape),
+            (Shape::Round, Shape::Square)
+        );
+        assert!(err("[style]\nshape = \"hexagon\"").contains("[style] shape"));
+        assert!(err("[style]\navatar_shape = \"oval\"").contains("avatar_shape"));
+        // Square corners stay at 2 px or less; round is half the side.
+        assert!(Shape::Square.radius(40.0) <= 2.0);
+        assert!(Shape::Square.radius(4.0) <= 1.0);
+        assert_eq!(Shape::Round.radius(40.0), 20.0);
     }
 
     #[test]
