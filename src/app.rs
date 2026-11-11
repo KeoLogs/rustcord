@@ -1235,7 +1235,7 @@ fn chat_screen(ui: &mut egui::Ui, state: &mut State, f: ChatFrame<'_>) {
         ctx.content_rect().size() - area.size(),
     );
     let folded = crate::tile_fit::apply_folds(&mut *f.tree, &folds);
-    crate::tile_fit::fit(&mut *f.tree, area, metrics);
+    crate::tile_fit::fit_with(&mut *f.tree, area, metrics, &mut state.host.fit_memory);
     state.host.lists_in_drawer = !folded.in_drawer(crate::tile_fit::Drawer::Left).is_empty();
     state.host.aside_in_drawer = folds.members;
     if std::mem::take(&mut state.host.toggle_left) {
