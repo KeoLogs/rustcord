@@ -781,6 +781,15 @@ async fn run(
                 ToBackend::StartQrLogin | ToBackend::CancelQrLogin => Ok(None),
                 // Handled before the spawn.
                 ToBackend::CancelSend { .. } => Ok(None),
+                // Bots have no notification settings.
+                ToBackend::PatchGuildSettings { .. } if is_bot => Ok(None),
+                ToBackend::PatchGuildSettings { guild_id, body } => {
+                    api.patch_guild_settings(&guild_id, &body).await.map(|v| {
+                        Some(ToUi::GuildSettingsUpdated(
+                            crate::notif_settings::parse_response(&v, &guild_id),
+                        ))
+                    })
+                }
                 ToBackend::PlaySound { custom, volume } => {
                     let played = tokio::task::spawn_blocking(move || {
                         crate::sound::play(custom.as_deref(), volume)

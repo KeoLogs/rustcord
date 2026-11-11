@@ -1409,6 +1409,12 @@ fn chat_screen(ui: &mut egui::Ui, state: &mut State, f: ChatFrame<'_>) {
     state.overlays(ui, f.config, &pal);
 }
 
+/// Where a menu's "Notification Settings" click leaves its target for the
+/// dialog (menus only have `&self`).
+fn notif_request_id() -> egui::Id {
+    egui::Id::unique("rc_notif_settings_request")
+}
+
 /// Each open account is one more gateway connection plus its caches.
 const RAM_NOTE: &str = "Each open account is one more connection + caches (~15 MB + caches)";
 
@@ -2102,6 +2108,8 @@ pub struct State {
     toast: Option<(String, Instant)>,
     /// An update check was already asked for in this session.
     update_asked: bool,
+    /// The open Notification Settings dialog.
+    notif_dialog: Option<crate::notif_settings::Target>,
     /// A write action was rate limited: user write controls stay disabled
     /// and the toast counts down until then (never auto-retried).
     slow_down_until: Option<Instant>,
@@ -2213,6 +2221,7 @@ impl State {
             ac: Autocomplete::default(),
             toast: None,
             update_asked: false,
+            notif_dialog: None,
             slow_down_until: None,
             config_updates: Vec::new(),
             account_action: None,
@@ -5552,6 +5561,10 @@ impl State {
                 if badge.muted {
                     widgets::menu_note(ui, icons::BELL_SLASH, "Muted", pal);
                 }
+                self.notif_menu_item(ui, config, pal, || crate::notif_settings::Target::Guild {
+                    guild_id: g.id.clone(),
+                    name: g.name.clone(),
+                });
                 widgets::menu_separator(ui, pal);
                 if self.invites.is_some()
                     && g.features.iter().any(|f| f == crate::onboarding::FEATURE)
@@ -6080,6 +6093,13 @@ impl State {
                                         if muted {
                                             widgets::menu_note(ui, icons::BELL_SLASH, "Muted", pal);
                                         }
+                                        self.notif_menu_item(ui, config, pal, || {
+                                            crate::notif_settings::Target::Channel {
+                                                guild_id: guild.id.clone(),
+                                                channel_id: c.id.clone(),
+                                                name: c.label(),
+                                            }
+                                        });
                                         widgets::menu_separator(ui, pal);
                                         if c.is_dm()
                                             && widgets::menu_item(
@@ -8559,6 +8579,67 @@ impl State {
         }
     }
 
+    /// "Notification Settings" in a server / channel right-click menu
+    /// (Notifications module, user accounts). Opens the dialog; nothing
+    /// is sent here.
+    fn notif_menu_item(
+        &self,
+        ui: &mut egui::Ui,
+        config: &Config,
+        pal: &Palette,
+        target: impl FnOnce() -> crate::notif_settings::Target,
+    ) {
+        if !config.modules.notifications || self.is_bot_session() {
+            return;
+        }
+        if widgets::menu_item(
+            ui,
+            Some(icons::BELL),
+            "Notification Settings",
+            Tone::Normal,
+            pal,
+        )
+        .clicked()
+        {
+            let target = target();
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(notif_request_id(), Some(target)));
+        }
+    }
+
+    /// The Notification Settings dialog: each click is one PATCH of the
+    /// user's own settings; Discord's answer updates `mutes`.
+    fn notif_settings_dialog(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let asked = ctx.data_mut(|d| {
+            d.remove_temp::<Option<crate::notif_settings::Target>>(notif_request_id())
+        });
+        if let Some(Some(target)) = asked {
+            self.notif_dialog = Some(target);
+        }
+        if !config.modules.notifications {
+            self.notif_dialog = None;
+        }
+        let Some(target) = &self.notif_dialog else {
+            return;
+        };
+        let now = crate::update_check::now_unix();
+        let settings = self.mutes.get(target.guild_id());
+        match crate::notif_settings::show(ctx, pal, target, settings, now) {
+            Some(crate::notif_settings::Event::Close) => self.notif_dialog = None,
+            Some(crate::notif_settings::Event::Patch(body)) => {
+                if let Some(secs) = self.slow_down_secs() {
+                    self.toast = Some((format!("Slow down, try again in {secs}s"), Instant::now()));
+                } else {
+                    let _ = self.tx.send(ToBackend::PatchGuildSettings {
+                        guild_id: target.guild_id().to_owned(),
+                        body,
+                    });
+                }
+            }
+            None => {}
+        }
+    }
+
     fn update_check_due(&self, config: &Config) -> bool {
         !self.update_asked
             && crate::update_check::due(
@@ -8612,6 +8693,7 @@ impl State {
         self.dialogs(&ctx, config, pal);
         self.corner_notices(&ctx, config, pal);
         self.group_dm_dialog(&ctx, config, pal);
+        self.notif_settings_dialog(&ctx, config, pal);
 
         // Drag-and-drop hint
         let hovering_files = ui.input(|i| !i.raw.hovered_files.is_empty());

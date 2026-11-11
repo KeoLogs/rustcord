@@ -483,6 +483,8 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
     let script = [4u64, 6, 15, 25];
     let mut step = 0;
 
+    // Notification settings changed in the demo, by server id.
+    let mut notif_settings = std::collections::HashMap::<String, Value>::new();
     // Requests that arrived while an upload was "in progress".
     let mut backlog = std::collections::VecDeque::<ToBackend>::new();
 
@@ -767,6 +769,15 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                 "demo: mark unread #{channel_id} after {message_id} ({mention_count} mentions)"
             ),
             ToBackend::AckBulk(acks) => eprintln!("demo: ack-bulk {acks:?}"),
+            ToBackend::PatchGuildSettings { guild_id, body } => {
+                let stored = notif_settings
+                    .entry(guild_id.clone())
+                    .or_insert_with(|| json!({ "guild_id": guild_id }));
+                crate::notif_settings::apply_patch(stored, &body);
+                send(ToUi::GuildSettingsUpdated(
+                    crate::notif_settings::parse_response(stored, &guild_id),
+                ));
+            }
             // Only matters while an upload is running (handled there).
             ToBackend::CancelSend { .. } => {}
             ToBackend::PlaySound { custom, volume } => {

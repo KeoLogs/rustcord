@@ -1317,7 +1317,8 @@ fn notifications(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
     hint(
         ui,
         pal,
-        "Notification levels and mutes come from your Discord account (set them in          the official client for now). Bot accounts only notify on mentions and DMs.          Recent mentions are listed under the bell in the chat header.",
+        "Notification levels and mutes come from your Discord account: right-click a \
+         server or channel and pick Notification Settings. Bot accounts only notify on mentions and DMs.          Recent mentions are listed under the bell in the chat header.",
     );
 }
 

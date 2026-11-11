@@ -35,6 +35,7 @@ mod markdown;
 mod members;
 mod memstats;
 mod notices;
+mod notif_settings;
 mod notify;
 mod onboarding;
 mod paste;

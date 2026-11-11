@@ -7,6 +7,11 @@ Settings → About). Version x.y.z:
 - z: bug and issue fixes
 
 ## Unreleased
+- Mute and notification settings (Notifications module, user accounts):
+  right-click a server or channel → "Notification Settings" to mute it
+  (15 minutes to 24 hours, or until you turn it back on), unmute it, or
+  pick All messages / Only @mentions / Nothing. Each click changes your
+  own Discord settings; nothing is sent without one.
 - New Group DM (Friends module): "New Group DM" in the DM list opens a
   friend picker (up to 9 friends, with a filter). The group is created
   only when you press Create; one friend opens the ordinary DM.

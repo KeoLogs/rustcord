@@ -749,6 +749,25 @@ impl Api {
         Ok(Self::check(resp, "Opening DM").await?.json().await?)
     }
 
+    /// PATCH users/@me/guilds/<id>/settings: the user's own mute and
+    /// notification settings for a server (`@me` = DMs). Returns the new
+    /// settings object.
+    pub async fn patch_guild_settings(&self, guild_id: &str, body: &Value) -> Result<Value> {
+        let resp = self
+            .send(
+                self.http
+                    .patch(format!("{API_BASE}/users/@me/guilds/{guild_id}/settings"))
+                    .header("Authorization", &self.auth)
+                    .json(body),
+            )
+            .await
+            .context("notification settings request failed")?;
+        Ok(Self::check(resp, "Saving notification settings")
+            .await?
+            .json()
+            .await?)
+    }
+
     /// POST users/@me/channels with several recipients: a new group DM.
     /// Only ever called from the New Group DM dialog's Create click.
     pub async fn create_group_dm(&self, user_ids: &[String]) -> Result<Value> {

@@ -1192,6 +1192,12 @@ pub enum ToBackend {
     /// Manual "Reconnect" in the connection status: drop the gateway
     /// connection and connect again now (resuming if possible).
     Reconnect,
+    /// A click in the Notification Settings dialog: PATCH the user's own
+    /// settings for this server (`notif_settings.rs`; user accounts).
+    PatchGuildSettings {
+        guild_id: String,
+        body: serde_json::Value,
+    },
     /// "Cancel" on an uploading message (nonce): drop the request. The
     /// message then shows as not sent, with Retry / Delete.
     CancelSend {
