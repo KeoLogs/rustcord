@@ -189,7 +189,22 @@ impl Api {
 
     /// Last `limit` messages in a channel, oldest first.
     pub async fn channel_history(&self, channel_id: &str, limit: u8) -> Result<Vec<Message>> {
-        let url = format!("{API_BASE}/channels/{channel_id}/messages?limit={limit}");
+        self.history_before(channel_id, None, limit).await
+    }
+
+    /// `limit` messages before `before` (None: the newest), oldest first.
+    pub async fn history_before(
+        &self,
+        channel_id: &str,
+        before: Option<&str>,
+        limit: u8,
+    ) -> Result<Vec<Message>> {
+        let url = match before {
+            Some(b) => {
+                format!("{API_BASE}/channels/{channel_id}/messages?before={b}&limit={limit}")
+            }
+            None => format!("{API_BASE}/channels/{channel_id}/messages?limit={limit}"),
+        };
         let resp = self
             .send(self.http.get(&url).header("Authorization", &self.auth))
             .await
@@ -205,18 +220,22 @@ impl Api {
         Ok(messages)
     }
 
-    /// Send a message, optionally as a reply and/or with files. The gateway
-    /// echoes it back as MESSAGE_CREATE, so we don't need the response.
+    /// Send a message, optionally as a reply and/or with files. `nonce`
+    /// with `enforce_nonce` makes Discord ignore a repeat of the same send
+    /// (Retry after a timeout that actually went through). Returns the
+    /// created message (the gateway echoes it too; both match by nonce).
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_message(
         &self,
         channel_id: &str,
+        nonce: &str,
         content: &str,
         reply_to: Option<&str>,
         reply_ping: bool,
         files: &[PathBuf],
         spoilers: &[bool],
-    ) -> Result<()> {
-        let mut body = json!({ "content": content });
+    ) -> Result<Message> {
+        let mut body = json!({ "content": content, "nonce": nonce, "enforce_nonce": true });
         if let Some(id) = reply_to {
             body["message_reference"] = json!({ "message_id": id, "fail_if_not_exists": false });
             // Discord's default parse list plus the reply ping switch.
@@ -264,8 +283,15 @@ impl Api {
         };
 
         let resp = self.send(request).await.context("send request failed")?;
-        Self::check(resp, "Sending message").await?;
-        Ok(())
+        let body: Value = Self::check(resp, "Sending message")
+            .await?
+            .json()
+            .await
+            .unwrap_or_default();
+        let mut message = Message::from_json(&body);
+        // The answer always carries our nonce, but don't rely on it.
+        message.nonce.get_or_insert_with(|| nonce.to_string());
+        Ok(message)
     }
 
     pub async fn edit_message(

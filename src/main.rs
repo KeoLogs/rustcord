@@ -16,6 +16,7 @@ mod forum;
 mod friends;
 mod gateway;
 mod gif_picker;
+mod history;
 mod home;
 mod http_error;
 mod icons;

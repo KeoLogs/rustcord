@@ -90,6 +90,7 @@ pub const CHECKS: &str = "\u{E53A}";
 pub const PROHIBIT: &str = "\u{E3DE}";
 pub const ARROW_RIGHT: &str = "\u{E06C}";
 pub const ARROW_UP: &str = "\u{E08E}";
+pub const ARROW_DOWN: &str = "\u{E03E}";
 pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
 
 // System messages

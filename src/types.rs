@@ -579,6 +579,20 @@ pub struct Message {
     pub ref_channel_id: Option<String>,
     /// The `thread` object Discord puts on a message that has a thread.
     pub thread: Option<Box<ThreadRef>>,
+    /// The `nonce` we sent with it (only my own messages echo one).
+    pub nonce: Option<String>,
+    /// Set on a message I'm still sending (shown faded) or that failed
+    /// (shown red with Retry / Delete). Its `id` is then the nonce.
+    pub local: Option<Box<LocalSend>>,
+}
+
+/// An optimistic (not yet confirmed) message of mine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalSend {
+    /// User-facing reason the send failed; None while sending.
+    pub error: Option<String>,
+    /// Names of the files being uploaded with it.
+    pub files: Vec<String>,
 }
 
 /// The thread a message points at (`thread` on the message).
@@ -723,6 +737,14 @@ impl Message {
                 .filter(|t| t.is_object())
                 .and_then(ThreadRef::from_json)
                 .map(Box::new),
+            // Discord echoes the nonce as sent (string), older clients
+            // sent numbers.
+            nonce: match v.get("nonce") {
+                Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+                Some(Value::Number(n)) => Some(n.to_string()),
+                _ => None,
+            },
+            local: None,
         }
     }
 
@@ -870,6 +892,32 @@ pub enum ToUi {
         channel_id: String,
         messages: Vec<Message>,
     },
+    /// A page of history (oldest first) for `ToBackend::LoadPage`.
+    Page {
+        channel_id: String,
+        before: Option<String>,
+        messages: Vec<Message>,
+    },
+    /// `ToBackend::LoadPage` failed (user-facing error; not retried).
+    PageFailed {
+        channel_id: String,
+        error: String,
+    },
+    /// My message went through (the POST answer). Matched by nonce, like
+    /// the MESSAGE_CREATE echo.
+    Sent {
+        channel_id: String,
+        nonce: String,
+        message: Box<Message>,
+    },
+    /// Sending failed: the faded message turns red with Retry / Delete.
+    SendFailed {
+        channel_id: String,
+        nonce: String,
+        error: String,
+    },
+    /// "Copy Image": the downloaded picture, for the clipboard.
+    CopyImage(Box<eframe::egui::ColorImage>),
     /// Loading a channel's messages failed. `error` is user-facing text
     /// (never a raw HTTP line); `no_access` is a typed 403 / Missing Access,
     /// for the "You don't have access" empty state.
@@ -1118,8 +1166,25 @@ pub enum ToBackend {
     LoadHistory {
         channel_id: String,
     },
+    /// 50 messages before `before` (None: the newest), answered with
+    /// `ToUi::Page` / `ToUi::PageFailed`. From scrolling or a click.
+    LoadPage {
+        channel_id: String,
+        before: Option<String>,
+    },
+    /// Manual "Reconnect" in the connection status: drop the gateway
+    /// connection and connect again now (resuming if possible).
+    Reconnect,
+    /// "Copy Image" in an image's menu: download it (CDN, no token) and
+    /// hand it back as `ToUi::CopyImage`.
+    CopyImage {
+        url: String,
+    },
     Send {
         channel_id: String,
+        /// Matches the optimistic message to its echo (sent as `nonce`
+        /// with `enforce_nonce`, so a Retry can't post twice).
+        nonce: String,
         content: String,
         reply_to: Option<String>,
         /// Ping the author of the replied-to message (allowed_mentions

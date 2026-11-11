@@ -41,6 +41,17 @@
 //!   Sam's last message. #showcase's thread start names no thread we know
 //!   ("This thread isn't loaded", not clickable).
 //! - The GIF button shows fake results (offline, so the pictures fail).
+//!
+//! History and sending (Brief A) in the demo:
+//! - #history has 300 messages: scrolling up loads 50 more at a time
+//!   (`before=`), and it opens at the first unread message (120 unread, so
+//!   it loads around your last read one, with the red NEW line).
+//! - Sam's link in #welcome jumps to an old #history message: with #history
+//!   already open that leaves a gap ("Load more"); "Jump to present" brings
+//!   you back.
+//! - Sending shows the message faded for ~0.7 s. A message with the word
+//!   "fail" in it fails the first time (red, Retry / Delete).
+//! - The status bar's Reconnect pretends to reconnect.
 
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
@@ -222,6 +233,7 @@ fn last_id(channel_id: &str) -> u64 {
         "202" => 40,
         "203" => 60,
         "204" => 70,
+        "206" => HISTORY_LAST,
         "250" => 263,
         "210" => 80,
         "211" => 85,
@@ -267,6 +279,7 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
               "topic": "Chat about anything. Be nice, no spoilers without tags." },
             ch("202", "memes", 1, Some("300")),
             ch("204", "showcase", 2, Some("300")),
+            ch("206", "history", 4, Some("300")),
             // Forum (Threads module).
             { "id": "205", "name": "help", "type": 15, "position": 3, "parent_id": "300",
               "topic": "Ask anything about RustCord.",
@@ -320,6 +333,8 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             { "id": "201", "last_message_id": "26" },
             { "id": "202", "last_message_id": "33" },
             { "id": "203", "last_message_id": "57", "mention_count": 2 },
+            // 120 unread: the first unread isn't in the newest page.
+            { "id": "206", "last_message_id": (HISTORY_LAST - 120).to_string() },
             { "id": "210", "last_message_id": "78", "mention_count": 1 },
             { "id": "211", "last_message_id": "85" },
             { "id": "220", "last_message_id": "80" },
@@ -394,6 +409,8 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
     notes.insert(SAM.into(), "Owes me a code review".into());
 
     let mut next_id = 1000u64;
+    // Nonces of "fail" messages that already failed once (Retry works).
+    let mut failed_once = std::collections::HashSet::new();
     // Messages created during the demo, so reloading history keeps them.
     let mut created: HashMap<String, Vec<Value>> = HashMap::new();
     let emit = |v: Value, created: &mut HashMap<String, Vec<Value>>| {
@@ -461,23 +478,44 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
         };
         match req {
             ToBackend::LoadHistory { channel_id } => {
-                let messages = history(&channel_id, &created, &pinned);
+                let messages = page_before(history(&channel_id, &created, &pinned), None);
                 send(ToUi::History {
                     messages,
                     channel_id,
+                })
+            }
+            ToBackend::LoadPage { channel_id, before } => {
+                eprintln!("demo: page of #{channel_id} before {before:?}");
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let all = history(&channel_id, &created, &pinned);
+                let at = before.as_deref().and_then(|b| b.parse().ok());
+                send(ToUi::Page {
+                    messages: page_before(all, at),
+                    channel_id,
+                    before,
                 })
             }
             ToBackend::LoadAround {
                 channel_id,
                 message_id,
             } => {
-                // The demo history is short, so "around" is all of it.
-                let messages = history(&channel_id, &created, &pinned);
+                let all = history(&channel_id, &created, &pinned);
+                let messages = page_around(all, message_id.parse().unwrap_or(0));
                 send(ToUi::HistoryAround {
                     channel_id,
                     message_id,
                     messages,
                 })
+            }
+            ToBackend::Reconnect => {
+                eprintln!("demo: reconnect");
+                send(ToUi::Status("Reconnecting…".into()));
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                send(ToUi::Resumed);
+            }
+            ToBackend::CopyImage { url } => {
+                eprintln!("demo: copy image {url}");
+                send(ToUi::Notice("Demo mode: would copy the image".into()));
             }
             ToBackend::LoadPins { channel_id } => {
                 let pins = sample_values(&channel_id)
@@ -542,11 +580,22 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             }
             ToBackend::Send {
                 channel_id,
+                nonce,
                 content,
                 files,
                 spoilers,
                 ..
             } => {
+                // Long enough to see the faded message.
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                if content.to_lowercase().contains("fail") && failed_once.insert(nonce.clone()) {
+                    send(ToUi::SendFailed {
+                        channel_id,
+                        nonce,
+                        error: "Demo mode: this one fails the first time".into(),
+                    });
+                    continue;
+                }
                 next_id += 1;
                 let attachments: Vec<Value> = files
                     .iter()
@@ -566,6 +615,7 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                         "channel_id": channel_id,
                         "author": me,
                         "content": content,
+                        "nonce": nonce,
                         "attachments": attachments,
                         "timestamp": iso_minutes_ago(0),
                     }),
@@ -920,6 +970,58 @@ fn history(
         .collect()
 }
 
+/// Newest message in #history (ids 600..=899; sent messages start at 1001).
+const HISTORY_LAST: u64 = 899;
+/// Messages in #history.
+const HISTORY_LEN: u64 = 300;
+
+/// #history: 300 numbered messages, a few minutes apart.
+fn history_values() -> Vec<Value> {
+    let people = [
+        user(SAM, "Sam", None),
+        user(ALEX, "Alex", None),
+        user(MAYA, "Maya", None),
+    ];
+    let first = HISTORY_LAST + 1 - HISTORY_LEN;
+    (first..=HISTORY_LAST)
+        .map(|id| {
+            let n = id - first + 1;
+            let ago = ((HISTORY_LAST - id) * 7) as i64;
+            json!({
+                "id": id.to_string(), "channel_id": "206",
+                "author": people[(n % 3) as usize],
+                "content": format!("History message #{n} (id {id})"),
+                "timestamp": iso_minutes_ago(ago),
+            })
+        })
+        .collect()
+}
+
+/// Up to 50 messages before `before` (None: the newest), oldest first.
+fn page_before(all: Vec<Message>, before: Option<u64>) -> Vec<Message> {
+    let mut older: Vec<Message> = all
+        .into_iter()
+        .filter(|m| before.is_none_or(|b| crate::history::id_of(m) < b))
+        .collect();
+    let skip = older.len().saturating_sub(crate::history::PAGE_SIZE);
+    older.drain(..skip);
+    older
+}
+
+/// 50 messages around `id`, like `?around=`.
+fn page_around(all: Vec<Message>, id: u64) -> Vec<Message> {
+    let half = crate::history::PAGE_SIZE / 2;
+    let at = all
+        .iter()
+        .position(|m| crate::history::id_of(m) >= id)
+        .unwrap_or(all.len());
+    let start = at.saturating_sub(half);
+    all.into_iter()
+        .skip(start)
+        .take(crate::history::PAGE_SIZE)
+        .collect()
+}
+
 /// Minutes-ago for message `n` of 8+: two days ago, yesterday, then today,
 /// so the date lines show.
 fn minutes_ago(n: u64) -> i64 {
@@ -939,6 +1041,9 @@ fn sample_values(channel_id: &str) -> Vec<Value> {
     }
     if channel_id == "250" {
         return thread_values();
+    }
+    if channel_id == "206" {
+        return history_values();
     }
     let sam = user(SAM, "Sam", None);
     let alex = user(ALEX, "Alex", None);
@@ -1235,7 +1340,7 @@ fn welcome_values() -> Vec<Value> {
         (
             sam,
             20,
-            "egui docs: [docs.rs/egui](https://docs.rs/egui) · Discord's own (trusted, opens straight away): <https://discord.com/developers/docs> · dev chat in <#203>",
+            "egui docs: [docs.rs/egui](https://docs.rs/egui) · Discord's own (trusted, opens straight away): <https://discord.com/developers/docs> · dev chat in <#203> · an old one in #history: https://discord.com/channels/100/206/640",
             json!({}),
         ),
         (
