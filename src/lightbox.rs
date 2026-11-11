@@ -438,10 +438,10 @@ impl Viewer {
                         .corner_radius(crate::theme::corner(2));
                     let src = img.source(ctx).uri().map(str::to_string);
                     img.paint_at(ui, rect);
-                    if let Some(s) = src {
-                        if !self.painted.contains(&s) {
-                            self.painted.insert(s);
-                        }
+                    if let Some(s) = src
+                        && !self.painted.contains(&s)
+                    {
+                        self.painted.insert(s);
                     }
                     if spinner {
                         egui::Spinner::new()
