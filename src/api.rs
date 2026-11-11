@@ -234,6 +234,7 @@ impl Api {
         reply_ping: bool,
         files: &[PathBuf],
         spoilers: &[bool],
+        progress: Option<crate::upload::OnProgress>,
     ) -> Result<Message> {
         let mut body = json!({ "content": content, "nonce": nonce, "enforce_nonce": true });
         if let Some(id) = reply_to {
@@ -256,7 +257,9 @@ impl Api {
             let mut parts = Vec::new();
             let mut meta = Vec::new();
             for (i, path) in files.iter().enumerate() {
-                let bytes = tokio::fs::read(path)
+                // Streamed from disk in chunks (never the whole file in
+                // memory); each chunk reports progress.
+                let (stream, len) = crate::upload::file_body(path, i, progress.clone())
                     .await
                     .with_context(|| format!("couldn't read {}", path.display()))?;
                 let mut name = path
@@ -269,7 +272,7 @@ impl Api {
                 }
                 meta.push(json!({ "id": i, "filename": name }));
                 let mime = mime_for(&name);
-                let part = reqwest::multipart::Part::bytes(bytes)
+                let part = reqwest::multipart::Part::stream_with_length(stream, len)
                     .file_name(name)
                     .mime_str(mime)?;
                 parts.push((format!("files[{i}]"), part));

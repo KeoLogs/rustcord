@@ -593,6 +593,8 @@ pub struct LocalSend {
     pub error: Option<String>,
     /// Names of the files being uploaded with it.
     pub files: Vec<String>,
+    /// (sent, total) bytes per file, once the upload reports progress.
+    pub progress: Vec<(u64, u64)>,
 }
 
 /// The thread a message points at (`thread` on the message).
@@ -1004,6 +1006,14 @@ pub enum ToUi {
     UserSettingsUpdate(serde_json::Value),
     /// A short message for the user (shown briefly), e.g. "Saved …".
     Notice(String),
+    /// Bytes of one attachment handed to the network so far (throttled).
+    UploadProgress {
+        channel_id: String,
+        nonce: String,
+        file: usize,
+        sent: u64,
+        total: u64,
+    },
     /// The "Browse…" dialog for the custom notification sound closed.
     SoundPicked(Option<PathBuf>),
     /// Update check: the latest release tag on GitHub (may not be newer).
@@ -1182,6 +1192,11 @@ pub enum ToBackend {
     /// Manual "Reconnect" in the connection status: drop the gateway
     /// connection and connect again now (resuming if possible).
     Reconnect,
+    /// "Cancel" on an uploading message (nonce): drop the request. The
+    /// message then shows as not sent, with Retry / Delete.
+    CancelSend {
+        nonce: String,
+    },
     /// Play the notification sound (`sound.rs`): the bundled ping, or the
     /// user's file. Local only.
     PlaySound {

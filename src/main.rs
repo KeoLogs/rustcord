@@ -69,6 +69,7 @@ mod timefmt;
 mod types;
 mod unicode_symbols;
 mod update_check;
+mod upload;
 mod widgets;
 mod window_frame;
 

@@ -7,6 +7,10 @@ Settings → About). Version x.y.z:
 - z: bug and issue fixes
 
 ## Unreleased
+- Upload progress: a message with attachments shows a progress bar per
+  file while it uploads, and a Cancel link. A cancelled upload shows as
+  not sent with Retry and Delete. Files are now streamed from disk instead
+  of being read into memory whole.
 - Notification sound: RustCord's own short ping plays with each
   notification. Settings → Notifications has the on/off switch, a volume
   slider, a Test button and "Browse…" for your own sound (wav, ogg or mp3,

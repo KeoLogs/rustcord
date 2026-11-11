@@ -1737,6 +1737,8 @@ enum MessageAction {
     RetrySend(String),
     /// Throw away a failed send (nonce).
     DiscardSend(String),
+    /// "Cancel" on an uploading message (nonce).
+    CancelSend(String),
     /// "Copy Image" on an image (url).
     CopyImage(String),
 }
@@ -2412,6 +2414,22 @@ impl State {
                     // Not on screen (channel dropped): say so instead.
                     self.outbox.remove(&nonce);
                     self.toast = Some((format!("Couldn't send: {error}"), Instant::now()));
+                }
+            }
+            ToUi::UploadProgress {
+                channel_id,
+                nonce,
+                file,
+                sent,
+                total,
+            } => {
+                if let Some(local) = self
+                    .messages
+                    .get_mut(&channel_id)
+                    .and_then(|list| list.iter_mut().rev().find(|m| m.id == nonce))
+                    .and_then(|m| m.local.as_mut())
+                {
+                    crate::upload::apply(&mut local.progress, file, sent, total);
                 }
             }
             ToUi::CopyImage(img) => {
@@ -6928,6 +6946,9 @@ impl State {
             }
             Some(MessageAction::OpenThread(_)) => {}
             Some(MessageAction::RetrySend(nonce)) => self.retry_send(&channel_id, &nonce, true),
+            Some(MessageAction::CancelSend(nonce)) => {
+                let _ = self.tx.send(ToBackend::CancelSend { nonce });
+            }
             Some(MessageAction::DiscardSend(nonce)) => {
                 self.retry_send(&channel_id, &nonce, false);
             }
@@ -8335,6 +8356,7 @@ impl State {
             m.nonce = Some(nonce.clone());
             m.local = Some(Box::new(crate::types::LocalSend {
                 error: None,
+                progress: Vec::new(),
                 files: out
                     .files
                     .iter()
@@ -8405,6 +8427,7 @@ impl State {
             .and_then(|m| m.local.as_mut())
         {
             l.error = None;
+            l.progress.clear();
         }
         if let Some(out) = self.outbox.get(nonce) {
             self.send_outgoing(nonce, out);
@@ -10645,15 +10668,43 @@ fn local_status(ui: &mut egui::Ui, m: &Message, pal: &Palette, action: &mut Opti
         return;
     };
     if !local.files.is_empty() && local.error.is_none() {
-        ui.label(
-            RichText::new(format!(
-                "{} Uploading {}…",
-                icons::PAPERCLIP,
-                local.files.join(", ")
-            ))
-            .size(12.0)
-            .color(pal.muted),
-        );
+        // One bar per attachment, then Cancel (only ever on the click).
+        for (i, name) in local.files.iter().enumerate() {
+            let (sent, total) = local.progress.get(i).copied().unwrap_or((0, 0));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(
+                    RichText::new(format!("{} {name}", icons::PAPERCLIP))
+                        .size(12.0)
+                        .color(pal.muted),
+                );
+                let started = total > 0;
+                let (rect, _) = ui.allocate_exact_size(vec2(120.0, 6.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 3.0, pal.divider);
+                if started {
+                    let mut done = rect;
+                    done.set_width(rect.width() * crate::upload::fraction(sent, total));
+                    ui.painter().rect_filled(done, 3.0, pal.accent);
+                }
+                ui.label(
+                    RichText::new(if started {
+                        crate::upload::label(sent, total)
+                    } else {
+                        "Waiting…".to_owned()
+                    })
+                    .size(12.0)
+                    .color(pal.muted),
+                );
+            });
+        }
+        if ui
+            .link(RichText::new("Cancel").size(12.0).color(pal.danger))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Stop this upload")
+            .clicked()
+        {
+            *action = Some(MessageAction::CancelSend(m.id.clone()));
+        }
     }
     let Some(error) = &local.error else {
         return;

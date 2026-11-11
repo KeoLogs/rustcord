@@ -1,6 +1,7 @@
 //! The async side of RustCord. Runs on its own Tokio runtime thread so the
 //! UI thread never blocks on the network.
 
+use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
@@ -262,8 +263,17 @@ async fn run(
         })
     };
 
+    // Uploads in flight, by nonce: "Cancel" drops the request.
+    let cancels = Cancels::default();
+
     // Handle requests from the UI.
     while let Some(req) = rx.recv().await {
+        if let ToBackend::CancelSend { nonce } = &req {
+            if let Some(cancel) = lock(&cancels).remove(nonce) {
+                let _ = cancel.send(());
+            }
+            continue;
+        }
         // RUSTCORD_TEST_ACCOUNT (memprobe live runs): reads only.
         if crate::config::live::on(&crate::config::live::READ_ONLY) && !read_only_ok(&req) {
             eprintln!("read-only test run: dropped a write request");
@@ -304,6 +314,7 @@ async fn run(
         let api = api.clone();
         let tx = tx.clone();
         let ctx = egui_ctx.clone();
+        let cancels = cancels.clone();
         tokio::spawn(async move {
             let result = match req {
                 ToBackend::LoadHistory { channel_id } => {
@@ -371,8 +382,11 @@ async fn run(
                     reply_ping,
                     files,
                     spoilers,
-                } => match api
-                    .send_message(
+                } => match send_cancellable(
+                    &cancels,
+                    &nonce,
+                    !files.is_empty(),
+                    api.send_message(
                         &channel_id,
                         &nonce,
                         &content,
@@ -380,8 +394,11 @@ async fn run(
                         reply_ping,
                         &files,
                         &spoilers,
-                    )
-                    .await
+                        (!files.is_empty())
+                            .then(|| upload_progress(&tx, &ctx, &channel_id, &nonce)),
+                    ),
+                )
+                .await
                 {
                     Ok(message) => Ok(Some(ToUi::Sent {
                         channel_id,
@@ -762,6 +779,8 @@ async fn run(
                 }
                 // QR login runs before any session, in remote_auth.rs.
                 ToBackend::StartQrLogin | ToBackend::CancelQrLogin => Ok(None),
+                // Handled before the spawn.
+                ToBackend::CancelSend { .. } => Ok(None),
                 ToBackend::PlaySound { custom, volume } => {
                     let played = tokio::task::spawn_blocking(move || {
                         crate::sound::play(custom.as_deref(), volume)
@@ -803,6 +822,68 @@ async fn run(
     // keeping it (and its platform) around until it times out.
     drop(gw_tx);
     let _ = tokio::time::timeout(Duration::from_secs(3), gateway).await;
+}
+
+/// Uploads that can still be cancelled, by nonce.
+type Cancels = std::sync::Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>;
+
+fn lock(
+    cancels: &Cancels,
+) -> std::sync::MutexGuard<'_, HashMap<String, tokio::sync::oneshot::Sender<()>>> {
+    cancels.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Run a send; with `cancellable` (it has attachments) a
+/// `ToBackend::CancelSend` for its nonce drops the request and the send
+/// fails with "Upload cancelled".
+async fn send_cancellable<T>(
+    cancels: &Cancels,
+    nonce: &str,
+    cancellable: bool,
+    send: impl Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    if !cancellable {
+        return send.await;
+    }
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    lock(cancels).insert(nonce.to_owned(), cancel_tx);
+    let result = tokio::select! {
+        r = send => r,
+        Ok(()) = cancel_rx => Err(anyhow::anyhow!(crate::upload::CANCELLED)),
+    };
+    lock(cancels).remove(nonce);
+    result
+}
+
+/// The upload stream's progress callback: throttled `ToUi::UploadProgress`.
+fn upload_progress(
+    tx: &Sender<ToUi>,
+    ctx: &Repaint,
+    channel_id: &str,
+    nonce: &str,
+) -> crate::upload::OnProgress {
+    let (tx, ctx) = (tx.clone(), ctx.clone());
+    let (channel_id, nonce) = (channel_id.to_owned(), nonce.to_owned());
+    let throttles = std::sync::Mutex::new(Vec::<crate::upload::Throttle>::new());
+    std::sync::Arc::new(move |file, sent, total| {
+        let report = {
+            let mut t = throttles.lock().unwrap_or_else(|e| e.into_inner());
+            if t.len() <= file {
+                t.resize_with(file + 1, Default::default);
+            }
+            t[file].should_report(sent, total)
+        };
+        if report {
+            let _ = tx.send(ToUi::UploadProgress {
+                channel_id: channel_id.clone(),
+                nonce: nonce.clone(),
+                file,
+                sent,
+                total,
+            });
+            ctx.request_repaint();
+        }
+    })
 }
 
 /// Messages per history page (Discord's maximum).
