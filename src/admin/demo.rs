@@ -86,6 +86,30 @@ fn load(r: &Request) -> Value {
               "permissions": "0" },
         ]),
         Kind::RoleMemberSearch => members(&r.path),
+        Kind::LoadChannels => json!([
+            { "id": "200", "name": "welcome", "type": 0, "position": 0,
+              "topic": "Start here.", "permission_overwrites": [
+                  { "id": r.guild_id, "type": 0, "allow": "0", "deny": "2048" }] },
+            { "id": "300", "name": "TEXT CHANNELS", "type": 4, "position": 1 },
+            { "id": "201", "name": "general", "type": 0, "position": 0, "parent_id": "300",
+              "topic": "Chat about anything. Be nice, no spoilers without tags.",
+              "rate_limit_per_user": 5, "permission_overwrites": [
+                  { "id": "501", "type": 0, "allow": "8192", "deny": "0" },
+                  { "id": "950000000000000010", "type": 1, "allow": "0", "deny": "2048" }] },
+            { "id": "202", "name": "memes", "type": 0, "position": 1, "parent_id": "300",
+              "nsfw": true },
+            { "id": "204", "name": "showcase", "type": 0, "position": 2, "parent_id": "300" },
+            { "id": "205", "name": "help", "type": 15, "position": 3, "parent_id": "300",
+              "topic": "Ask anything about RustCord." },
+            { "id": "206", "name": "history", "type": 0, "position": 4, "parent_id": "300" },
+            { "id": "301", "name": "Dev", "type": 4, "position": 2 },
+            { "id": "203", "name": "rust", "type": 0, "position": 0, "parent_id": "301",
+              "topic": "RustCord development" },
+            { "id": "302", "name": "Voice Channels", "type": 4, "position": 3 },
+            { "id": "230", "name": "General", "type": 2, "position": 0, "parent_id": "302",
+              "bitrate": 64000, "user_limit": 0 },
+        ]),
+        Kind::ChannelMemberSearch => members(&r.path),
         _ => Value::Null,
     }
 }

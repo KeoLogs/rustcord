@@ -321,6 +321,27 @@ impl State {
         }
     }
 
+    /// Demo screenshots: the permission grid of the Moderators role.
+    pub fn demo_open(&mut self) {
+        let Some(r) = self
+            .roles
+            .iter()
+            .flatten()
+            .find(|r| s(r, "name") == "Moderators")
+        else {
+            return;
+        };
+        let draft = Draft::from_json(r);
+        self.edit = Some(Edit {
+            id: Some(s(r, "id").to_string()),
+            base: draft.clone(),
+            draft,
+            page: Page::Permissions,
+            filter: String::new(),
+            has_icon: false,
+        });
+    }
+
     pub fn on_picked(&mut self, p: Arc<Picked>) {
         if let Some(e) = &mut self.edit {
             e.draft.icon = ImageEdit::New(p);

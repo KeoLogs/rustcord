@@ -26,6 +26,7 @@ use crate::perms;
 use crate::theme::{Bold, Palette};
 use crate::types::Guild;
 
+pub mod channels;
 pub mod demo;
 pub mod overview;
 pub mod roles;
@@ -49,6 +50,14 @@ pub enum Method {
 pub enum Kind {
     LoadGuild,
     SaveGuild,
+    LoadChannels,
+    CreateChannel,
+    SaveChannel,
+    DeleteChannel,
+    MoveChannels,
+    SaveOverwrite,
+    DeleteOverwrite,
+    ChannelMemberSearch,
     LoadRoles,
     CreateRole,
     SaveRole,
@@ -65,6 +74,14 @@ impl Kind {
         match self {
             Kind::LoadGuild => "Loading the server settings",
             Kind::SaveGuild => "Saving the server settings",
+            Kind::LoadChannels => "Loading channels",
+            Kind::CreateChannel => "Creating the channel",
+            Kind::SaveChannel => "Saving the channel",
+            Kind::DeleteChannel => "Deleting the channel",
+            Kind::MoveChannels => "Reordering channels",
+            Kind::SaveOverwrite => "Saving channel permissions",
+            Kind::DeleteOverwrite => "Removing channel permissions",
+            Kind::ChannelMemberSearch => "Searching members",
             Kind::LoadRoles => "Loading roles",
             Kind::CreateRole => "Creating the role",
             Kind::SaveRole => "Saving the role",
@@ -79,6 +96,14 @@ impl Kind {
     fn tab(self) -> Tab {
         match self {
             Kind::LoadGuild | Kind::SaveGuild => Tab::Overview,
+            Kind::LoadChannels
+            | Kind::CreateChannel
+            | Kind::SaveChannel
+            | Kind::DeleteChannel
+            | Kind::MoveChannels
+            | Kind::SaveOverwrite
+            | Kind::DeleteOverwrite
+            | Kind::ChannelMemberSearch => Tab::Channels,
             Kind::LoadRoles
             | Kind::CreateRole
             | Kind::SaveRole
@@ -311,16 +336,18 @@ pub fn id_or_null(id: &str) -> Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,
+    Channels,
     Roles,
 }
 
 /// Sidebar groups, in order.
-const NAV: &[(&str, &[Tab])] = &[("Server", &[Tab::Overview, Tab::Roles])];
+const NAV: &[(&str, &[Tab])] = &[("Server", &[Tab::Overview, Tab::Roles, Tab::Channels])];
 
 impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
+            Tab::Channels => "Channels",
             Tab::Roles => "Roles",
         }
     }
@@ -328,6 +355,7 @@ impl Tab {
     fn icon(self) -> &'static str {
         match self {
             Tab::Overview => icons::GEAR,
+            Tab::Channels => icons::HASH,
             Tab::Roles => icons::ID,
         }
     }
@@ -339,6 +367,7 @@ impl Tab {
         let any = |bits: u64| perms & bits != 0;
         match self {
             Tab::Overview => any(perms::MANAGE_GUILD),
+            Tab::Channels => any(perms::MANAGE_CHANNELS),
             Tab::Roles => any(perms::MANAGE_ROLES),
         }
     }
@@ -539,7 +568,11 @@ pub struct AdminPage {
     /// Last result line: text, is it an error.
     notice: Option<(String, bool)>,
     confirm: Option<Confirm>,
+    /// Demo screenshots (`RUSTCORD_DEMO_OPEN=admin-roles-edit`): open the
+    /// tab's first editor once its data is in.
+    pub demo_detail: bool,
     overview: overview::State,
+    channels: channels::State,
     roles: roles::State,
 }
 
@@ -554,7 +587,9 @@ impl AdminPage {
             busy: 0,
             notice: None,
             confirm: None,
+            demo_detail: false,
             overview: Default::default(),
+            channels: Default::default(),
             roles: Default::default(),
         };
         let reqs = page.select(tab);
@@ -579,6 +614,7 @@ impl AdminPage {
         let g = &self.guild_id;
         match tab {
             Tab::Overview => vec![overview::load(g)],
+            Tab::Channels => vec![channels::load(g)],
             Tab::Roles => vec![roles::load(g)],
         }
     }
@@ -608,7 +644,15 @@ impl AdminPage {
         };
         match r.kind.tab() {
             Tab::Overview => self.overview.on_response(r.kind, &r.key, &v),
+            Tab::Channels => self.channels.on_response(r.kind, &r.key, &v),
             Tab::Roles => self.roles.on_response(r.kind, &r.key, &v),
+        }
+        if std::mem::take(&mut self.demo_detail) {
+            match self.tab {
+                Tab::Roles => self.roles.demo_open(),
+                Tab::Channels => self.channels.demo_open(),
+                _ => {}
+            }
         }
     }
 
@@ -766,6 +810,7 @@ impl AdminPage {
                         let before = out.send.len();
                         match self.tab {
                             Tab::Overview => self.overview.ui(ui, cx, &mut out),
+                            Tab::Channels => self.channels.ui(ui, cx, &mut out),
                             Tab::Roles => self.roles.ui(ui, cx, &mut out),
                         }
                         self.busy += (out.send.len() - before) as u32;

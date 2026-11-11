@@ -5003,8 +5003,13 @@ impl State {
         self.select_guild(guild.clone());
         // `admin`, `admin-roles`, …: a Server Settings tab.
         if let Some(tab) = view.strip_prefix("admin") {
-            let tab = crate::admin::Tab::from_name(tab.trim_start_matches('-'));
+            let tab = tab.trim_start_matches('-');
+            let detail = tab.ends_with("-edit");
+            let tab = crate::admin::Tab::from_name(tab.trim_end_matches("-edit"));
             self.open_admin(&guild, tab);
+            if let Some(page) = &mut self.admin {
+                page.demo_detail = detail;
+            }
             return true;
         }
         // `welcome`: #welcome, with the embeds and the image attachment.

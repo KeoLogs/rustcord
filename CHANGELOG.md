@@ -17,6 +17,10 @@ Settings → About). Version x.y.z:
     reorder; colour, hoist, mentionable and icon; the full permission grid
     with descriptions; give a role to or take it from members. Roles at or
     above your highest role are locked.
+  - Channels: create, edit, delete (type the name to confirm) and drag to
+    reorder channels and categories; topic, slowmode, age-restricted,
+    bitrate and user limit; permission overwrites (allow / inherit / deny)
+    for each role and member.
 
 ## 0.10.0: DM core (history paging, first unread, optimistic send)
 - Chat history like Discord's (Brief A): scrolling near the top loads 50
