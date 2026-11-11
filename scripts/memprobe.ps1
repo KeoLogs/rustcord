@@ -25,10 +25,11 @@
   token; -Live bot only reads account ids from the config. -Profile is
   ignored in live runs (Modules start from the defaults there).
 
-  Every launch sets RUSTCORD_START_MINIMIZED=1: the window never shows or
-  takes focus; it minimises itself on the first frame and keeps rendering
-  in the taskbar. (Windows may trim a minimised app's working set, so
-  compare runs with each other, not with a visible window.)
+  Every launch sets RUSTCORD_START_OFFSCREEN=1: the window opens far off
+  screen without taking focus (only its taskbar button shows), so it never
+  pops up over other work but still draws and loads like a normal window.
+  (A minimised window doesn't run its UI in eframe, so its numbers would
+  be far too low.) -Visible opens it normally instead, to compare.
 
   Windows PowerShell 5.1 compatible. Nothing here trims the working set.
 
@@ -44,6 +45,8 @@ param(
     [switch]$Demo,
     # RUSTCORD_DEMO_BIG=1 (~100 servers, ~3000 channels, ~200 DMs). Implies -Demo.
     [switch]$Big,
+    # Open the window normally (on screen) instead of off screen.
+    [switch]$Visible,
     # Real account, read-only: a saved account's user id, or "bot".
     [string]$Live = '',
     # leo = Leo's module list (-LeoModules), allon = every module on.
@@ -81,12 +84,11 @@ $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $exePath
 $psi.WorkingDirectory = Split-Path $exePath
 $psi.UseShellExecute = $false
-foreach ($k in @('RUSTCORD_DEMO', 'RUSTCORD_DEMO_BIG', 'RUSTCORD_MODULES', 'RUSTCORD_FRAMETIMES', 'RUSTCORD_TEST_ACCOUNT', 'RUSTCORD_START_MINIMIZED', 'DISCORD_TOKEN')) {
+foreach ($k in @('RUSTCORD_DEMO', 'RUSTCORD_DEMO_BIG', 'RUSTCORD_MODULES', 'RUSTCORD_FRAMETIMES', 'RUSTCORD_TEST_ACCOUNT', 'RUSTCORD_START_MINIMIZED', 'RUSTCORD_START_OFFSCREEN', 'DISCORD_TOKEN')) {
     if ($psi.EnvironmentVariables.ContainsKey($k)) { $psi.EnvironmentVariables.Remove($k) }
 }
 $psi.EnvironmentVariables['RUSTCORD_FRAMETIMES'] = $frameFile
-$psi.EnvironmentVariables['RUSTCORD_START_MINIMIZED'] = '1'
-$psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Minimized
+if (-not $Visible) { $psi.EnvironmentVariables['RUSTCORD_START_OFFSCREEN'] = '1' }
 if ($Live -ne '' -and $Demo) { throw '-Live and -Demo/-Big are separate runs' }
 if ($Live -eq 'bot') {
     # The saved bot account named "RustCord" in the real config. Only ids
@@ -126,6 +128,7 @@ foreach ($k in $Env.Keys) { $psi.EnvironmentVariables[[string]$k] = [string]$Env
 $mode = 'real'
 if ($Live -ne '') { $mode = "live $Live" }
 if ($Big) { $mode = 'demo-big' } elseif ($Demo) { $mode = 'demo' }
+if ($Visible) { $mode = "$mode (visible)" }
 
 function Get-Mem([int]$procId) {
     # WMI class names are not localised (Get-Counter paths are).

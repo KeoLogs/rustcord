@@ -87,8 +87,15 @@ fn main() -> eframe::Result {
     // Test launches: never show or take focus before minimising (app.rs
     // minimises on the first frame).
     let start_minimized = storage::start_minimized_from_env();
+    let start_offscreen = storage::start_offscreen_from_env();
+    let mut viewport = eframe::egui::ViewportBuilder::default();
+    if start_offscreen {
+        viewport = viewport
+            .with_position([-20_000.0, -20_000.0])
+            .with_active(false);
+    }
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
+        viewport: viewport
             .with_visible(!start_minimized)
             .with_active(!start_minimized)
             .with_title("RustCord")
@@ -108,6 +115,7 @@ fn main() -> eframe::Result {
         // Demo screenshot runs resize the window; don't let them overwrite
         // the user's saved window size or egui memory.
         persist_window: !start_minimized
+            && !start_offscreen
             && !(demo
                 && (std::env::var("RUSTCORD_DEMO_OPEN").is_ok()
                     || std::env::var("RUSTCORD_DEMO_SHOT").is_ok())),

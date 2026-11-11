@@ -30,6 +30,14 @@ pub fn start_minimized_from_env() -> bool {
     std::env::var("RUSTCORD_START_MINIMIZED").is_ok_and(|v| v.trim() == "1")
 }
 
+/// `RUSTCORD_START_OFFSCREEN=1` (memprobe): the window opens far off
+/// screen without taking focus. Unlike a minimised window it still runs
+/// its UI and paints (eframe skips both while minimised), so memory and
+/// frame-time numbers are real. The saved window state is never touched.
+pub fn start_offscreen_from_env() -> bool {
+    std::env::var("RUSTCORD_START_OFFSCREEN").is_ok_and(|v| v.trim() == "1")
+}
+
 /// True when `RUSTCORD_DEMO` asks for the offline demo.
 pub fn demo_from_env() -> bool {
     is_demo_value(std::env::var("RUSTCORD_DEMO").ok().as_deref())
