@@ -616,6 +616,9 @@ pub struct HostState {
     pub toggle_left: bool,
     /// The minimum window size last sent to the OS ([`keep_window_min`]).
     pub min_window: Option<[f32; 2]>,
+    /// Last frame's fitted sizes, to redirect divider drags to the chat
+    /// (`tile_fit::fit_with`).
+    pub fit_memory: crate::tile_fit::FitMemory,
 }
 
 /// Keep the window's minimum inner size at what the layout needs: every

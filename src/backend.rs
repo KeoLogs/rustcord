@@ -163,6 +163,49 @@ pub fn spawn(
     });
 }
 
+/// Saved-account recovery (`accounts::missing_accounts`): for each stored
+/// `(user id, token)`, ask Discord who the token belongs to (`GET
+/// users/@me`, read-only) on a short-lived backend thread, and send back
+/// the account's metadata when it matches that id. Bad or expired tokens
+/// and network errors are skipped quietly (nothing is logged; the token is
+/// never formatted). The receiver disconnects when every lookup is done.
+pub fn spawn_account_lookup(
+    lookups: Vec<(String, crate::accounts::Token)>,
+    egui_ctx: eframe::egui::Context,
+) -> std::sync::mpsc::Receiver<crate::accounts::SavedAccount> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        let ctx = egui_ctx.clone();
+        rt.block_on(async move {
+            for (id, token) in lookups.into_iter().take(crate::accounts::MAX_ACCOUNTS) {
+                let Ok(api) = Api::new(token.expose().to_string()) else {
+                    continue;
+                };
+                let Ok(Ok(me)) = tokio::time::timeout(Duration::from_secs(15), api.me()).await
+                else {
+                    continue;
+                };
+                if me.id == id
+                    && tx
+                        .send(crate::accounts::SavedAccount::from_user(&me))
+                        .is_err()
+                {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+        });
+        egui_ctx.request_repaint();
+    });
+    rx
+}
+
 /// Repaints the window a session belongs to (from any thread).
 #[derive(Clone)]
 struct Repaint {

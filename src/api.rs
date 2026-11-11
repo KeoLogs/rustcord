@@ -379,6 +379,24 @@ impl Api {
         Ok(Self::check(resp, "Loading profile").await?.json().await?)
     }
 
+    /// The logged-in user (`GET users/@me`). Read-only; used to rebuild a
+    /// saved account's name and avatar from its stored token.
+    pub async fn me(&self) -> Result<User> {
+        let resp = self
+            .send(
+                self.http
+                    .get(format!("{API_BASE}/users/@me"))
+                    .header("Authorization", &self.auth),
+            )
+            .await
+            .context("user request failed")?;
+        let body: Value = Self::check(resp, "Loading your account")
+            .await?
+            .json()
+            .await?;
+        Ok(User::from_json(&body))
+    }
+
     /// My note on a user. 404 means there's no note.
     pub async fn note(&self, user_id: &str) -> Result<String> {
         let resp = self
