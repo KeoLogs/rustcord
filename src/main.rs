@@ -33,6 +33,8 @@ mod paste;
 mod perms;
 mod pins;
 mod presence;
+mod presets;
+mod presets_page;
 mod profile;
 mod qr_login;
 mod quick_switcher;

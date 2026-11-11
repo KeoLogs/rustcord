@@ -490,6 +490,15 @@ async fn run(
                 ToBackend::PickTheme { folder } => Ok(Some(ToUi::ThemePicked(
                     crate::themes::pick_import_source(folder).await,
                 ))),
+                // --- presets --- (local files only)
+                ToBackend::PickPreset => {
+                    Ok(crate::presets::pick_file().await.map(ToUi::PresetFile))
+                }
+                ToBackend::ExportPreset { file_name, text } => {
+                    Ok(crate::presets::export_file(&file_name, text)
+                        .await
+                        .map(ToUi::PresetFile))
+                }
                 // --- onboarding --- (user accounts; writes only from clicks)
                 ToBackend::JoinInvite { code } if is_bot => Ok(Some(ToUi::InviteJoined {
                     code,

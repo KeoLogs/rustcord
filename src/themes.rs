@@ -183,6 +183,66 @@ impl ThemeStore {
         res
     }
 
+    /// Is a theme folder with this id there? (Doesn't need the module on.)
+    pub fn is_installed(&self, id: &str) -> bool {
+        valid_id(id)
+            && self
+                .dir
+                .as_deref()
+                .is_some_and(|d| d.join(id).join(THEME_FILE).is_file())
+    }
+
+    /// The installed theme's `.rctheme` text (for presets / theme code).
+    pub fn theme_text(&self, id: &str) -> Option<String> {
+        if !self.enabled || !valid_id(id) {
+            return None;
+        }
+        let bytes = read_capped(
+            &self.dir.as_deref()?.join(id).join(THEME_FILE),
+            MAX_THEME_FILE,
+        )
+        .ok()?;
+        String::from_utf8(bytes).ok()
+    }
+
+    /// Install a theme from its `.rctheme` text (pasted theme code or a
+    /// preset's theme), unless an installed theme has exactly this text;
+    /// returns its id. Themes that need a background image are refused.
+    /// Works with the module off too (the user's explicit action; a preset
+    /// may turn the module on), but the list is only read while it's on.
+    pub fn install_text(&mut self, text: &str) -> Result<String> {
+        crate::presets::theme_text_ok(text)?;
+        let dir = self
+            .dir
+            .as_deref()
+            .ok_or_else(|| anyhow!("no data folder on this system"))?;
+        // Same text already installed? (Bounded: at most MAX_THEMES folders.)
+        if let Ok(read) = fs::read_dir(dir) {
+            for e in read.flatten().take(MAX_THEMES) {
+                let Some(id) = e.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
+                if valid_id(&id)
+                    && read_capped(&e.path().join(THEME_FILE), MAX_THEME_FILE)
+                        .is_ok_and(|b| b == text.as_bytes())
+                {
+                    return Ok(id);
+                }
+            }
+        }
+        let def = parse_theme(text)?;
+        let id = install(
+            dir,
+            Bundle {
+                theme_bytes: text.as_bytes().to_vec(),
+                def,
+                image: None,
+            },
+        )?;
+        self.refresh();
+        Ok(id)
+    }
+
     /// Read a theme and its image (file I/O + decoding; can run on any thread).
     pub fn load(&self, id: &str) -> Result<LoadedTheme> {
         if !self.enabled {
@@ -253,7 +313,7 @@ pub fn slug(name: &str) -> String {
 }
 
 /// Ids are folder names we made: `[a-z0-9-]`, no dots or separators.
-fn valid_id(id: &str) -> bool {
+pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id

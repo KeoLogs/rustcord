@@ -83,6 +83,8 @@ pub struct RustCordApp {
     applied: Option<f32>,
     /// Installed custom themes (nothing read while the module is off).
     theme_store: crate::themes::ThemeStore,
+    /// Settings → Presets folder (read only while that page is open).
+    preset_store: crate::presets::PresetStore,
     /// The theme the UI draws with.
     active_theme: crate::themes::ActiveTheme,
     /// (custom id, module on) the active theme was built for.
@@ -184,10 +186,21 @@ impl RustCordApp {
             crate::themes::default_dir(demo)
         };
         let theme_store = crate::themes::ThemeStore::new(themes_dir, config.modules.custom_themes);
+        let presets_dir = if demo_shot {
+            Some(std::env::temp_dir().join("rustcord-demo-presets"))
+        } else {
+            crate::presets::default_dir(demo)
+        };
+        // The demo gets two example presets so the page has cards offline.
+        if demo && let Some(d) = &presets_dir {
+            crate::presets::seed_demo(d);
+        }
+        let preset_store = crate::presets::PresetStore::new(presets_dir);
         let active_theme = crate::themes::ActiveTheme::default_theme();
         let mut app = Self {
             screen: Screen::Login(LoginForm::new(config.remember_login, None)),
             theme_store,
+            preset_store,
             active_theme,
             theme_key: None,
             config,
@@ -604,6 +617,7 @@ impl RustCordApp {
         let section = match view {
             "modules" => Some(crate::settings::Section::Modules),
             "themes" => Some(crate::settings::Section::Themes),
+            "presets" => Some(crate::settings::Section::Presets),
             "layout" => Some(crate::settings::Section::Layout),
             _ => None,
         };
@@ -856,6 +870,15 @@ impl eframe::App for RustCordApp {
             // Small file copies; the picker itself ran in the backend.
             let _ = self.theme_store.import(&path);
         }
+        if let Some(e) = state.preset_file.take()
+            && self.config.modules.presets
+        {
+            self.preset_store.file_event(e);
+        }
+        // Presets are only kept in memory while their page is open.
+        if self.settings.is_none() || !self.config.modules.presets {
+            self.preset_store.close();
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -996,10 +1019,21 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
             state.me.as_ref(),
             state.user_settings(),
             &pal,
-            &mut app.theme_store,
+            &mut crate::settings::Stores {
+                themes: &mut app.theme_store,
+                presets: &mut app.preset_store,
+                tree: &app.tree,
+            },
         );
         match action {
-            Some(SettingsAction::Save { config, sync }) => {
+            Some(SettingsAction::Save {
+                config,
+                sync,
+                layout,
+            }) => {
+                if let Some(tree) = layout {
+                    app.tree = *tree;
+                }
                 let reconnect = config.client_identity != app.config.client_identity;
                 let forget_logins = app.config.remember_login && !config.remember_login;
                 let mut config = *config;
@@ -1060,6 +1094,12 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
             Some(SettingsAction::ImportLayout(tree)) => app.tree = *tree,
             Some(SettingsAction::PickTheme { folder }) => {
                 let _ = state.tx.send(ToBackend::PickTheme { folder });
+            }
+            Some(SettingsAction::PickPreset) => {
+                let _ = state.tx.send(ToBackend::PickPreset);
+            }
+            Some(SettingsAction::ExportPreset { file_name, text }) => {
+                let _ = state.tx.send(ToBackend::ExportPreset { file_name, text });
             }
             Some(SettingsAction::LogOut) => app.log_out(None, true),
             None => {}
@@ -1780,6 +1820,8 @@ pub struct State {
     /// A theme file / folder picked in Settings → Themes, for the app to
     /// import.
     picked_theme: Option<PathBuf>,
+    /// Settings → Presets file picker / export result (the app owns the store).
+    preset_file: Option<crate::presets::FileEvent>,
     last_typing_sent: Option<(String, Instant)>,
     confirm_delete: Option<(String, String)>,
 
@@ -1929,6 +1971,7 @@ impl State {
             threads: None,
             invites: None,
             picked_theme: None,
+            preset_file: None,
             last_typing_sent: None,
             confirm_delete: None,
             reads: ReadState::default(),
@@ -2452,6 +2495,7 @@ impl State {
             }
             // --- themes --- (the app imports it: it owns the ThemeStore)
             ToUi::ThemePicked(path) => self.picked_theme = path,
+            ToUi::PresetFile(e) => self.preset_file = Some(e),
             // --- onboarding ---
             ToUi::InviteResolved { code, result } => {
                 if let Some(s) = &mut self.invites {
