@@ -59,7 +59,7 @@ pub fn sample() -> Option<ProcMem> {
             ex.cb,
         )
     };
-    (ok != 0).then(|| ProcMem {
+    (ok != 0).then_some(ProcMem {
         private_ws: None,
         working_set: ex.WorkingSetSize as u64,
         private_bytes: Some(ex.PrivateUsage as u64),

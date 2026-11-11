@@ -96,19 +96,19 @@ pub fn user(u: u64) -> Value {
         "id": id.to_string(),
         "username": name,
         "global_name": format!("{} {}", word(u + 3), u),
-        "avatar": if u % 9 == 0 { Value::Null } else if u % 5 == 0 {
+        "avatar": if u.is_multiple_of(9) { Value::Null } else if u.is_multiple_of(5) {
             json!(format!("a_{}", hash(id)))
         } else { json!(hash(id)) },
         "discriminator": "0",
         "public_flags": (u % 4) * 64,
         "flags": 0,
-        "bot": u % 97 == 0,
+        "bot": u.is_multiple_of(97),
         "banner": Value::Null,
         "accent_color": Value::Null,
-        "avatar_decoration_data": if u % 6 == 0 {
+        "avatar_decoration_data": if u.is_multiple_of(6) {
             json!({ "asset": format!("a_{}", hash(id + 1)), "sku_id": (id + 11).to_string(), "expires_at": Value::Null })
         } else { Value::Null },
-        "primary_guild": if u % 4 == 0 {
+        "primary_guild": if u.is_multiple_of(4) {
             json!({ "identity_guild_id": guild_id((u % GUILDS as u64) as usize).to_string(),
                     "identity_enabled": true, "tag": "RUST", "badge": hash(id + 2) })
         } else { Value::Null },
@@ -162,7 +162,7 @@ fn channel(g: usize, c: usize) -> Value {
         });
     }
     let parent = channel_id(g, c % CATEGORIES_PER_GUILD);
-    let voice = c % 6 == 0;
+    let voice = c.is_multiple_of(6);
     let mut v = json!({
         "id": id.to_string(),
         "type": if voice { 2 } else { 0 },
@@ -171,7 +171,7 @@ fn channel(g: usize, c: usize) -> Value {
         "parent_id": parent.to_string(),
         "flags": 0,
         "permission_overwrites": overwrites(g, c),
-        "rate_limit_per_user": if c % 5 == 0 { 10 } else { 0 },
+        "rate_limit_per_user": if c.is_multiple_of(5) { 10 } else { 0 },
         "nsfw": false,
         "icon_emoji": { "id": Value::Null, "name": "💬" },
         "theme_color": Value::Null,
@@ -203,7 +203,7 @@ pub fn last_message_id(channel: u64) -> u64 {
 fn role(g: usize, r: usize) -> Value {
     let gid = guild_id(g);
     let id = if r == 0 { gid } else { role_id(g, r) };
-    let color = if r % 3 == 0 {
+    let color = if r.is_multiple_of(3) {
         0
     } else {
         (r as u64 * 0x13_57_9B) & 0xFF_FF_FF
@@ -220,7 +220,7 @@ fn role(g: usize, r: usize) -> Value {
         "position": ROLES_PER_GUILD - r,
         "permissions": if r == 0 { "2248473465835073".to_string() } else { ((r as u64) << 10).to_string() },
         "managed": r % 20 == 19,
-        "mentionable": r % 4 == 0,
+        "mentionable": r.is_multiple_of(4),
         "flags": 0,
         "tags": if r % 20 == 19 { json!({ "bot_id": user_id(r as u64).to_string() }) } else { json!({}) },
     })
@@ -233,7 +233,7 @@ fn emoji(g: usize, e: usize) -> Value {
         "roles": [],
         "require_colons": true,
         "managed": false,
-        "animated": e % 7 == 0,
+        "animated": e.is_multiple_of(7),
         "available": true,
     })
 }
@@ -294,14 +294,14 @@ fn guild(g: usize) -> Value {
         "version": 1_700_000_000_000u64 + g as u64,
         "joined_at": "2024-03-10T18:00:00.000000+00:00",
         "lazy": true,
-        "large": g % 3 == 0,
+        "large": g.is_multiple_of(3),
         "member_count": 500 + g * 997,
         "premium_subscription_count": g % 30,
         "properties": {
             "id": id.to_string(),
             "name": format!("{} {} #{g}", word(g as u64).to_uppercase(), word(g as u64 + 9)),
-            "icon": if g % 8 == 0 { Value::Null } else { json!(hash(id)) },
-            "banner": if g % 3 == 0 { json!(hash(id + 1)) } else { Value::Null },
+            "icon": if g.is_multiple_of(8) { Value::Null } else { json!(hash(id)) },
+            "banner": if g.is_multiple_of(3) { json!(hash(id + 1)) } else { Value::Null },
             "splash": Value::Null,
             "discovery_splash": Value::Null,
             "description": format!("A synthetic community about {} and {}.", word(g as u64), word(g as u64 + 4)),
@@ -571,7 +571,7 @@ pub fn supplemental_payload(extra_guilds: &[&str]) -> Value {
             "user_id": user_id(u).to_string(),
             "status": status,
             "client_status": { "desktop": status },
-            "activities": if u % 3 == 0 { json!([{
+            "activities": if u.is_multiple_of(3) { json!([{
                 "type": 0, "name": format!("{} Simulator", word(u)), "id": hash(u),
                 "created_at": 1_700_000_000_000u64, "timestamps": { "start": 1_700_000_000_000u64 },
                 "application_id": (u * 13).to_string(),
@@ -582,7 +582,7 @@ pub fn supplemental_payload(extra_guilds: &[&str]) -> Value {
         json!({
             "user_id": user_id(u).to_string(),
             "roles": [role_id(g, (u as usize) % ROLES_PER_GUILD).to_string()],
-            "nick": if u % 5 == 0 { json!(format!("{} nick", word(u))) } else { Value::Null },
+            "nick": if u.is_multiple_of(5) { json!(format!("{} nick", word(u))) } else { Value::Null },
             "avatar": Value::Null, "joined_at": "2024-05-01T00:00:00.000000+00:00",
             "premium_since": Value::Null, "deaf": false, "mute": false, "pending": false, "flags": 0,
         })
