@@ -69,8 +69,75 @@ fn load(r: &Request) -> Value {
             "rules_channel_id": "200", "public_updates_channel_id": "203",
             "preferred_locale": "en-GB", "features": ["COMMUNITY"],
         }),
+        Kind::LoadRoles => json!([
+            { "id": r.guild_id, "name": "@everyone", "color": 0, "position": 0,
+              "permissions": "104324673" },
+            { "id": "500", "name": "Admin", "color": 0xf1c40f, "position": 6, "hoist": true,
+              "permissions": "8" },
+            { "id": "505", "name": "Manager", "color": 0, "position": 5,
+              "permissions": MANAGER_PERMISSIONS.to_string() },
+            { "id": "501", "name": "Moderators", "color": 0x3498db, "position": 4, "hoist": true,
+              "mentionable": true, "permissions": "8192" },
+            { "id": "502", "name": "Bots", "color": 0x9b59b6, "position": 3, "hoist": true,
+              "managed": true, "permissions": "0" },
+            { "id": "503", "name": "Contributor", "color": 0x2ecc71, "position": 2,
+              "permissions": "8192" },
+            { "id": "504", "name": "Rustacean", "color": 0xe67e22, "position": 1,
+              "permissions": "0" },
+        ]),
+        Kind::RoleMemberSearch => members(&r.path),
         _ => Value::Null,
     }
+}
+
+/// Demo members; `path` may carry a `query=` to filter by.
+pub fn members(path: &str) -> Value {
+    let query = path
+        .split_once("query=")
+        .map(|(_, q)| q.split('&').next().unwrap_or("").replace("%20", " "))
+        .unwrap_or_default()
+        .to_lowercase();
+    let all = [
+        ("460000000000000001", "you", "You", "", vec!["503", "505"]),
+        (
+            "300000000000000002",
+            "sam",
+            "Sam",
+            "Sam (owner)",
+            vec!["500"],
+        ),
+        ("520000000000000003", "alex", "Alex", "", vec!["501", "503"]),
+        ("610000000000000004", "maya", "Maya", "", vec!["503", "504"]),
+        ("390000000000000007", "olly", "Olly", "", vec!["503"]),
+        ("950000000000000010", "troll", "xX_Troll_Xx", "", vec![]),
+        (
+            "700000000000000020",
+            "helper",
+            "Helper Bot",
+            "",
+            vec!["502"],
+        ),
+    ];
+    Value::Array(
+        all.iter()
+            .filter(|(_, user, global, nick, _)| {
+                query.is_empty()
+                    || user.contains(&query)
+                    || global.to_lowercase().contains(&query)
+                    || nick.to_lowercase().contains(&query)
+            })
+            .map(|(id, user, global, nick, roles)| {
+                json!({
+                    "user": { "id": id, "username": user, "global_name": global,
+                              "bot": *user == "helper" },
+                    "nick": if nick.is_empty() { Value::Null } else { json!(nick) },
+                    "roles": roles,
+                    "joined_at": "2025-03-14T09:30:00+00:00",
+                    "communication_disabled_until": Value::Null,
+                })
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]

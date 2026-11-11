@@ -28,6 +28,7 @@ use crate::types::Guild;
 
 pub mod demo;
 pub mod overview;
+pub mod roles;
 pub mod ui;
 
 /// Most rows any admin list keeps (audit log pages, members found, bans…).
@@ -48,6 +49,14 @@ pub enum Method {
 pub enum Kind {
     LoadGuild,
     SaveGuild,
+    LoadRoles,
+    CreateRole,
+    SaveRole,
+    DeleteRole,
+    MoveRoles,
+    RoleMemberSearch,
+    AddMemberRole,
+    RemoveMemberRole,
 }
 
 impl Kind {
@@ -56,12 +65,28 @@ impl Kind {
         match self {
             Kind::LoadGuild => "Loading the server settings",
             Kind::SaveGuild => "Saving the server settings",
+            Kind::LoadRoles => "Loading roles",
+            Kind::CreateRole => "Creating the role",
+            Kind::SaveRole => "Saving the role",
+            Kind::DeleteRole => "Deleting the role",
+            Kind::MoveRoles => "Reordering roles",
+            Kind::RoleMemberSearch => "Searching members",
+            Kind::AddMemberRole => "Adding the role",
+            Kind::RemoveMemberRole => "Removing the role",
         }
     }
 
     fn tab(self) -> Tab {
         match self {
             Kind::LoadGuild | Kind::SaveGuild => Tab::Overview,
+            Kind::LoadRoles
+            | Kind::CreateRole
+            | Kind::SaveRole
+            | Kind::DeleteRole
+            | Kind::MoveRoles
+            | Kind::RoleMemberSearch
+            | Kind::AddMemberRole
+            | Kind::RemoveMemberRole => Tab::Roles,
         }
     }
 }
@@ -155,6 +180,7 @@ impl std::fmt::Debug for Response {
 pub enum PickSlot {
     Icon,
     Banner,
+    RoleIcon,
 }
 
 /// A picked image, read by the backend.
@@ -285,21 +311,24 @@ pub fn id_or_null(id: &str) -> Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Overview,
+    Roles,
 }
 
 /// Sidebar groups, in order.
-const NAV: &[(&str, &[Tab])] = &[("Server", &[Tab::Overview])];
+const NAV: &[(&str, &[Tab])] = &[("Server", &[Tab::Overview, Tab::Roles])];
 
 impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
+            Tab::Roles => "Roles",
         }
     }
 
     fn icon(self) -> &'static str {
         match self {
             Tab::Overview => icons::GEAR,
+            Tab::Roles => icons::ID,
         }
     }
 
@@ -310,6 +339,7 @@ impl Tab {
         let any = |bits: u64| perms & bits != 0;
         match self {
             Tab::Overview => any(perms::MANAGE_GUILD),
+            Tab::Roles => any(perms::MANAGE_ROLES),
         }
     }
 
@@ -510,6 +540,7 @@ pub struct AdminPage {
     notice: Option<(String, bool)>,
     confirm: Option<Confirm>,
     overview: overview::State,
+    roles: roles::State,
 }
 
 impl AdminPage {
@@ -524,6 +555,7 @@ impl AdminPage {
             notice: None,
             confirm: None,
             overview: Default::default(),
+            roles: Default::default(),
         };
         let reqs = page.select(tab);
         (page, reqs)
@@ -547,6 +579,7 @@ impl AdminPage {
         let g = &self.guild_id;
         match tab {
             Tab::Overview => vec![overview::load(g)],
+            Tab::Roles => vec![roles::load(g)],
         }
     }
 
@@ -575,6 +608,7 @@ impl AdminPage {
         };
         match r.kind.tab() {
             Tab::Overview => self.overview.on_response(r.kind, &r.key, &v),
+            Tab::Roles => self.roles.on_response(r.kind, &r.key, &v),
         }
     }
 
@@ -583,6 +617,7 @@ impl AdminPage {
         let p = Arc::new(p);
         match p.slot {
             PickSlot::Icon | PickSlot::Banner => self.overview.on_picked(p),
+            PickSlot::RoleIcon => self.roles.on_picked(p),
         }
     }
 
@@ -731,6 +766,7 @@ impl AdminPage {
                         let before = out.send.len();
                         match self.tab {
                             Tab::Overview => self.overview.ui(ui, cx, &mut out),
+                            Tab::Roles => self.roles.ui(ui, cx, &mut out),
                         }
                         self.busy += (out.send.len() - before) as u32;
                         ui.add_space(48.0);

@@ -164,7 +164,12 @@ pub fn row<R>(
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| add(ui)).inner
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), 30.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                add,
+            )
+            .inner
         });
     let rect = inner.response.rect;
     let resp = ui.interact(
