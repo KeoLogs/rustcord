@@ -61,6 +61,12 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   is open; dropping the panel closes the socket and frees the QR texture.
   The token arrives as `ToUi::QrLogin(QrEvent::Token)` and takes the same
   path as a pasted one. The user always approves on their phone.
+- Presets: `src/presets.rs` (`.rcpreset` JSON: manifest + layout export +
+  theme id/name/`.rctheme` text + `Modules`; `deny_unknown_fields`, size caps,
+  codes `rcpreset1:` / `rctheme1:`; `PresetStore` reads `<data>/presets` only
+  while Settings → Presets is open) and `src/presets_page.rs`. Apply puts
+  theme + modules in the settings draft and the layout in
+  `SettingsAction::Save { layout }`. Never add account data to `Preset`.
 - `src/config.rs` is the saved `Config` incl. `Modules` (on/off optional
   features). A module that's off must do no work and load nothing. New
   optional features should be modules (add to `Modules` + `MODULES`).

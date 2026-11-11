@@ -6,6 +6,17 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## Unreleased
+
+- Your own presets (Settings → Presets, "Presets" module): save your layout,
+  theme and modules as a preset, apply it from its card (the card shows the
+  theme, a layout thumbnail and how many modules change; Save Changes keeps
+  it), delete with a confirm, import / export `.rcpreset` files, copy a
+  preset or theme as code, and paste preset or theme code to save it as a
+  preset or a theme. Presets never contain account data. The demo has two
+  example presets.
+- Linux builds no longer warn about the Windows-only taskbar badge code.
+
 ## 0.6.1: Composer and user panel match the blocky look
 - The message box has no bubble any more: one flat row with a plain +,
   the message field, and GIF and emoji icons on the right.
