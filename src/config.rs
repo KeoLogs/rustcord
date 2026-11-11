@@ -101,6 +101,13 @@ pub struct Config {
     pub favourite_gifs: Vec<crate::gif_picker::Gif>,
     /// Disk image cache size in MB (`image_cache.rs`); 0 turns it off.
     pub image_cache_mb: u32,
+    /// Play a sound with each notification (Notifications module).
+    pub notification_sound: bool,
+    /// The user's own sound file (wav / ogg / mp3, 1 MB at most) instead of
+    /// RustCord's ping.
+    pub notification_sound_file: Option<std::path::PathBuf>,
+    /// Notification sound volume, 0-100.
+    pub notification_volume: u8,
     /// Ask GitHub once a day whether a newer RustCord exists
     /// (`update_check.rs`). Never downloads anything.
     pub check_for_updates: bool,
@@ -146,6 +153,9 @@ impl Default for Config {
             skin_tone: 0,
             favourite_gifs: Vec::new(),
             image_cache_mb: crate::image_cache::DEFAULT_MB,
+            notification_sound: true,
+            notification_sound_file: None,
+            notification_volume: crate::sound::DEFAULT_VOLUME,
             check_for_updates: true,
             last_update_check: 0,
             latest_release: None,

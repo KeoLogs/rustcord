@@ -69,6 +69,13 @@ pub enum SettingsAction {
     },
     /// Settings → Presets → Import: open the file picker (backend).
     PickPreset,
+    /// Settings → Notifications → Browse…: pick a custom sound (backend).
+    PickSound,
+    /// Settings → Notifications → Test: play the sound as set in the draft.
+    TestSound {
+        custom: Option<std::path::PathBuf>,
+        volume: u8,
+    },
     /// Settings → Presets → Export: save dialog + write (backend).
     ExportPreset {
         file_name: String,
@@ -162,6 +169,15 @@ impl SettingsPage {
     }
 
     /// Unsaved changes?
+    /// The "Browse…" dialog picked a custom notification sound: check it and
+    /// put it in the draft (saved with Save Changes like everything else).
+    pub fn set_sound_file(&mut self, path: std::path::PathBuf) -> Result<(), String> {
+        let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        crate::sound::check_custom(&path, len)?;
+        self.draft.notification_sound_file = Some(path);
+        Ok(())
+    }
+
     pub fn dirty(&self) -> bool {
         self.draft != self.base || !self.synced.is_empty() || self.pending_layout.is_some()
     }
@@ -639,7 +655,12 @@ impl SettingsPage {
                 }
             }
             Section::Chat => chat(ui, config, pal),
-            Section::Notifications => notifications(ui, config, pal),
+            Section::Notifications => {
+                notifications(ui, config, pal);
+                if config.modules.notifications {
+                    action = sound_settings(ui, config, pal).or(action);
+                }
+            }
             Section::Privacy => {
                 privacy_synced(ui, synced, &mut self.synced, pal);
                 ui.add_space(12.0);
@@ -1298,6 +1319,65 @@ fn notifications(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) {
         pal,
         "Notification levels and mutes come from your Discord account (set them in          the official client for now). Bot accounts only notify on mentions and DMs.          Recent mentions are listed under the bell in the chat header.",
     );
+}
+
+/// Notification sound: on/off, volume, a custom file and a Test button.
+fn sound_settings(ui: &mut egui::Ui, config: &mut Config, pal: &Palette) -> Option<SettingsAction> {
+    let mut action = None;
+    ui.add_space(12.0);
+    label(ui, pal, "SOUND");
+    switch_row(
+        ui,
+        &mut config.notification_sound,
+        "Play a sound",
+        "A short ping with each notification. Off = no audio is loaded at all.",
+        pal,
+    );
+    if !config.notification_sound {
+        return None;
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(icons::SPEAKER).color(pal.muted));
+        ui.add(egui::Slider::new(&mut config.notification_volume, 0..=100).suffix("%"));
+        if ui
+            .button(icons::label(icons::PLAY, "Test"))
+            .on_hover_text("Play the sound once")
+            .clicked()
+        {
+            action = Some(SettingsAction::TestSound {
+                custom: config.notification_sound_file.clone(),
+                volume: config.notification_volume,
+            });
+        }
+    });
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        let name = config
+            .notification_sound_file
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        ui.label(
+            RichText::new(name.as_deref().unwrap_or("RustCord ping (built in)")).color(pal.strong),
+        );
+        if ui.button(icons::label(icons::FOLDER, "Browse…")).clicked() {
+            action = Some(SettingsAction::PickSound);
+        }
+        if name.is_some()
+            && ui
+                .button(icons::label(icons::RESET, "Use the built-in ping"))
+                .clicked()
+        {
+            config.notification_sound_file = None;
+        }
+    });
+    hint(
+        ui,
+        pal,
+        "Your own sound: a .wav, .ogg or .mp3 file, 1 MB at most. It stays on this PC.",
+    );
+    action
 }
 
 fn label(ui: &mut egui::Ui, pal: &Palette, text: &str) {

@@ -108,6 +108,9 @@ pub const INFO: &str = "\u{E2CE}";
 // Settings / misc
 pub const SIGN_OUT: &str = "\u{E42A}";
 pub const RESET: &str = "\u{E038}";
+pub const PLAY: &str = "\u{E3D0}";
+pub const CODE: &str = "\u{E1BC}";
+pub const BUG: &str = "\u{E5F4}";
 pub const MOVE: &str = "\u{E0A4}";
 pub const LAYOUT: &str = "\u{E6D6}";
 pub const PUZZLE: &str = "\u{E596}";

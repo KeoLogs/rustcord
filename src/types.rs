@@ -1004,6 +1004,8 @@ pub enum ToUi {
     UserSettingsUpdate(serde_json::Value),
     /// A short message for the user (shown briefly), e.g. "Saved …".
     Notice(String),
+    /// The "Browse…" dialog for the custom notification sound closed.
+    SoundPicked(Option<PathBuf>),
     /// Update check: the latest release tag on GitHub (may not be newer).
     LatestRelease(String),
     /// A user action hit Discord's rate limit (it is not retried): show
@@ -1180,6 +1182,14 @@ pub enum ToBackend {
     /// Manual "Reconnect" in the connection status: drop the gateway
     /// connection and connect again now (resuming if possible).
     Reconnect,
+    /// Play the notification sound (`sound.rs`): the bundled ping, or the
+    /// user's file. Local only.
+    PlaySound {
+        custom: Option<PathBuf>,
+        volume: u8,
+    },
+    /// Open the file dialog for the custom notification sound.
+    PickSound,
     /// Ask GitHub for the latest RustCord release (at most once a day;
     /// `update_check.rs`). Nothing is downloaded.
     CheckUpdate,

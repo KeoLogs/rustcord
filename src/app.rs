@@ -964,6 +964,16 @@ impl eframe::App for RustCordApp {
         if let Some(session) = &mut self.session {
             save_account(&self.vault, &mut self.config, session, state);
         }
+        if let Some(path) = state.picked_sound.take() {
+            match &mut self.settings {
+                Some(page) => {
+                    if let Err(e) = page.set_sound_file(path) {
+                        state.toast = Some((e, Instant::now()));
+                    }
+                }
+                None => {}
+            }
+        }
         if let Some(path) = state.picked_theme.take() {
             // Small file copies; the picker itself ran in the backend.
             let _ = self.theme_store.import(&path);
@@ -1203,6 +1213,12 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
             }
             Some(SettingsAction::PickPreset) => {
                 let _ = state.tx.send(ToBackend::PickPreset);
+            }
+            Some(SettingsAction::PickSound) => {
+                let _ = state.tx.send(ToBackend::PickSound);
+            }
+            Some(SettingsAction::TestSound { custom, volume }) => {
+                let _ = state.tx.send(ToBackend::PlaySound { custom, volume });
             }
             Some(SettingsAction::ExportPreset { file_name, text }) => {
                 let _ = state.tx.send(ToBackend::ExportPreset { file_name, text });
@@ -1977,6 +1993,9 @@ pub struct State {
     /// A theme file / folder picked in Settings → Themes, for the app to
     /// import.
     picked_theme: Option<PathBuf>,
+    /// A custom notification sound picked in Settings (the app hands it to
+    /// the settings page).
+    picked_sound: Option<PathBuf>,
     /// Settings → Presets file picker / export result (the app owns the store).
     preset_file: Option<crate::presets::FileEvent>,
     last_typing_sent: Option<(String, Instant)>,
@@ -2139,6 +2158,7 @@ impl State {
             threads: None,
             invites: None,
             picked_theme: None,
+            picked_sound: None,
             preset_file: None,
             last_typing_sent: None,
             confirm_delete: None,
@@ -2775,6 +2795,7 @@ impl State {
             }
             // --- themes --- (the app imports it: it owns the ThemeStore)
             ToUi::ThemePicked(path) => self.picked_theme = path,
+            ToUi::SoundPicked(path) => self.picked_sound = path,
             ToUi::PresetFile(e) => self.preset_file = Some(e),
             // --- onboarding ---
             ToUi::InviteResolved { code, result } => {
@@ -4676,6 +4697,12 @@ impl State {
             let _ = self.tx.send(ToBackend::Notify {
                 title,
                 body: notify::preview(&plain, 200),
+            });
+        }
+        if config.notification_sound {
+            let _ = self.tx.send(ToBackend::PlaySound {
+                custom: config.notification_sound_file.clone(),
+                volume: config.notification_volume,
             });
         }
         if config.flash_taskbar && !focused {

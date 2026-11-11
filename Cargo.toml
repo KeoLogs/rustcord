@@ -44,6 +44,9 @@ tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"]
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 unicode-segmentation = "1.13.3"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+# Notification sound (sound.rs). The output device is only opened while a
+# sound plays; no recording, no extra formats.
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "wav", "vorbis", "mp3"] }
 
 # Ctrl+V with a file-only clipboard (paste.rs), the taskbar unread badge
 # (taskbar.rs: ITaskbarList3 overlay icon, HWND from eframe's raw window

@@ -7,6 +7,10 @@ Settings → About). Version x.y.z:
 - z: bug and issue fixes
 
 ## Unreleased
+- Notification sound: RustCord's own short ping plays with each
+  notification. Settings → Notifications has the on/off switch, a volume
+  slider, a Test button and "Browse…" for your own sound (wav, ogg or mp3,
+  1 MB at most). Audio is only loaded while a sound plays.
 - Update check: once a day at most, RustCord asks GitHub whether a newer
   release exists and shows a small "Update available" notice with
   "Open release page" and "Dismiss". Nothing is downloaded or installed.

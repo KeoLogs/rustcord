@@ -54,6 +54,7 @@ mod screening;
 mod search;
 mod settings;
 mod settings_proto;
+mod sound;
 mod status;
 mod storage;
 mod sysmsg;

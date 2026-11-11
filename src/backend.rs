@@ -762,6 +762,18 @@ async fn run(
                 }
                 // QR login runs before any session, in remote_auth.rs.
                 ToBackend::StartQrLogin | ToBackend::CancelQrLogin => Ok(None),
+                ToBackend::PlaySound { custom, volume } => {
+                    let played = tokio::task::spawn_blocking(move || {
+                        crate::sound::play(custom.as_deref(), volume)
+                    })
+                    .await;
+                    // A custom file that can't be used: say why (the ping
+                    // played instead).
+                    Ok(played.ok().and_then(Result::err).map(ToUi::Notice))
+                }
+                ToBackend::PickSound => {
+                    Ok(Some(ToUi::SoundPicked(crate::sound::pick_file().await)))
+                }
                 // GitHub only, with its own client (no Discord token).
                 ToBackend::CheckUpdate => Ok(crate::update_check::fetch_latest()
                     .await
@@ -818,6 +830,8 @@ fn read_only_ok(req: &ToBackend) -> bool {
             | ToBackend::CopyImage { .. }
             | ToBackend::Reconnect
             | ToBackend::CheckUpdate
+            | ToBackend::PlaySound { .. }
+            | ToBackend::PickSound
             | ToBackend::LoadPins { .. }
             | ToBackend::LoadGifs { .. }
             | ToBackend::LoadProfile { .. }
