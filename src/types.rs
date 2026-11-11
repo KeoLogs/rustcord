@@ -1192,6 +1192,9 @@ pub enum ToBackend {
     /// Manual "Reconnect" in the connection status: drop the gateway
     /// connection and connect again now (resuming if possible).
     Reconnect,
+    /// "Open folder" on the crash notice: show that local folder in the
+    /// file manager.
+    OpenCrashFolder(PathBuf),
     /// A click in the Notification Settings dialog: PATCH the user's own
     /// settings for this server (`notif_settings.rs`; user accounts).
     PatchGuildSettings {

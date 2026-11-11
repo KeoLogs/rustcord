@@ -781,6 +781,13 @@ async fn run(
                 ToBackend::StartQrLogin | ToBackend::CancelQrLogin => Ok(None),
                 // Handled before the spawn.
                 ToBackend::CancelSend { .. } => Ok(None),
+                ToBackend::OpenCrashFolder(report) => {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::crash_report::open_folder(&report)
+                    })
+                    .await;
+                    Ok(None)
+                }
                 // Bots have no notification settings.
                 ToBackend::PatchGuildSettings { .. } if is_bot => Ok(None),
                 ToBackend::PatchGuildSettings { guild_id, body } => {
@@ -922,6 +929,7 @@ fn read_only_ok(req: &ToBackend) -> bool {
             | ToBackend::CheckUpdate
             | ToBackend::PlaySound { .. }
             | ToBackend::PickSound
+            | ToBackend::OpenCrashFolder(_)
             | ToBackend::LoadPins { .. }
             | ToBackend::LoadGifs { .. }
             | ToBackend::LoadProfile { .. }

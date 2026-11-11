@@ -778,6 +778,9 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                     crate::notif_settings::parse_response(stored, &guild_id),
                 ));
             }
+            ToBackend::OpenCrashFolder(report) => {
+                tokio::task::spawn_blocking(move || crate::crash_report::open_folder(&report));
+            }
             // Only matters while an upload is running (handled there).
             ToBackend::CancelSend { .. } => {}
             ToBackend::PlaySound { custom, volume } => {

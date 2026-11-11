@@ -7,6 +7,11 @@ Settings → About). Version x.y.z:
 - z: bug and issue fixes
 
 ## Unreleased
+- Local crash log: if RustCord crashes, a short report (version, where,
+  the error) is written to its data folder with your token cut out. The
+  next start shows "RustCord closed unexpectedly last time" with
+  Copy report / Open folder / Dismiss. Nothing is ever uploaded; the five
+  newest reports are kept.
 - Mute and notification settings (Notifications module, user accounts):
   right-click a server or channel → "Notification Settings" to mute it
   (15 minutes to 24 hours, or until you turn it back on), unmute it, or

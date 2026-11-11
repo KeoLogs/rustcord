@@ -1440,6 +1440,8 @@ fn spawn_session(
 ) -> (Session, State) {
     let (ui_tx, ui_rx) = mpsc::channel();
     let (be_tx, be_rx) = tokio::sync::mpsc::unbounded_channel();
+    // A crash report must never contain this token.
+    crate::crash_report::register_secret(token.expose());
     let options = crate::backend::Options {
         bot_member_intents: config.bot_member_intents,
         identity,
@@ -8649,8 +8651,47 @@ impl State {
             )
     }
 
-    /// Bottom-right notice cards ("Update available"). Buttons only.
+    /// Bottom-right notice cards ("Update available", the crash report
+    /// from last time). Buttons only.
     fn corner_notices(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let mut slot = 0;
+        if let Some(report) = crate::crash_report::pending() {
+            match crate::notices::card(
+                ctx,
+                pal,
+                slot,
+                icons::BUG,
+                "RustCord closed unexpectedly last time",
+                "A crash report was saved on this PC (your token is never in it). \
+                 Nothing is sent anywhere.",
+                &[
+                    (icons::COPY, "Copy report"),
+                    (icons::FOLDER, "Open folder"),
+                    (icons::X, "Dismiss"),
+                ],
+            ) {
+                Some(0) => {
+                    match crate::crash_report::read(&report) {
+                        Some(text) => {
+                            ctx.copy_text(text);
+                            self.toast = Some(("Crash report copied".into(), Instant::now()));
+                        }
+                        None => {
+                            self.toast =
+                                Some(("Couldn't read the crash report".into(), Instant::now()));
+                        }
+                    }
+                    crate::crash_report::mark_seen(&report);
+                }
+                Some(1) => {
+                    crate::crash_report::mark_seen(&report);
+                    let _ = self.tx.send(ToBackend::OpenCrashFolder(report));
+                }
+                Some(_) => crate::crash_report::dismiss(),
+                None => {}
+            }
+            slot += 1;
+        }
         let current = env!("CARGO_PKG_VERSION");
         if let Some(tag) = crate::update_check::notice(
             config.check_for_updates,
@@ -8666,7 +8707,7 @@ impl State {
             match crate::notices::card(
                 ctx,
                 pal,
-                0,
+                slot,
                 icons::DOWNLOAD,
                 "Update available",
                 &text,
