@@ -25,6 +25,37 @@ pub fn app_id(demo: bool) -> &'static str {
     if demo { DEMO_APP_ID } else { APP_ID }
 }
 
+/// Env vars a demo started from the login screen must not inherit: a
+/// token, and the screenshot switches (those are for scripted runs only).
+const DEMO_STRIPPED_ENV: &[&str] = &[
+    "DISCORD_TOKEN",
+    "RUSTCORD_DEMO_OPEN",
+    "RUSTCORD_DEMO_SHOT",
+    "RUSTCORD_DEMO_SCALE",
+];
+
+/// The command that runs `exe` as an offline demo: `RUSTCORD_DEMO=1`, no
+/// token. A demo process uses [`DEMO_APP_ID`] storage and an in-memory
+/// credential store, so it can't read or write the real config, saved
+/// accounts, layout, window state or tokens.
+pub fn demo_command(exe: &std::path::Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.env("RUSTCORD_DEMO", "1");
+    for key in DEMO_STRIPPED_ENV {
+        cmd.env_remove(key);
+    }
+    cmd
+}
+
+/// "Try the offline demo" on the login screen: start this program again as
+/// a separate demo process (the caller then closes this window). The demo
+/// never runs inside a normal run, which keeps the real config, accounts
+/// and credential store in use.
+pub fn launch_demo() -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    demo_command(&exe).spawn().map(|_| ())
+}
+
 /// eframe's data folder for this run.
 pub fn data_dir(demo: bool) -> Option<PathBuf> {
     eframe::storage_dir(app_id(demo))
@@ -46,6 +77,27 @@ mod tests {
         assert!(!is_demo_value(Some("0")));
         assert!(!is_demo_value(Some("")));
         assert!(!is_demo_value(None));
+    }
+
+    #[test]
+    fn demo_command_is_a_demo_without_a_token() {
+        let cmd = demo_command(std::path::Path::new("rustcord"));
+        let envs: Vec<(String, Option<String>)> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(envs.contains(&("RUSTCORD_DEMO".into(), Some("1".into()))));
+        assert!(is_demo_value(Some("1")));
+        // The token and screenshot switches are removed, never passed on.
+        for key in DEMO_STRIPPED_ENV {
+            assert!(envs.contains(&((*key).into(), None)), "{key} not removed");
+        }
+        assert_eq!(cmd.get_args().count(), 0);
     }
 
     #[test]

@@ -18,10 +18,20 @@
 //!    chat absorbs the rest, and the shares always add up to the container,
 //!    so there are no gaps. Side panes therefore keep their width when the
 //!    window shrinks, and a divider the user drags is clamped next frame.
+//!    A container without the chat gives and takes space through the pane
+//!    nearest the chat (the channel list in `[rail | channels]`).
+//! 3. Divider drags ([`fit_with`] + [`FitMemory`]): egui_tiles moves a
+//!    divider by trading space between neighbours in one container, so
+//!    widening the server rail used to narrow the channel list next to it.
+//!    The pane on the far side of the chat keeps the drag, the panes
+//!    between it and the chat keep their size, and the chat absorbs the
+//!    change (up through the containers between them).
 //!
 //! Panes can sit in either orientation: the server rail and the user panel
 //! lay out as a row when docked as a strip, so their minimums are per axis.
 //! Everything here is pure (no egui UI) and tested; `layout.rs` calls it.
+
+use std::collections::HashMap;
 
 use eframe::egui::Rect;
 use egui_tiles::{Container, LinearDir, Tile, TileId, Tiles, Tree};
@@ -65,6 +75,40 @@ impl Axis {
             Axis::Y => r.height(),
         }
     }
+
+    fn index(self) -> usize {
+        match self {
+            Axis::X => 0,
+            Axis::Y => 1,
+        }
+    }
+}
+
+/// Which side of the chat a subtree sits on, along one axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    /// Left of (or above) the chat.
+    Before,
+    /// Right of (or below) the chat.
+    After,
+}
+
+/// Where a linear container sits relative to the chat, per axis: the side,
+/// and the same-axis containers (with their child on the way down) from
+/// the nearest one that holds the chat. A container without the chat grows
+/// through these when one of its panes is dragged wider.
+#[derive(Clone, Debug, Default)]
+struct Place {
+    side: [Option<Side>; 2],
+    path: [Vec<(TileId, TileId)>; 2],
+}
+
+/// Each linear container's fitted pixel sizes from the last frame, so
+/// [`fit_with`] can tell a divider drag (egui_tiles traded space between
+/// neighbours) from a window resize. One per window; small.
+#[derive(Clone, Debug, Default)]
+pub struct FitMemory {
+    sizes: HashMap<TileId, Vec<(TileId, f32)>>,
 }
 
 /// Min / max size of a pane along `axis` (logical points). Panes that can
@@ -282,15 +326,193 @@ pub fn allocate(
 
 /// Rewrite the shares of every linear container in `tree` (laid out in
 /// `rect`) as clamped pixel sizes. See the module docs.
+#[cfg(test)]
 pub fn fit(tree: &mut Tree<Pane>, rect: Rect, m: Metrics) {
-    if let Some(root) = tree.root
-        && tree.tiles.is_visible_in_layout(root)
-    {
-        fit_tile(&mut tree.tiles, root, rect, m, 0);
+    fit_with(tree, rect, m, &mut FitMemory::default());
+}
+
+/// [`fit`], plus divider drags since the last frame (`mem`) are redirected
+/// so the chat absorbs them (module docs, step 3).
+pub fn fit_with(tree: &mut Tree<Pane>, rect: Rect, m: Metrics, mem: &mut FitMemory) {
+    let Some(root) = tree.root.filter(|&r| tree.tiles.is_visible_in_layout(r)) else {
+        mem.sizes.clear();
+        return;
+    };
+    let mut places = HashMap::new();
+    place_walk(&tree.tiles, root, Place::default(), &mut places, 0);
+    redirect_drag(&mut tree.tiles, &places, m, mem);
+    let mut fitted = HashMap::new();
+    fit_tile(&mut tree.tiles, root, rect, m, &places, &mut fitted, 0);
+    mem.sizes = fitted;
+}
+
+/// Record every linear container's [`Place`] (top-down).
+fn place_walk(
+    tiles: &Tiles<Pane>,
+    id: TileId,
+    place: Place,
+    out: &mut HashMap<TileId, Place>,
+    depth: usize,
+) {
+    if depth > 32 {
+        return;
+    }
+    match tiles.get(id) {
+        Some(Tile::Container(Container::Tabs(tabs))) => {
+            if let Some(child) = shown_tab(tiles, tabs) {
+                place_walk(tiles, child, place, out, depth + 1);
+            }
+        }
+        Some(Tile::Container(Container::Linear(lin))) => {
+            let a = Axis::of(lin.dir).index();
+            let kids = visible_children(tiles, &lin.children);
+            let flex = kids
+                .iter()
+                .position(|&c| contains(tiles, c, Pane::Messages, 0));
+            for (k, &child) in kids.iter().enumerate() {
+                let mut p = place.clone();
+                match flex {
+                    Some(f) if k == f => {
+                        p.side[a] = None;
+                        p.path[a].clear();
+                    }
+                    Some(f) => {
+                        p.side[a] = Some(if k < f { Side::Before } else { Side::After });
+                        p.path[a] = vec![(id, child)];
+                    }
+                    None if p.side[a].is_some() => p.path[a].push((id, child)),
+                    None => {}
+                }
+                place_walk(tiles, child, p, out, depth + 1);
+            }
+            out.insert(id, place);
+        }
+        _ => {}
     }
 }
 
-fn fit_tile(tiles: &mut Tiles<Pane>, id: TileId, rect: Rect, m: Metrics, depth: usize) {
+/// The child that gives and takes space first: the chat's, else (in a
+/// container beside the chat) the one nearest the chat.
+fn absorber(tiles: &Tiles<Pane>, kids: &[TileId], side: Option<Side>) -> Option<usize> {
+    if let Some(f) = kids
+        .iter()
+        .position(|&c| contains(tiles, c, Pane::Messages, 0))
+    {
+        return Some(f);
+    }
+    match side? {
+        Side::Before => kids.len().checked_sub(1),
+        Side::After => (!kids.is_empty()).then_some(0),
+    }
+}
+
+/// A divider drag in one container: `prev` / `now` sizes of its children.
+/// Returns the new sizes, the change to pass up to the containers holding
+/// it (0 when the chat is in this container) and nothing for no drag.
+fn plan_drag(
+    prev: &[f32],
+    now: &[f32],
+    ranges: &[(f32, f32)],
+    flex: Option<usize>,
+    side: Option<Side>,
+) -> Option<(Vec<f32>, f32)> {
+    let n = prev.len();
+    let delta: Vec<f32> = now.iter().zip(prev).map(|(a, b)| a - b).collect();
+    if n < 2 || delta.iter().all(|d| d.abs() < 0.5) || delta.iter().sum::<f32>().abs() > 1.0 {
+        return None;
+    }
+    // How far each divider moved: the edge before the chat of a pane
+    // before it, the edge after the chat of a pane after it.
+    let before = |j: usize| delta[..=j].iter().sum::<f32>();
+    let after = |j: usize| delta[j..].iter().sum::<f32>();
+    let (lo, hi): (Vec<usize>, Vec<usize>) = match (flex, side) {
+        (Some(f), _) => ((0..f).collect(), (f + 1..n).collect()),
+        (None, Some(Side::Before)) => ((0..n - 1).collect(), Vec::new()),
+        (None, Some(Side::After)) => (Vec::new(), (1..n).collect()),
+        (None, None) => return None,
+    };
+    let moved = lo
+        .iter()
+        .map(|&j| (j, before(j)))
+        .chain(hi.iter().map(|&j| (j, after(j))))
+        .filter(|(_, d)| d.abs() >= 0.5)
+        .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))?;
+    let (j, d) = moved;
+    let (r_lo, r_hi) = ranges[j];
+    let size = (prev[j] + d).clamp(r_lo, r_hi.max(r_lo));
+    let grow = size - prev[j];
+    let mut out = prev.to_vec();
+    out[j] = size;
+    match flex {
+        Some(f) => {
+            out[f] = prev[f] - grow;
+            Some((out, 0.0))
+        }
+        None => Some((out, grow)),
+    }
+}
+
+/// Step 3 of the module docs: turn a divider drag since the last frame
+/// into "this pane changes, the chat absorbs it".
+fn redirect_drag(
+    tiles: &mut Tiles<Pane>,
+    places: &HashMap<TileId, Place>,
+    m: Metrics,
+    mem: &FitMemory,
+) {
+    let mut plan = None;
+    for (&id, prev) in &mem.sizes {
+        let Some(Tile::Container(Container::Linear(lin))) = tiles.get(id) else {
+            continue;
+        };
+        let kids = visible_children(tiles, &lin.children);
+        if kids.len() != prev.len() || kids.iter().zip(prev).any(|(k, p)| *k != p.0) {
+            continue;
+        }
+        let axis = Axis::of(lin.dir);
+        let now: Vec<f32> = kids.iter().map(|&c| lin.shares[c]).collect();
+        let before: Vec<f32> = prev.iter().map(|p| p.1).collect();
+        let ranges: Vec<(f32, f32)> = kids.iter().map(|&c| range(tiles, c, axis, m)).collect();
+        let flex = kids
+            .iter()
+            .position(|&c| contains(tiles, c, Pane::Messages, 0));
+        let place = places.get(&id).cloned().unwrap_or_default();
+        let side = place.side[axis.index()];
+        if let Some((sizes, grow)) = plan_drag(&before, &now, &ranges, flex, side) {
+            let path = place.path[axis.index()].clone();
+            // Beside the chat but no container to grow through: leave it.
+            if grow != 0.0 && path.is_empty() {
+                continue;
+            }
+            plan = Some((id, kids, sizes, grow, path));
+            break;
+        }
+    }
+    let Some((id, kids, sizes, grow, path)) = plan else {
+        return;
+    };
+    if let Some(Tile::Container(Container::Linear(lin))) = tiles.get_mut(id) {
+        for (&c, &s) in kids.iter().zip(&sizes) {
+            lin.shares.set_share(c, s.max(0.01));
+        }
+    }
+    for (container, child) in path {
+        if let Some(Tile::Container(Container::Linear(lin))) = tiles.get_mut(container) {
+            let s = lin.shares[child] + grow;
+            lin.shares.set_share(child, s.max(0.01));
+        }
+    }
+}
+
+fn fit_tile(
+    tiles: &mut Tiles<Pane>,
+    id: TileId,
+    rect: Rect,
+    m: Metrics,
+    places: &HashMap<TileId, Place>,
+    fitted: &mut HashMap<TileId, Vec<(TileId, f32)>>,
+    depth: usize,
+) {
     if depth > 32 {
         return;
     }
@@ -304,7 +526,7 @@ fn fit_tile(tiles: &mut Tiles<Pane>, id: TileId, rect: Rect, m: Metrics, depth: 
                 if tab_bar_shown(tabs) {
                     r.min.y = (r.min.y + m.tab_bar).min(r.max.y);
                 }
-                fit_tile(tiles, child, r, m, depth + 1);
+                fit_tile(tiles, child, r, m, places, fitted, depth + 1);
             }
             return;
         }
@@ -331,9 +553,8 @@ fn fit_tile(tiles: &mut Tiles<Pane>, id: TileId, rect: Rect, m: Metrics, depth: 
         _ => return,
     };
     let ranges: Vec<(f32, f32)> = kids.iter().map(|&c| range(tiles, c, axis, m)).collect();
-    let flex = kids
-        .iter()
-        .position(|&c| contains(tiles, c, Pane::Messages, 0));
+    let side = places.get(&id).and_then(|p| p.side[axis.index()]);
+    let flex = absorber(tiles, &kids, side);
     let mut shrink: Vec<usize> = (0..kids.len()).collect();
     shrink.sort_by_key(|&i| shrink_rank(tiles, kids[i]));
     let sizes = allocate(&current, &ranges, extent, flex, &shrink);
@@ -343,6 +564,13 @@ fn fit_tile(tiles: &mut Tiles<Pane>, id: TileId, rect: Rect, m: Metrics, depth: 
             lin.shares.set_share(c, s.max(0.01));
         }
     }
+    fitted.insert(
+        id,
+        kids.iter()
+            .zip(&sizes)
+            .map(|(&c, &s)| (c, s.max(0.01)))
+            .collect(),
+    );
     let mut pos = match axis {
         Axis::X => rect.left(),
         Axis::Y => rect.top(),
@@ -353,7 +581,7 @@ fn fit_tile(tiles: &mut Tiles<Pane>, id: TileId, rect: Rect, m: Metrics, depth: 
             Axis::Y => Rect::from_x_y_ranges(rect.x_range(), pos..=pos + s),
         };
         pos += s + m.gap;
-        fit_tile(tiles, c, r, m, depth + 1);
+        fit_tile(tiles, c, r, m, places, fitted, depth + 1);
     }
 }
 
@@ -987,6 +1215,119 @@ mod tests {
         restore(&mut t2, &folded);
         assert_eq!(t2.tiles.iter().count(), t.tiles.iter().count());
         assert!(t2.tiles.iter().all(|(id, _)| t2.tiles.is_visible(*id)));
+    }
+
+    /// Width of each pane in the fitted `tree`.
+    fn widths(tree: &Tree<Pane>, rect: Rect) -> Vec<(Pane, f32)> {
+        laid_out(tree, rect, M)
+            .0
+            .into_iter()
+            .map(|(p, r)| (p, r.width()))
+            .collect()
+    }
+
+    /// `pane`'s width in [`widths`].
+    fn w(widths: &[(Pane, f32)], pane: Pane) -> f32 {
+        widths.iter().find(|(p, _)| *p == pane).unwrap().1
+    }
+
+    /// The linear container holding `pane`'s tab, and that tab.
+    fn holder(tree: &Tree<Pane>, pane: Pane) -> (TileId, TileId) {
+        let tab = tree
+            .tiles
+            .iter()
+            .find_map(|(&id, t)| match t {
+                Tile::Container(Container::Tabs(tabs))
+                    if tabs.children.iter().any(
+                        |c| matches!(tree.tiles.get(*c), Some(Tile::Pane(p)) if *p == pane),
+                    ) =>
+                {
+                    Some(id)
+                }
+                _ => None,
+            })
+            .unwrap();
+        (parent_of(tree, tab), tab)
+    }
+
+    /// The linear container whose children include `id`.
+    fn parent_of(tree: &Tree<Pane>, id: TileId) -> TileId {
+        tree.tiles
+            .iter()
+            .find_map(|(&p, t)| match t {
+                Tile::Container(Container::Linear(lin)) if lin.children.contains(&id) => Some(p),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    /// egui_tiles' divider drag: `a` grows by `d`, its neighbour `b`
+    /// shrinks by `d` (the shares are pixel sizes once fitted).
+    fn drag(tree: &mut Tree<Pane>, a: Pane, b: Pane, d: f32) {
+        for (pane, d) in [(a, d), (b, -d)] {
+            let (parent, tab) = holder(tree, pane);
+            if let Some(Tile::Container(Container::Linear(lin))) = tree.tiles.get_mut(parent) {
+                let s = lin.shares[tab] + d;
+                lin.shares.set_share(tab, s);
+            }
+        }
+    }
+
+    /// Leo's bug: dragging the server rail's edge 100 px wider narrowed the
+    /// channel list. Now the rail grows, the channel list keeps its width
+    /// and the chat gives up the 100 px.
+    #[test]
+    fn rail_drag_takes_width_from_the_chat() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0));
+        let mut tree = crate::layout::default_tree();
+        let mut mem = FitMemory::default();
+        fit_with(&mut tree, rect, M, &mut mem);
+        let before = widths(&tree, rect);
+        drag(&mut tree, Pane::Servers, Pane::Channels, 100.0);
+        fit_with(&mut tree, rect, M, &mut mem);
+        let after = widths(&tree, rect);
+        assert!((w(&after, Pane::Servers) - (w(&before, Pane::Servers) + 100.0)).abs() < 0.5);
+        assert!((w(&after, Pane::Channels) - w(&before, Pane::Channels)).abs() < 0.5);
+        assert!((w(&after, Pane::Messages) - (w(&before, Pane::Messages) - 100.0)).abs() < 0.5);
+        assert!((w(&after, Pane::Members) - w(&before, Pane::Members)).abs() < 0.5);
+        // Stable: the next frame (no drag) changes nothing.
+        fit_with(&mut tree, rect, M, &mut mem);
+        assert_eq!(widths(&tree, rect), after);
+        // And back: narrowing the rail gives the width to the chat.
+        drag(&mut tree, Pane::Servers, Pane::Channels, -100.0);
+        fit_with(&mut tree, rect, M, &mut mem);
+        let back = widths(&tree, rect);
+        assert!((w(&back, Pane::Servers) - w(&before, Pane::Servers)).abs() < 0.5);
+        assert!((w(&back, Pane::Channels) - w(&before, Pane::Channels)).abs() < 0.5);
+        assert!((w(&back, Pane::Messages) - w(&before, Pane::Messages)).abs() < 0.5);
+    }
+
+    /// The channels / chat divider resizes only the channel list against
+    /// the chat; the rail keeps its width.
+    #[test]
+    fn channels_drag_keeps_the_rail() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 800.0));
+        let mut tree = crate::layout::default_tree();
+        let mut mem = FitMemory::default();
+        fit_with(&mut tree, rect, M, &mut mem);
+        let before = widths(&tree, rect);
+        // In the default tree that divider is between the left column
+        // (rail + channels over the user panel) and the chat column.
+        let (lists, _) = holder(&tree, Pane::Servers);
+        let left = parent_of(&tree, lists);
+        let (chat_col, _) = holder(&tree, Pane::Messages);
+        let root = parent_of(&tree, chat_col);
+        assert_eq!(parent_of(&tree, left), root);
+        if let Some(Tile::Container(Container::Linear(lin))) = tree.tiles.get_mut(root) {
+            let (l, c) = (lin.shares[left], lin.shares[chat_col]);
+            lin.shares.set_share(left, l + 60.0);
+            lin.shares.set_share(chat_col, c - 60.0);
+        }
+        fit_with(&mut tree, rect, M, &mut mem);
+        let after = widths(&tree, rect);
+        assert!((w(&after, Pane::Servers) - w(&before, Pane::Servers)).abs() < 0.5);
+        assert!((w(&after, Pane::Channels) - (w(&before, Pane::Channels) + 60.0)).abs() < 0.5);
+        assert!((w(&after, Pane::Messages) - (w(&before, Pane::Messages) - 60.0)).abs() < 0.5);
     }
 
     #[test]

@@ -41,6 +41,129 @@ pub fn account_key(user_id: &str) -> String {
     format!("account:{user_id}")
 }
 
+/// `account:<id>` -> `<id>` (a Discord snowflake: digits only).
+fn id_from_key(key: &str) -> Option<String> {
+    let id = key.strip_prefix("account:")?;
+    (!id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| id.to_string())
+}
+
+/// A Windows Credential Manager target name -> the account's user id.
+/// keyring 4 names generic credentials `<user>.<service>`, so RustCord's
+/// are `account:<id>.RustCord` (shown as `LegacyGeneric:target=...` by
+/// `cmdkey`, which is accepted too). Anything else is `None`.
+pub fn account_id_from_target(target: &str) -> Option<String> {
+    let target = target
+        .strip_prefix("LegacyGeneric:target=")
+        .unwrap_or(target);
+    id_from_key(target.strip_suffix(&format!(".{SERVICE}"))?)
+}
+
+// ---------------------------------------------------------------------------
+// Recovery: credential store entries missing from the config
+// ---------------------------------------------------------------------------
+
+/// User ids that have a RustCord `account:<id>` entry in the OS credential
+/// store. Only the entry names are read here, never a secret. Windows
+/// only (Credential Manager can be listed); elsewhere empty.
+pub fn stored_account_ids() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        windows_targets()
+            .iter()
+            .filter_map(|t| account_id_from_target(t))
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// Target names of the generic credentials whose name starts with
+/// `account:` (CredEnumerateW with a filter). The credential blobs are
+/// never read.
+#[cfg(windows)]
+fn windows_targets() -> Vec<String> {
+    use windows_sys::Win32::Security::Credentials::{CREDENTIALW, CredEnumerateW, CredFree};
+
+    let filter: Vec<u16> = "account:*".encode_utf16().chain([0]).collect();
+    let mut count: u32 = 0;
+    let mut creds: *mut *mut CREDENTIALW = std::ptr::null_mut();
+    // SAFETY: a valid NUL-terminated filter and out pointers; on success
+    // the array is freed with CredFree below.
+    let ok = unsafe { CredEnumerateW(filter.as_ptr(), 0, &mut count, &mut creds) };
+    if ok == 0 || creds.is_null() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    // SAFETY: CredEnumerateW returned `count` credential pointers.
+    let list = unsafe { std::slice::from_raw_parts(creds, count as usize) };
+    for &c in list {
+        if c.is_null() {
+            continue;
+        }
+        // SAFETY: each entry is a valid CREDENTIALW; TargetName is a
+        // NUL-terminated wide string (or null).
+        let name = unsafe { (*c).TargetName };
+        if name.is_null() {
+            continue;
+        }
+        let mut len = 0usize;
+        // SAFETY: walk to the terminating NUL (bounded).
+        while len < 512 && unsafe { *name.add(len) } != 0 {
+            len += 1;
+        }
+        // SAFETY: `len` u16s up to the NUL are readable.
+        let wide = unsafe { std::slice::from_raw_parts(name, len) };
+        out.push(String::from_utf16_lossy(wide));
+    }
+    // SAFETY: frees the buffer CredEnumerateW allocated.
+    unsafe { CredFree(creds as *const std::ffi::c_void) };
+    out
+}
+
+/// Which stored accounts are missing from `config.accounts` and may be
+/// rebuilt: only while "Remember me" is on, without duplicates, and never
+/// past [`MAX_ACCOUNTS`] in total.
+pub fn missing_accounts(config: &Config, stored: &[String]) -> Vec<String> {
+    if !config.remember_login {
+        return Vec::new();
+    }
+    let room = MAX_ACCOUNTS.saturating_sub(config.accounts.len());
+    let mut out: Vec<String> = Vec::new();
+    for id in stored {
+        if out.len() >= room {
+            break;
+        }
+        if !config.accounts.iter().any(|a| &a.user_id == id) && !out.contains(id) {
+            out.push(id.clone());
+        }
+    }
+    out
+}
+
+/// Put a recovered account (its token is already in the store) back into
+/// the config: metadata only, nothing is written to the store. It becomes
+/// the start-up account if there is none. Returns whether it was added.
+pub fn add_recovered(config: &mut Config, account: SavedAccount) -> bool {
+    if account.user_id.is_empty()
+        || config.accounts.len() >= MAX_ACCOUNTS
+        || config.accounts.iter().any(|a| a.user_id == account.user_id)
+    {
+        return false;
+    }
+    if config
+        .last_account
+        .as_ref()
+        .is_none_or(|id| !config.accounts.iter().any(|a| &a.user_id == id))
+    {
+        config.last_account = Some(account.user_id.clone());
+    }
+    config.accounts.push(account);
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Token
 // ---------------------------------------------------------------------------
@@ -542,6 +665,76 @@ mod tests {
         assert_eq!(v.migrate(&mut c), Ok(true));
         assert!(c.legacy_saved_token.is_none());
         assert!(v.startup_token(&c).is_none());
+    }
+
+    #[test]
+    fn credential_targets_parse_to_user_ids() {
+        assert_eq!(
+            account_id_from_target("account:1521355672791285760.RustCord"),
+            Some("1521355672791285760".into())
+        );
+        assert_eq!(
+            account_id_from_target("LegacyGeneric:target=account:42.RustCord"),
+            Some("42".into())
+        );
+        for bad in [
+            "account:.RustCord",
+            "account:42.Other",
+            "account:42",
+            "pending.RustCord",
+            "account:4x2.RustCord",
+            "xaccount:42.RustCord",
+            "account:42.RustCord.RustCord",
+        ] {
+            assert_eq!(account_id_from_target(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn missing_accounts_are_capped_and_deduped() {
+        let mut c = Config {
+            remember_login: true,
+            ..Config::default()
+        };
+        c.accounts.push(acct("1"));
+        let stored: Vec<String> = ["1", "2", "2", "3", "4", "5", "6", "7"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let m = missing_accounts(&c, &stored);
+        assert_eq!(m, vec!["2", "3", "4", "5"]);
+        assert_eq!(c.accounts.len() + m.len(), MAX_ACCOUNTS);
+        c.remember_login = false;
+        assert!(missing_accounts(&c, &stored).is_empty());
+    }
+
+    #[test]
+    fn recovered_accounts_fill_the_list_once() {
+        let mut c = Config::default();
+        assert!(add_recovered(&mut c, acct("9")));
+        assert_eq!(c.last_account.as_deref(), Some("9"));
+        assert!(!add_recovered(&mut c, acct("9")));
+        assert!(add_recovered(&mut c, acct("8")));
+        // The first stays the start-up account.
+        assert_eq!(c.last_account.as_deref(), Some("9"));
+        assert_eq!(c.accounts.len(), 2);
+        assert!(!add_recovered(&mut c, SavedAccount::default()));
+        for i in 0..10 {
+            add_recovered(&mut c, acct(&format!("{}", 100 + i)));
+        }
+        assert_eq!(c.accounts.len(), MAX_ACCOUNTS);
+    }
+
+    /// Token leak, recovery: lookups carry tokens only as [`Token`] (Debug
+    /// redacted), and the rebuilt config holds none.
+    #[test]
+    fn recovery_never_formats_tokens() {
+        let lookups = vec![("7".to_string(), Token::new(FAKE))];
+        assert!(!format!("{lookups:?}").contains(FAKE));
+        let mut c = Config::default();
+        add_recovered(&mut c, acct("7"));
+        assert!(!serde_json::to_string(&c).unwrap().contains(FAKE));
+        assert!(!format!("{c:?}").contains(FAKE));
     }
 
     #[test]

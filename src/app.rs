@@ -26,6 +26,7 @@ use crate::gif_picker::{Gif, GifAction, GifPicker};
 use crate::home::{self, HomeAction, HomeCtx, HomeSelected, HomeState};
 use crate::invites::{self, AddServerAction, AddServerDialog, CardCtx, InviteAction, InviteCache};
 use crate::layout::{self, HostState, LAYOUT_KEY, LayoutBehavior, Pane};
+use crate::lightbox::{self, Viewer, ViewerAction};
 use crate::links::{self, LinkCheck, LinkDecision, LinkWarning};
 use crate::login::{LoginAction, LoginForm};
 use crate::markdown::{self, Block, MarkdownAction, ParseCache};
@@ -117,6 +118,14 @@ pub struct RustCordApp {
     /// is locked, unlike capturing the window from outside.
     demo_shot_path: Option<String>,
     demo_shot_asked: bool,
+    /// This process is a demo (`RUSTCORD_DEMO=1`: demo storage, in-memory
+    /// vault). Only then may a demo session run; the login screen's demo
+    /// link starts a separate demo process instead.
+    demo: bool,
+    /// Start-up recovery of saved accounts whose credential store entry
+    /// is missing from `Config::accounts` (`accounts::missing_accounts`):
+    /// their metadata, as the backend looks it up.
+    recovery: Option<Receiver<SavedAccount>>,
 }
 
 impl RustCordApp {
@@ -211,7 +220,14 @@ impl RustCordApp {
                 .then(|| std::env::var("RUSTCORD_DEMO_SHOT").ok())
                 .flatten(),
             demo_shot_asked: false,
+            demo,
+            recovery: None,
         };
+        // Saved logins whose entry survived in the credential store but
+        // dropped out of the config list come back (Windows; capped).
+        if !demo {
+            app.recovery = start_account_recovery(&app.vault, &app.config, &cc.egui_ctx);
+        }
 
         // Log in straight away if we can: demo, DISCORD_TOKEN, or a saved
         // account (DISCORD_TOKEN is never saved).
@@ -247,6 +263,11 @@ impl RustCordApp {
         demo: bool,
         account: Option<String>,
     ) {
+        // A demo session only runs in a demo process, never with the real
+        // config, accounts and credential store.
+        if demo && !self.demo {
+            return;
+        }
         crate::config::live::sync(&self.config.modules);
         // "Show as" is per account: the config mirrors this account's choice.
         let data = account
@@ -320,6 +341,45 @@ impl RustCordApp {
         };
         self.log_out(None, false);
         self.start_session(ctx, token, false, Some(user_id.to_string()));
+    }
+
+    /// Take recovered saved accounts (see `start_account_recovery`) into
+    /// the config. If the app is still on the login screen with nothing
+    /// running, log in to the start-up account, as a normal start would.
+    fn drain_recovery(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.recovery else {
+            return;
+        };
+        let mut added = Vec::new();
+        let done = loop {
+            match rx.try_recv() {
+                Ok(account) => {
+                    let name = account.display_name.clone();
+                    if crate::accounts::add_recovered(&mut self.config, account) {
+                        added.push(name);
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break false,
+                Err(mpsc::TryRecvError::Disconnected) => break true,
+            }
+        };
+        if done {
+            self.recovery = None;
+        }
+        if added.is_empty() {
+            return;
+        }
+        // Only an untouched login screen (nothing typed, no QR scan).
+        let idle_login = matches!(&self.screen, Screen::Login(f) if f.token.is_empty() && f.qr.is_none())
+            && self.session.is_none()
+            && self.add_account.is_none();
+        if idle_login
+            && self.config.remember_login
+            && let Some((token, account)) = self.vault.startup_token(&self.config)
+        {
+            self.start_session(ctx, token, false, account);
+        }
+        self.toast(&format!("Restored saved login: {}", added.join(", ")));
     }
 
     /// A short notice in the main window.
@@ -675,12 +735,7 @@ impl RustCordApp {
         self.stash_account_data();
         self.add_account = None;
         if forget_token && let Some(session) = &self.session {
-            if let Some(id) = session.account.clone() {
-                let _ = self.vault.forget(&mut self.config, &id);
-            } else if !session.saved {
-                // A migrated token that never reached READY.
-                let _ = self.vault.clear_pending();
-            }
+            forget_session_login(&self.vault, &mut self.config, session);
         }
         self.settings = None;
         self.editing_layout = false;
@@ -844,6 +899,7 @@ impl eframe::App for RustCordApp {
             self.config.taskbar_badge,
             crate::taskbar::rgb(self.active_theme.palette.danger),
         );
+        self.drain_recovery(ctx);
         let Screen::Main(state) = &mut self.screen else {
             return;
         };
@@ -960,8 +1016,16 @@ fn main_ui(app: &mut RustCordApp, ui: &mut egui::Ui) {
             Some(LoginAction::Login { token, remember }) => {
                 app.login_with(&ctx, token, remember);
             }
-            Some(LoginAction::Demo) => {
+            Some(LoginAction::Demo) if app.demo => {
                 app.start_session(&ctx, Token::new(""), true, None);
+            }
+            Some(LoginAction::Demo) => {
+                // A separate demo process (demo storage, in-memory vault);
+                // this window closes and keeps the real config untouched.
+                match crate::storage::launch_demo() {
+                    Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                    Err(e) => form.error = Some(format!("Couldn't start the demo: {e}")),
+                }
             }
             None => {}
         }
@@ -1108,6 +1172,8 @@ fn chat_screen(ui: &mut egui::Ui, state: &mut State, f: ChatFrame<'_>) {
     if !f.config.modules.layout_editor {
         *f.editing = false;
     }
+    // The image viewer's keys first: the message box must not get them.
+    state.viewer_keys(&ctx, f.config);
     let status = state.status.clone();
     RustCordApp::top_bar(
         ui,
@@ -1172,7 +1238,7 @@ fn chat_screen(ui: &mut egui::Ui, state: &mut State, f: ChatFrame<'_>) {
         ctx.content_rect().size() - area.size(),
     );
     let folded = crate::tile_fit::apply_folds(&mut *f.tree, &folds);
-    crate::tile_fit::fit(&mut *f.tree, area, metrics);
+    crate::tile_fit::fit_with(&mut *f.tree, area, metrics, &mut state.host.fit_memory);
     state.host.lists_in_drawer = !folded.in_drawer(crate::tile_fit::Drawer::Left).is_empty();
     state.host.aside_in_drawer = folds.members;
     if std::mem::take(&mut state.host.toggle_left) {
@@ -1452,6 +1518,40 @@ struct Session {
 /// After READY: store a remembered login under its user id (re-keying a
 /// migrated pending token) and refresh its name / avatar. Runs once per
 /// session; a failure only shows a toast.
+/// "Log Out" / a dead login: remove only this session's saved account
+/// (and a pending, not yet re-keyed token). A demo session has no saved
+/// account and never touches the store or the list.
+fn forget_session_login(vault: &Vault, config: &mut Config, session: &Session) {
+    if session.demo {
+        return;
+    }
+    if let Some(id) = &session.account {
+        let _ = vault.forget(config, id);
+    } else if !session.saved {
+        // A migrated token that never reached READY.
+        let _ = vault.clear_pending();
+    }
+}
+
+/// Start-up: stored `account:<id>` logins missing from `config.accounts`
+/// (`accounts::missing_accounts`, at most `MAX_ACCOUNTS`) are looked up by
+/// the backend (`GET users/@me`) so the switcher gets them back.
+fn start_account_recovery(
+    vault: &Vault,
+    config: &Config,
+    ctx: &egui::Context,
+) -> Option<Receiver<SavedAccount>> {
+    let ids = crate::accounts::missing_accounts(config, &crate::accounts::stored_account_ids());
+    let lookups: Vec<(String, Token)> = ids
+        .into_iter()
+        .filter_map(|id| match vault.token(&id) {
+            Ok(Some(t)) if !t.is_empty() => Some((id, t)),
+            _ => None,
+        })
+        .collect();
+    (!lookups.is_empty()).then(|| crate::backend::spawn_account_lookup(lookups, ctx.clone()))
+}
+
 fn save_account(vault: &Vault, config: &mut Config, session: &mut Session, state: &mut State) {
     if session.saved || session.demo {
         return;
@@ -1554,6 +1654,9 @@ enum MessageAction {
     Pin(String, bool),
     /// Save an image attachment: (url, file name).
     SaveImage(String, String),
+    /// Clicked a picture with the Image viewer module on: the message's
+    /// pictures and the clicked one.
+    ViewMedia(Vec<lightbox::MediaItem>, usize),
     /// Reveal a run of blocked messages (id of the first one).
     ShowBlocked(String),
     /// Clicked a reply preview: scroll to the original message.
@@ -1850,6 +1953,8 @@ pub struct State {
     user_names: HashMap<String, String>,
     /// "Leaving RustCord" dialog for a clicked link.
     link_warning: Option<LinkWarning>,
+    /// The image viewer (lightbox), while open. Image viewer module only.
+    viewer: Option<Viewer>,
     /// Pinned messages popup, and the pin button's rect it hangs from.
     pins: Option<(PinsPopup, egui::Rect)>,
     /// Scroll to (and flash) this message once it's on screen.
@@ -1962,6 +2067,7 @@ impl State {
             md_cache: ParseCache::default(),
             user_names: HashMap::new(),
             link_warning: None,
+            viewer: None,
             pins: None,
             scroll_to: None,
             channel_errors: HashMap::new(),
@@ -2443,6 +2549,11 @@ impl State {
                 }
             }
             ToUi::Notice(text) => self.toast = Some((text, Instant::now())),
+            ToUi::CopyImage(img) => {
+                let img = Arc::try_unwrap(img).unwrap_or_else(|a| (*a).clone());
+                ctx.copy_image(img);
+                self.toast = Some(("Image copied".into(), Instant::now()));
+            }
             ToUi::RateLimited(rl) => self.rate_limited(rl),
             ToUi::GuildEmojis { guild_id, emojis } => {
                 if let Some(g) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
@@ -6382,6 +6493,7 @@ impl State {
             Some(MessageAction::SaveImage(url, filename)) => {
                 let _ = self.tx.send(ToBackend::SaveFile { url, filename });
             }
+            Some(MessageAction::ViewMedia(items, index)) => self.open_viewer(items, index, &ctx),
             Some(MessageAction::ShowBlocked(id)) => {
                 self.revealed_blocked.insert(id);
             }
@@ -6472,6 +6584,73 @@ impl State {
         match links::check(url, config.warn_before_links, &config.trusted_domains) {
             LinkCheck::Open(u) => ctx.open_url(egui::OpenUrl::new_tab(u)),
             LinkCheck::Ask(w) => self.link_warning = Some(w),
+        }
+    }
+
+    /// Open the image viewer (replacing one that is open).
+    fn open_viewer(&mut self, items: Vec<lightbox::MediaItem>, index: usize, ctx: &egui::Context) {
+        if items.is_empty() {
+            return;
+        }
+        self.close_viewer(ctx);
+        self.viewer = Some(Viewer::new(items, index));
+    }
+
+    /// Close the image viewer and free what it loaded.
+    fn close_viewer(&mut self, ctx: &egui::Context) {
+        if let Some(mut v) = self.viewer.take() {
+            v.free(ctx);
+        }
+    }
+
+    /// Esc / arrows for the open viewer, before anything else sees them.
+    fn viewer_keys(&mut self, ctx: &egui::Context, config: &Config) {
+        if !config.modules.media_viewer {
+            // Module switched off: free it.
+            self.close_viewer(ctx);
+            return;
+        }
+        if let Some(v) = &mut self.viewer
+            && v.keys(ctx) == Some(ViewerAction::Close)
+        {
+            self.close_viewer(ctx);
+        }
+    }
+
+    /// Draw the open viewer and run what was picked.
+    fn viewer_overlay(&mut self, ctx: &egui::Context, config: &Config, pal: &Palette) {
+        let Some(v) = &mut self.viewer else {
+            return;
+        };
+        let opts = lightbox::Options {
+            wheel_zoom: config.viewer_wheel_zoom,
+            load_original: config.viewer_load_original,
+            click_outside_closes: config.viewer_click_outside_closes,
+        };
+        // The chat's toast is under the overlay: show it in the viewer.
+        let toast = self
+            .toast
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < Duration::from_secs(3))
+            .map(|(t, _)| t.clone());
+        if toast.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+        match v.show(ctx, pal, opts, toast.as_deref()) {
+            Some(ViewerAction::Close) => self.close_viewer(ctx),
+            Some(ViewerAction::OpenOriginal(url)) => self.open_link(&url, ctx, config),
+            Some(ViewerAction::CopyImage(url)) => {
+                let _ = self.tx.send(ToBackend::CopyImage { url });
+                self.toast = Some(("Copying image…".into(), Instant::now()));
+            }
+            Some(ViewerAction::Save(url, filename)) => {
+                let _ = self.tx.send(ToBackend::SaveFile { url, filename });
+            }
+            Some(ViewerAction::CopyLink(url)) => {
+                ctx.copy_text(url);
+                self.toast = Some(("Link copied".into(), Instant::now()));
+            }
+            None => {}
         }
     }
 
@@ -7776,6 +7955,8 @@ impl State {
         self.picker_overlays(&ctx, config, pal);
         self.popout_overlay(&ctx, config, pal);
         self.pins_overlay(&ctx, config, pal);
+        // Before the dialogs, so the link warning shows over it.
+        self.viewer_overlay(&ctx, config, pal);
         self.dialogs(&ctx, config, pal);
 
         // Drag-and-drop hint
@@ -9840,16 +10021,22 @@ fn message_content(
             ectx.images_enabled = config.modules.images;
             ectx.max_width = ui.available_width().min(embed::MAX_WIDTH);
             ectx.text = Some(&text);
+            ectx.viewer = config.modules.media_viewer;
             ui.add_space(2.0);
             let out = embed::render_embed(ui, e, &ectx);
             if let Some(url) = out.clicked_link {
                 *action = Some(MessageAction::OpenLink(url));
             }
+            if let Some(key) = out.clicked_media {
+                *action = view_media(message_media(m, config), &key);
+            }
         }
     }
     for a in &m.attachments {
-        if let Some(url) = attachment_ui(ui, a, config, pal) {
-            *action = Some(MessageAction::OpenLink(url));
+        match attachment_ui(ui, a, config, pal) {
+            Some(AttachClick::Link(url)) => *action = Some(MessageAction::OpenLink(url)),
+            Some(AttachClick::View(key)) => *action = view_media(message_media(m, config), &key),
+            None => {}
         }
     }
     for st in &m.stickers {
@@ -10230,8 +10417,13 @@ fn forwarded_ui(
                 }
             }
             for a in &f.attachments {
-                if let Some(url) = attachment_ui(ui, a, config, pal) {
-                    *action = Some(MessageAction::OpenLink(url));
+                match attachment_ui(ui, a, config, pal) {
+                    Some(AttachClick::Link(url)) => *action = Some(MessageAction::OpenLink(url)),
+                    Some(AttachClick::View(key)) => {
+                        let items = f.attachments.iter().filter_map(viewer_item).collect();
+                        *action = view_media(items, &key);
+                    }
+                    None => {}
                 }
             }
             for st in &f.stickers {
@@ -10735,14 +10927,79 @@ fn message_menu(
     );
 }
 
-/// An image (click: open full size) or a file card. Returns a link the user
-/// clicked; the caller opens it through the link warning.
+/// What a click on an attachment asks for.
+enum AttachClick {
+    /// Open this link (through the link warning).
+    Link(String),
+    /// Open the image viewer on this attachment (`MediaItem::key`).
+    View(String),
+}
+
+/// The viewer's item for an image attachment (None for other files).
+fn viewer_item(a: &Attachment) -> Option<lightbox::MediaItem> {
+    if !a.is_image() {
+        return None;
+    }
+    let (w, h) = IMAGE_MAX;
+    Some(lightbox::MediaItem {
+        key: a.url.clone(),
+        original: a.url.clone(),
+        download: a.url.clone(),
+        base: if a.proxy_url.is_empty() {
+            a.url.clone()
+        } else {
+            a.proxy_url.clone()
+        },
+        filename: a.filename.clone(),
+        width: a.width,
+        height: a.height,
+        thumb_uri: a.thumbnail_url(w as u32, h as u32),
+        animated: a.content_type == "image/gif" || lightbox::is_gif_url(&a.filename),
+    })
+}
+
+/// Every picture of a message the viewer can show, in drawing order
+/// (embeds are drawn above attachments).
+fn message_media(m: &Message, config: &Config) -> Vec<lightbox::MediaItem> {
+    let mut items = Vec::new();
+    if config.modules.embeds && config.show_embed_images {
+        for e in &m.embeds {
+            for (media, thumb_uri) in e.viewer_media() {
+                let base = media.source().to_string();
+                items.push(lightbox::MediaItem {
+                    key: base.clone(),
+                    original: media.link().to_string(),
+                    // Through Discord's proxy, never the third-party host.
+                    download: base.clone(),
+                    filename: lightbox::filename_of(media.link()),
+                    width: media.width,
+                    height: media.height,
+                    thumb_uri,
+                    animated: lightbox::is_gif_url(media.link()) || lightbox::is_gif_url(&base),
+                    base,
+                });
+            }
+        }
+    }
+    items.extend(m.attachments.iter().filter_map(viewer_item));
+    items
+}
+
+/// Open the viewer on the item with `key`.
+fn view_media(items: Vec<lightbox::MediaItem>, key: &str) -> Option<MessageAction> {
+    let index = items.iter().position(|i| i.key == key)?;
+    Some(MessageAction::ViewMedia(items, index))
+}
+
+/// An image (click: the image viewer, or the full size in the browser) or
+/// a file card. Returns what the user clicked; links go through the link
+/// warning.
 fn attachment_ui(
     ui: &mut egui::Ui,
     a: &Attachment,
     config: &Config,
     pal: &Palette,
-) -> Option<String> {
+) -> Option<AttachClick> {
     let mut clicked = None;
     if a.is_image() && config.modules.images {
         let (cap_w, max_h) = IMAGE_MAX;
@@ -10766,7 +11023,11 @@ fn attachment_ui(
                 a.human_size()
             ));
         if resp.clicked() {
-            clicked = Some(a.url.clone());
+            clicked = Some(if config.modules.media_viewer {
+                AttachClick::View(a.url.clone())
+            } else {
+                AttachClick::Link(a.url.clone())
+            });
         }
     } else {
         // Discord's file card is 432 wide; narrower columns shrink it and
@@ -10793,7 +11054,7 @@ fn attachment_ui(
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text(format!("{}\n{}", a.filename, a.url));
                         if link.clicked() {
-                            clicked = Some(a.url.clone());
+                            clicked = Some(AttachClick::Link(a.url.clone()));
                         }
                         ui.label(RichText::new(a.human_size()).small().color(pal.muted));
                     });
@@ -10811,5 +11072,84 @@ fn human_size(bytes: u64) -> String {
         format!("{:.0} KB", b / 1024.0)
     } else {
         format!("{b} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn saved(id: &str) -> SavedAccount {
+        SavedAccount {
+            user_id: id.into(),
+            username: format!("user{id}"),
+            display_name: format!("User {id}"),
+            ..Default::default()
+        }
+    }
+
+    /// A real config with two saved accounts (tokens in the vault).
+    fn real() -> (Vault, Config) {
+        let vault = Vault::memory();
+        let mut config = Config {
+            remember_login: true,
+            ..Config::default()
+        };
+        for id in ["1", "2"] {
+            vault
+                .save(&mut config, saved(id), &Token::new(format!("tok{id}")))
+                .unwrap();
+        }
+        (vault, config)
+    }
+
+    /// The bug: a demo session ran on the real config and vault. Nothing a
+    /// demo session does at READY, on "Log Out" or on a dead login may
+    /// change the saved accounts.
+    #[test]
+    fn demo_session_never_changes_saved_accounts() {
+        let (vault, mut config) = real();
+        let before = config.clone();
+        let (_ui_tx, ui_rx) = mpsc::channel();
+        let (be_tx, _be_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(ui_rx, be_tx);
+        state.me = Some(crate::types::User {
+            id: "1".into(),
+            name: "Demo".into(),
+            username: "demo".into(),
+            ..Default::default()
+        });
+        let mut session = Session {
+            token: Token::new(""),
+            demo: true,
+            account: None,
+            saved: false,
+        };
+        save_account(&vault, &mut config, &mut session, &mut state);
+        forget_session_login(&vault, &mut config, &session);
+        // Even a demo session that claims an account id forgets nothing.
+        session.account = Some("1".into());
+        forget_session_login(&vault, &mut config, &session);
+        assert_eq!(config.accounts, before.accounts);
+        assert_eq!(config.last_account, before.last_account);
+        assert!(vault.token("1").unwrap().is_some());
+        assert!(vault.token("2").unwrap().is_some());
+    }
+
+    /// "Log Out" of a real session still removes only that account.
+    #[test]
+    fn real_log_out_removes_only_its_account() {
+        let (vault, mut config) = real();
+        let session = Session {
+            token: Token::new("tok1"),
+            demo: false,
+            account: Some("1".into()),
+            saved: true,
+        };
+        forget_session_login(&vault, &mut config, &session);
+        let ids: Vec<&str> = config.accounts.iter().map(|a| a.user_id.as_str()).collect();
+        assert_eq!(ids, vec!["2"]);
+        assert!(vault.token("1").unwrap().is_none());
+        assert!(vault.token("2").unwrap().is_some());
     }
 }

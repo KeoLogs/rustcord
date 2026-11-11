@@ -30,6 +30,24 @@ async fn save_file(api: &Api, url: &str, filename: &str) -> anyhow::Result<Optio
     ))))
 }
 
+/// Image viewer "Copy image": download, decode on a blocking thread (first
+/// frame of a GIF), hand the pixels to the UI for the clipboard.
+async fn copy_image(api: &Api, url: &str) -> anyhow::Result<Option<ToUi>> {
+    let bytes = api.download(url).await?;
+    let decoded = tokio::task::spawn_blocking(move || {
+        image::load_from_memory(&bytes).map(|img| {
+            let rgba = img.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            eframe::egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw())
+        })
+    })
+    .await?;
+    Ok(Some(match decoded {
+        Ok(img) => ToUi::CopyImage(std::sync::Arc::new(img)),
+        Err(_) => ToUi::Notice("Couldn't copy the image: unknown format".into()),
+    }))
+}
+
 // --- threads ---
 /// A 403 / 404 (typed HTTP status): the endpoint isn't available to this
 /// account here.
@@ -161,6 +179,49 @@ pub fn spawn(
             rt.block_on(run(raw_token, options, tx, rx, ctx));
         }
     });
+}
+
+/// Saved-account recovery (`accounts::missing_accounts`): for each stored
+/// `(user id, token)`, ask Discord who the token belongs to (`GET
+/// users/@me`, read-only) on a short-lived backend thread, and send back
+/// the account's metadata when it matches that id. Bad or expired tokens
+/// and network errors are skipped quietly (nothing is logged; the token is
+/// never formatted). The receiver disconnects when every lookup is done.
+pub fn spawn_account_lookup(
+    lookups: Vec<(String, crate::accounts::Token)>,
+    egui_ctx: eframe::egui::Context,
+) -> std::sync::mpsc::Receiver<crate::accounts::SavedAccount> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        let ctx = egui_ctx.clone();
+        rt.block_on(async move {
+            for (id, token) in lookups.into_iter().take(crate::accounts::MAX_ACCOUNTS) {
+                let Ok(api) = Api::new(token.expose().to_string()) else {
+                    continue;
+                };
+                let Ok(Ok(me)) = tokio::time::timeout(Duration::from_secs(15), api.me()).await
+                else {
+                    continue;
+                };
+                if me.id == id
+                    && tx
+                        .send(crate::accounts::SavedAccount::from_user(&me))
+                        .is_err()
+                {
+                    return;
+                }
+                ctx.request_repaint();
+            }
+        });
+        egui_ctx.request_repaint();
+    });
+    rx
 }
 
 /// Repaints the window a session belongs to (from any thread).
@@ -464,6 +525,7 @@ async fn run(
                     .await
                     .map(|_| Some(ToUi::GuildRemoved(guild_id))),
                 ToBackend::SaveFile { url, filename } => save_file(&api, &url, &filename).await,
+                ToBackend::CopyImage { url } => copy_image(&api, &url).await,
                 // Profiles and notes are user-account endpoints.
                 ToBackend::LoadProfile { user_id, .. } if is_bot => {
                     Ok(Some(ToUi::ProfileUnavailable(user_id)))

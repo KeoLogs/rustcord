@@ -6,6 +6,35 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## 0.9.0: Image viewer
+- Click an image or GIF (attachments and pictures in embeds) and it opens
+  big over the app, like Discord: fitted to the window on a dimmed
+  background. GIFs keep playing.
+- Scroll to zoom (around the pointer), drag to move, double-click to switch
+  between fit and 100%. The zoom level shows at the bottom.
+- Left / Right (or the side buttons) go through the message's other
+  pictures, with an "n / m" counter.
+- Buttons: Open original (link warning rules apply), Copy image, Save and
+  Copy link. Esc, the X or a click on the background closes it.
+- Low memory: only the picture on screen is loaded, at the size of your
+  window. The full file is only loaded when you zoom in past it, and
+  everything is freed when you close the viewer or move to the next picture.
+- New module "Image viewer" (on by default). Off: clicks open the browser
+  like before and nothing is loaded. Settings → Media has the viewer
+  options: open images in viewer, zoom with the scroll wheel, load full
+  resolution when zooming in, click outside to close.
+
+## 0.6.2: Fixes
+- "Try the offline demo" on the login screen now opens the demo as its own
+  RustCord window (the login window closes). The demo can no longer touch
+  your real settings, saved accounts or saved logins.
+- Saved accounts that dropped out of the account list come back on the next
+  start (Windows): logins still in Credential Manager are looked up and put
+  back in the switcher, up to 5.
+- Dragging the server list's edge wider makes the chat narrower; the channel
+  list keeps its width. Dragging the channel list's edge only resizes it
+  against the chat.
+
 ## 0.6.1: Composer and user panel match the blocky look
 - The message box has no bubble any more: one flat row with a plain +,
   the message field, and GIF and emoji icons on the right.

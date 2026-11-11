@@ -531,6 +531,10 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
                 eprintln!("demo: save {url} as {filename}");
                 send(ToUi::Notice(format!("Demo mode: would save {filename}")));
             }
+            ToBackend::CopyImage { url } => {
+                eprintln!("demo: copy image {url}");
+                send(ToUi::Notice("Demo mode: would copy the image".into()));
+            }
             ToBackend::CloseDm { channel_id } => eprintln!("demo: close DM {channel_id}"),
             ToBackend::LoadGifs { query } => {
                 eprintln!("demo: GIFs {query:?}");
