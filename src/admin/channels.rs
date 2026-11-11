@@ -239,7 +239,7 @@ pub struct Row {
 pub fn rows(channels: &[Value]) -> Vec<Row> {
     let pos = |c: &Value| c["position"].as_i64().unwrap_or(0);
     let mut out = Vec::new();
-    let mut children = |parent: Option<&str>, out: &mut Vec<Row>| {
+    let children = |parent: Option<&str>, out: &mut Vec<Row>| {
         let mut list: Vec<&Value> = channels
             .iter()
             .filter(|c| n(c, "type") != CATEGORY)

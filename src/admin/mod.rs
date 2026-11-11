@@ -1059,7 +1059,7 @@ impl AdminPage {
         let c = self.confirm.as_mut()?;
         let mut close = false;
         let mut go = false;
-        let modal = egui::Modal::new(egui::Id::new("rc_admin_confirm"))
+        let modal = egui::Modal::new(egui::Id::unique("rc_admin_confirm"))
             .frame(crate::widgets::menu_frame(pal).inner_margin(egui::Margin::same(18)))
             .show(ctx, |ui| {
                 ui.set_max_width(420.0_f32.min(ctx.content_rect().width() - 48.0));
@@ -1237,7 +1237,7 @@ mod tests {
     /// (no clicks, replies arriving) never asks for anything.
     #[test]
     fn nothing_is_sent_without_a_click() {
-        let g = testing::guild(u64::MAX & !perms::ADMINISTRATOR, &["COMMUNITY"]);
+        let g = testing::guild(!perms::ADMINISTRATOR, &["COMMUNITY"]);
         for tab in available_tabs(u64::MAX, &g.features) {
             let (mut page, first) = AdminPage::open(&g.id, tab);
             assert!(first.iter().all(|r| !r.is_write()), "{tab:?} loads only");

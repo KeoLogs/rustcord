@@ -263,7 +263,9 @@ fn audit(path: &str) -> Value {
     let entries: Vec<Value> = all
         .into_iter()
         .filter(|e| param("user_id").is_none_or(|u| e["user_id"] == u.as_str()))
-        .filter(|e| param("action_type").is_none_or(|a| e["action_type"].to_string() == a))
+        .filter(|e| {
+            param("action_type").is_none_or(|a| a.parse::<u64>().ok() == e["action_type"].as_u64())
+        })
         .collect();
     json!({
         "audit_log_entries": entries,

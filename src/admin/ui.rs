@@ -174,7 +174,7 @@ pub fn row<R>(
     let rect = inner.response.rect;
     let resp = ui.interact(
         rect,
-        ui.id().with(("admin_row", rect.min.y as i32)),
+        ui.scope_id().with(("admin_row", rect.min.y as i32)),
         egui::Sense::hover(),
     );
     let fill = if selected {
@@ -251,7 +251,7 @@ pub struct Reorder {
 impl Reorder {
     pub fn new(id: impl std::hash::Hash + std::fmt::Debug) -> Self {
         Self {
-            id: egui::Id::new(id),
+            id: egui::Id::unique(id),
             rects: Vec::new(),
         }
     }
@@ -334,7 +334,7 @@ pub fn move_item<T>(list: &mut Vec<T>, from: usize, to: usize) {
 /// A tri-state permission cell: deny / inherit / allow.
 pub fn tri_state(ui: &mut egui::Ui, pal: &Palette, allow: &mut bool, deny: &mut bool) -> bool {
     let mut changed = false;
-    let mut cell = |ui: &mut egui::Ui, icon: &str, on: bool, col: egui::Color32, tip: &str| {
+    let cell = |ui: &mut egui::Ui, icon: &str, on: bool, col: egui::Color32, tip: &str| {
         let (rect, resp) = ui.allocate_exact_size(vec2(26.0, 22.0), egui::Sense::click());
         let fill = if on {
             col
