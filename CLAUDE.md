@@ -168,6 +168,19 @@ A native, customisable Discord client in Rust. UI is egui/eframe 0.37
   for folders. Synced compact mode lands in `Config::compact_messages` via
   `ConfigUpdate` (State only has `&Config`; the app applies
   `state.config_updates` each frame).
+- History (`src/history.rs`, pure + tested): `State::timelines` holds each
+  loaded channel's `Timeline` (gaps after message ids, `at_start`, one page
+  request at a time). Pages come from `ToBackend::LoadPage { before }` →
+  `ToUi::Page` and merge with `apply_page`; `around=` merges with
+  `apply_around` (a gap if it doesn't touch what's loaded); `trim` keeps
+  the cap. The list remembers its top row's y (`scroll_anchor`) and, when a
+  page goes in above it, re-runs the pass at the held offset
+  (`request_discard`). `open_unread` opens a channel at the NEW line.
+  Sends go through `State::send_message`: a `local` copy (id = nonce,
+  faded) is replaced by MESSAGE_CREATE / the POST answer with the same
+  nonce (`history::reconcile`); failures turn it red with Retry / Delete
+  (only on click). `links::message_link` routes discord.com/channels links
+  to `go_to_channel` + `jump_to`.
 - `src/quick_switcher.rs` (Ctrl+K, fuzzy `score`/`rank`), `src/autocomplete.rs`
   (`find_query` / `apply` are pure + tested; candidates are gathered in
   `State::update_autocomplete`), `src/status.rs` (status menu, custom status

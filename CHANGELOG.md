@@ -6,6 +6,22 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
+## Unreleased
+
+- Chat history like Discord's (Brief A): scrolling near the top loads 50
+  older messages at a time and the view stays where it was; a "Load more"
+  row marks messages missing between two loaded batches; a "Jump to present"
+  bar shows when you're well above the newest message. Channels open at the
+  first unread message under the red NEW line (at the bottom if there's no
+  read state). Sent messages show at once, faded, until Discord confirms
+  them (matched by nonce); a failed send turns red with Retry and Delete
+  (never retried on its own). Clicking a discord.com message link opens it
+  inside RustCord. Also: a character counter near the limit (2,000, or 4,000
+  with Nitro), Copy Image / Copy Link on an image's right-click menu, a
+  Reconnect button in the connection status, and the Discord Messenger
+  credit in Settings → About. CI is green on Linux again (Windows-only badge
+  code no longer warns there).
+
 ## 0.6.1: Composer and user panel match the blocky look
 - The message box has no bubble any more: one flat row with a plain +,
   the message field, and GIF and emoji icons on the right.
