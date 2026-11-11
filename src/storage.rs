@@ -10,6 +10,14 @@ pub const APP_ID: &str = "RustCord";
 /// eframe app id of every demo run.
 pub const DEMO_APP_ID: &str = "RustCord-Demo";
 
+/// `RUSTCORD_START_MINIMIZED=1` (memprobe and other test launches): the
+/// window starts hidden and unfocused, then minimises itself on the first
+/// frame and keeps rendering in the taskbar. The saved window state is
+/// never touched by such runs.
+pub fn start_minimized_from_env() -> bool {
+    std::env::var("RUSTCORD_START_MINIMIZED").is_ok_and(|v| v.trim() == "1")
+}
+
 /// True when `RUSTCORD_DEMO` asks for the offline demo.
 pub fn demo_from_env() -> bool {
     is_demo_value(std::env::var("RUSTCORD_DEMO").ok().as_deref())

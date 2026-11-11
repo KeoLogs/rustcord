@@ -117,6 +117,8 @@ pub struct RustCordApp {
     /// is locked, unlike capturing the window from outside.
     demo_shot_path: Option<String>,
     demo_shot_asked: bool,
+    /// `RUSTCORD_START_MINIMIZED=1`: minimise and show on the first frame.
+    start_minimized: bool,
 }
 
 impl RustCordApp {
@@ -211,6 +213,7 @@ impl RustCordApp {
                 .then(|| std::env::var("RUSTCORD_DEMO_SHOT").ok())
                 .flatten(),
             demo_shot_asked: false,
+            start_minimized: crate::storage::start_minimized_from_env(),
         };
 
         // Log in straight away if we can: demo, DISCORD_TOKEN, or a saved
@@ -832,6 +835,12 @@ impl RamSampler {
 
 impl eframe::App for RustCordApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Test launches start hidden: minimise first, then show, so the
+        // window sits in the taskbar and keeps rendering (realistic RAM).
+        if std::mem::take(&mut self.start_minimized) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
         // Taskbar badge: runs here (not in `ui`) so it also updates while
         // the window is minimised. Counted only while the setting is on.
         let count = match &self.screen {

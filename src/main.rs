@@ -75,8 +75,13 @@ fn main() -> eframe::Result {
         .ok()
         .filter(|t| !t.trim().is_empty());
 
+    // Test launches: never show or take focus before minimising (app.rs
+    // minimises on the first frame).
+    let start_minimized = storage::start_minimized_from_env();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
+            .with_visible(!start_minimized)
+            .with_active(!start_minimized)
             .with_title("RustCord")
             // Demo runs save under their own app id (storage folder), so
             // they never read or write the real config, layout or window.
@@ -92,9 +97,10 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Glow,
         // Demo screenshot runs resize the window; don't let them overwrite
         // the user's saved window size or egui memory.
-        persist_window: !(demo
-            && (std::env::var("RUSTCORD_DEMO_OPEN").is_ok()
-                || std::env::var("RUSTCORD_DEMO_SHOT").is_ok())),
+        persist_window: !start_minimized
+            && !(demo
+                && (std::env::var("RUSTCORD_DEMO_OPEN").is_ok()
+                    || std::env::var("RUSTCORD_DEMO_SHOT").is_ok())),
         ..Default::default()
     };
 
