@@ -47,6 +47,10 @@ const RIGHT_PAD: f32 = 8.0;
 /// Space between the header's own content and the buttons.
 const CONTENT_GAP: f32 = 8.0;
 
+/// Narrowest header content left of the buttons; a narrower header gets
+/// the floating buttons instead.
+const MIN_CONTENT: f32 = 48.0;
+
 /// Total width the buttons take from a header.
 pub const RESERVED: f32 = CONTENT_GAP + 3.0 * BUTTON + 2.0 * BUTTON_GAP + RIGHT_PAD;
 
@@ -196,7 +200,10 @@ pub fn header(ui: &mut egui::Ui, rect: Rect, pal: &Palette) -> Rect {
     }
     let id = ui.unique_id().with("rc_header_drag");
     drag_area(ui, rect, id);
-    if !touches_top_right(rect, window) || rect.width() < RESERVED * 2.0 {
+    // Claim the buttons whenever some room is left for the header's own
+    // content (the Members pane is often narrow), rather than float them
+    // over it.
+    if !touches_top_right(rect, window) || rect.width() < RESERVED + MIN_CONTENT {
         return rect;
     }
     // Read the pass number first: no `ctx` calls inside `data_mut`.

@@ -1,6 +1,6 @@
 [package]
 name = "rustcord"
-version = "0.6.1"
+version = "0.9.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "A native, customisable Discord client written in Rust"
@@ -42,25 +42,32 @@ toml = { version = "1", default-features = false, features = ["parse", "serde"] 
 unicode-segmentation = "1.13.3"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
-# Ctrl+V with a file-only clipboard (paste.rs) and the taskbar unread badge
+# Ctrl+V with a file-only clipboard (paste.rs), the taskbar unread badge
 # (taskbar.rs: ITaskbarList3 overlay icon, HWND from eframe's raw window
-# handle). Both crates are already in the tree via arboard / eframe.
+# handle) and the private working set in Settings → Performance
+# (memstats.rs). Both crates are already in the tree via arboard / eframe.
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
+    "Win32_System_ProcessStatus",
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# Smaller, faster release builds.
+# Smaller, faster release builds. panic = "abort": no unwinding tables or
+# landing pads (smaller binary, less to map); nothing in RustCord catches
+# panics. Debug symbols stay off (strip). Thin LTO, not fat: fat measured
+# no clear RAM gain for 2.6x the build time. See scripts/memprobe-results.md.
 [profile.release]
 lto = "thin"
 codegen-units = 1
+panic = "abort"
 strip = true
+debug = false
 
 [dev-dependencies]
 tempfile = "3"

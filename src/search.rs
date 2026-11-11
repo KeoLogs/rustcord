@@ -1779,15 +1779,15 @@ fn result_card(
 
 fn avatar(ui: &egui::Ui, rect: egui::Rect, m: &Message, cx: &SearchCtx<'_>) {
     let pal = cx.pal;
-    let r = rect.width() / 2.0;
+    let r = crate::theme::avatar_shape().radius(rect.width());
     if cx.show_images && !m.author.avatar_url.is_empty() {
-        ui.painter().circle_filled(rect.center(), r, pal.hover);
+        ui.painter().rect_filled(rect, r, pal.hover);
         egui::Image::from_uri(&m.author.avatar_url)
             .corner_radius(r)
             .show_loading_spinner(false)
             .paint_at(ui, rect);
     } else {
-        ui.painter().circle_filled(rect.center(), r, pal.accent);
+        ui.painter().rect_filled(rect, r, pal.accent);
         let letter = m
             .author
             .name

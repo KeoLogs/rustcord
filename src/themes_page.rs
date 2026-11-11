@@ -1,9 +1,9 @@
-//! Settings → Themes: a grid of installed theme cards (mini preview, name,
-//! author, Active badge, Apply / Delete), "Import theme…", "Open themes
-//! folder" and "Reset to default". RustCord has one built-in look (blocky
-//! bordered panes on the Discord Dark palette); every other theme, Discord
-//! Classic and Discord Light included, is imported from a `.rctheme` file
-//! (examples in `examples/themes/`).
+//! Settings → Themes: cards for the four built-in themes (RustCord Dark /
+//! Light, Discord Dark / Light; Apply, no Delete) and the imported ones
+//! (mini preview, name, author, Active badge, Apply / Delete), "Import
+//! theme…", "Open themes folder" and "Reset to default" (RustCord Dark).
+//! Every other theme is imported from a `.rctheme` file (examples in
+//! `examples/themes/`).
 //!
 //! Pure UI: it returns a `ThemesAction`; the app applies themes, deletes
 //! (after the confirmation shown here) and asks the backend for the file
@@ -12,6 +12,7 @@
 use crate::icons;
 use eframe::egui::{self, Color32, CornerRadius, RichText, Stroke, vec2};
 
+use crate::builtin_themes::{self, BuiltinTheme};
 use crate::theme::{Bold, Palette};
 use crate::theme_file::ThemeDef;
 use crate::themes::{Notice, ThemeStore, paint_preview};
@@ -19,8 +20,11 @@ use crate::themes::{Notice, ThemeStore, paint_preview};
 /// What the user asked for on the Themes page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ThemesAction {
-    /// Back to the default look (clear `Config::custom_theme`).
+    /// Back to the default look: RustCord Dark (clear
+    /// `Config::custom_theme`, `Config::builtin_theme` to the default).
     ResetDefault,
+    /// Use a built-in theme (clear `Config::custom_theme`).
+    ApplyBuiltin(BuiltinTheme),
     /// Use an installed theme (set `Config::custom_theme`).
     Apply(String),
     /// Delete an installed theme. Already confirmed by the user.
@@ -44,9 +48,9 @@ impl ThemesPage {
 
         ui.label(
             RichText::new(
-                "Themes change RustCord's colours and look. The default look has bordered panes on dark colours. \
-                 Import a .rctheme file, a theme folder or a .zip; Discord Classic, Discord Light and other \
-                 example themes are in the examples/themes folder of RustCord's source.",
+                "Themes change RustCord's colours and look. Four themes are built in; RustCord Dark is the default. \
+                 Import a .rctheme file, a theme folder or a .zip for more; example themes are in the \
+                 examples/themes folder of RustCord's source.",
             )
             .color(pal.muted),
         );
@@ -79,15 +83,16 @@ impl ThemesPage {
                     store.refresh();
                 }
             }
-            // A custom theme is only ever applied while the module is on,
-            // so with it off the default look is already active.
+            // A custom theme is only ever applied while the module is on.
+            let is_default =
+                store.active_custom.is_none() && store.active_builtin == BuiltinTheme::default();
             if ui
                 .add_enabled(
-                    store.active_custom.is_some(),
+                    !is_default,
                     egui::Button::new(icons::label(icons::RESET, "Reset to default")),
                 )
-                .on_hover_text("Back to the default look (bordered panes)")
-                .on_disabled_hover_text("The default look is already applied")
+                .on_hover_text("Back to RustCord Dark")
+                .on_disabled_hover_text("RustCord Dark is already applied")
                 .clicked()
             {
                 action = Some(ThemesAction::ResetDefault);
@@ -96,7 +101,7 @@ impl ThemesPage {
         if !store.enabled() {
             ui.label(
                 RichText::new(
-                    "Custom themes are off (Settings → Modules). Only the default look is used.",
+                    "Custom themes are off (Settings → Modules). Only the built-in themes are used.",
                 )
                 .color(pal.muted),
             );
@@ -115,6 +120,23 @@ impl ThemesPage {
         // Rows of cards (frames can't wrap themselves in egui).
         let per_row = cards_per_row(ui);
         ui.spacing_mut().item_spacing.y = 12.0;
+
+        // ---- Built in (always there, can't be deleted)
+        ui.label(pal.section_label(&format!("Built in — {}", builtin_themes::ALL.len())));
+        ui.add_space(4.0);
+        for row in builtin_themes::ALL.chunks(per_row) {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
+                for &t in row {
+                    let active = store.active_custom.is_none() && store.active_builtin == t;
+                    let def = t.def();
+                    if let Some(CardAction::Apply) = card(ui, pal, Ok(&def), active, false) {
+                        action = Some(ThemesAction::ApplyBuiltin(t));
+                    }
+                }
+            });
+        }
+        ui.add_space(8.0);
 
         // ---- Installed
         if store.enabled() {

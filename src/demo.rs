@@ -41,6 +41,12 @@
 //!   Sam's last message. #showcase's thread start names no thread we know
 //!   ("This thread isn't loaded", not clickable).
 //! - The GIF button shows fake results (offline, so the pictures fail).
+//!
+//! `RUSTCORD_DEMO_BIG=1` adds a synthetic big account for memory tests
+//! (`demo/big.rs`): ~100 more servers, ~3000 channels, ~200 DMs and ~1000
+//! friends in one realistic-size READY, fed through the gateway's inflater
+//! and dispatch like a live connection; their channels have 50-message
+//! histories with many avatars and custom emoji.
 
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
@@ -48,6 +54,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedReceiver;
+
+mod big;
 
 use crate::members::{ListUpdate, Member};
 use crate::notify::GuildSettings;
@@ -245,7 +253,7 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
     };
     send(ToUi::Status("Demo mode (offline)".into()));
     // Me: Contributor (Manage Messages) in the Test Server.
-    let mut test_guild = Guild::from_json(&json!({
+    let test_guild_json = json!({
         "id": TEST_GUILD,
         "name": "RustCord Test Server",
         "owner_id": SAM,
@@ -280,61 +288,120 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
             { "id": "231", "name": "Gaming", "type": 2, "position": 1, "parent_id": "302" },
             { "id": "232", "name": "Town Hall", "type": 13, "position": 2, "parent_id": "302" },
         ]
-    }));
-    test_guild.my_roles = vec!["503".into()];
-    send(ToUi::Ready {
-        me: User::from_json(&me),
-        premium_type: 0,
-        guilds: vec![
-            test_guild,
-            Guild::from_json(&json!({
-                "id": "101",
-                "name": "Gaming Hangout",
-                "channels": [ch("210", "lobby", 0, None), ch("211", "clips", 1, None)]
-            })),
-            Guild::from_json(&json!({
-                "id": "102",
-                "name": "Big Public Server",
-                "channels": [ch("220", "announcements", 0, None)]
-            })),
-        ],
-        dms: vec![
-            Channel::from_json(&json!({
-                "id": "400", "type": 1, "last_message_id": "9",
-                "recipients": [user(SAM, "Sam", None)]
-            })),
-            Channel::from_json(&json!({
-                "id": "401", "type": 1, "last_message_id": "95",
-                "recipients": [user(ALEX, "Alex", None)]
-            })),
-            // A message request (Friends module): never auto-acked.
-            Channel::from_json(&json!({
-                "id": "402", "type": 1, "last_message_id": "3",
-                "is_message_request": true,
-                "is_message_request_timestamp": iso_minutes_ago(90),
-                "recipients": [user(STRANGER, "Stranger", None)]
-            })),
-        ],
-        read_state: ReadStateEntry::parse_ready(&json!({ "entries": [
-            { "id": "200", "last_message_id": "10" },
-            { "id": "201", "last_message_id": "26" },
-            { "id": "202", "last_message_id": "33" },
-            { "id": "203", "last_message_id": "57", "mention_count": 2 },
-            { "id": "210", "last_message_id": "78", "mention_count": 1 },
-            { "id": "211", "last_message_id": "85" },
-            { "id": "220", "last_message_id": "80" },
-            { "id": "400", "last_message_id": "9" },
-            { "id": "401", "last_message_id": "94", "mention_count": 1 },
-        ], "version": 1 })),
-        guild_settings: GuildSettings::parse_ready(&json!({ "entries": [
-            { "guild_id": "100", "message_notifications": 1,
-              "channel_overrides": [{ "channel_id": "202", "muted": true, "mute_config": null }] },
-            { "guild_id": "102", "muted": true,
-              "mute_config": { "end_time": null, "selected_time_window": -1 } },
-        ], "version": 1 })),
-        blocked: vec![TROLL.into()],
-        user_settings: None,
     });
+    let guild_values = vec![
+        test_guild_json,
+        json!({
+            "id": "101",
+            "name": "Gaming Hangout",
+            "channels": [ch("210", "lobby", 0, None), ch("211", "clips", 1, None)]
+        }),
+        json!({
+            "id": "102",
+            "name": "Big Public Server",
+            "channels": [ch("220", "announcements", 0, None)]
+        }),
+    ];
+    let dm_values = vec![
+        json!({
+            "id": "400", "type": 1, "last_message_id": "9",
+            "recipients": [user(SAM, "Sam", None)]
+        }),
+        json!({
+            "id": "401", "type": 1, "last_message_id": "95",
+            "recipients": [user(ALEX, "Alex", None)]
+        }),
+        // A message request (Friends module): never auto-acked.
+        json!({
+            "id": "402", "type": 1, "last_message_id": "3",
+            "is_message_request": true,
+            "is_message_request_timestamp": iso_minutes_ago(90),
+            "recipients": [user(STRANGER, "Stranger", None)]
+        }),
+    ];
+    let read_values = json!([
+        { "id": "200", "last_message_id": "10" },
+        { "id": "201", "last_message_id": "26" },
+        { "id": "202", "last_message_id": "33" },
+        { "id": "203", "last_message_id": "57", "mention_count": 2 },
+        { "id": "210", "last_message_id": "78", "mention_count": 1 },
+        { "id": "211", "last_message_id": "85" },
+        { "id": "220", "last_message_id": "80" },
+        { "id": "400", "last_message_id": "9" },
+        { "id": "401", "last_message_id": "94", "mention_count": 1 },
+    ]);
+    let guild_setting_values = json!([
+        { "guild_id": "100", "message_notifications": 1,
+          "channel_overrides": [{ "channel_id": "202", "muted": true, "mute_config": null }] },
+        { "guild_id": "102", "muted": true,
+          "mute_config": { "end_time": null, "selected_time_window": -1 } },
+    ]);
+    // --- friends --- (READY relationships + message requests)
+    let ready_rels = json!({ "relationships": [
+        { "id": SAM, "type": 1, "user": user(SAM, "Sam", None) },
+        { "id": ALEX, "type": 1, "user": user(ALEX, "Alex", None) },
+        { "id": MAYA, "type": 3, "user": user(MAYA, "Maya", None) },
+        { "id": TROLL, "type": 2, "user": user(TROLL, "Troll", None) },
+    ], "private_channels": [
+        { "id": "402", "type": 1, "is_message_request": true,
+          "is_message_request_timestamp": iso_minutes_ago(90) },
+    ] });
+    let big_account = big::enabled();
+    if big_account {
+        // RUSTCORD_DEMO_BIG: the demo's servers plus ~100 generated ones in
+        // one READY, through the gateway's inflater and dispatch.
+        let as_vec = |v: &Value| v.as_array().cloned().unwrap_or_default();
+        let parts = big::DemoParts {
+            guilds: guild_values,
+            merged_members: vec![
+                json!([{ "user_id": ME, "roles": ["503"] }]),
+                json!([]),
+                json!([]),
+            ],
+            dms: dm_values,
+            read_state: as_vec(&read_values),
+            guild_settings: as_vec(&guild_setting_values),
+            relationships: as_vec(&ready_rels["relationships"]),
+            users: Vec::new(),
+        };
+        let started = std::time::Instant::now();
+        let frames = [
+            big::ready_frame(parts),
+            big::compress(&big::supplemental_payload(&[TEST_GUILD, "101", "102"])),
+        ];
+        let built = started.elapsed();
+        let mut my_id = String::new();
+        let mut inflater = crate::gateway::Inflater::new();
+        for frame in frames {
+            let events = inflater
+                .push(&frame)
+                .ok()
+                .flatten()
+                .and_then(|json| crate::gateway::dispatch_bytes(&json, &mut my_id).ok())
+                .unwrap_or_default();
+            for ev in events {
+                send(ev);
+            }
+        }
+        eprintln!(
+            "demo: big account frames built in {} ms, inflated + parsed in {} ms",
+            built.as_millis(),
+            (started.elapsed() - built).as_millis()
+        );
+    } else {
+        let mut guilds: Vec<Guild> = guild_values.iter().map(Guild::from_json).collect();
+        guilds[0].my_roles = vec!["503".into()];
+        send(ToUi::Ready {
+            me: User::from_json(&me),
+            premium_type: 0,
+            guilds,
+            dms: dm_values.iter().map(Channel::from_json).collect(),
+            read_state: ReadStateEntry::parse_ready(&read_values),
+            guild_settings: GuildSettings::parse_ready(&guild_setting_values),
+            blocked: vec![TROLL.into()],
+            user_settings: None,
+        });
+    }
 
     // --- threads --- (READY guild threads: one under #general)
     if let Some(ev) = crate::threads::ThreadEvent::from_guild(&json!({
@@ -358,22 +425,15 @@ pub async fn run(tx: Sender<ToUi>, mut rx: UnboundedReceiver<ToBackend>, repaint
         send(ToUi::Thread(ev));
     }
 
-    // --- friends --- (READY relationships + message requests)
-    let ready_rels = json!({ "relationships": [
-        { "id": SAM, "type": 1, "user": user(SAM, "Sam", None) },
-        { "id": ALEX, "type": 1, "user": user(ALEX, "Alex", None) },
-        { "id": MAYA, "type": 3, "user": user(MAYA, "Maya", None) },
-        { "id": TROLL, "type": 2, "user": user(TROLL, "Troll", None) },
-    ], "private_channels": [
-        { "id": "402", "type": 1, "is_message_request": true,
-          "is_message_request_timestamp": iso_minutes_ago(90) },
-    ] });
-    send(ToUi::Relationships(crate::friends::parse_ready(
-        &ready_rels,
-    )));
-    send(ToUi::MessageRequests(crate::friends::parse_ready_requests(
-        &ready_rels,
-    )));
+    // The big READY already carried these (with ~1000 more friends).
+    if !big_account {
+        send(ToUi::Relationships(crate::friends::parse_ready(
+            &ready_rels,
+        )));
+        send(ToUi::MessageRequests(crate::friends::parse_ready_requests(
+            &ready_rels,
+        )));
+    }
 
     // READY_SUPPLEMENTAL: presences for DM friends and the Test Server.
     send(ToUi::Presences(
@@ -942,6 +1002,9 @@ fn minutes_ago(n: u64) -> i64 {
 }
 
 fn sample_values(channel_id: &str) -> Vec<Value> {
+    if let Some(values) = big::history_values(channel_id) {
+        return values;
+    }
     if channel_id == "200" {
         return welcome_values();
     }

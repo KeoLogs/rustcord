@@ -3,10 +3,9 @@
 //! painting helpers panes use for gradients, glass and the chat background.
 //!
 //! Themes live in `<data dir>/themes/<id>/theme.rctheme` (+ an optional
-//! background image). None are bundled into the binary; the default look
-//! (blocky bordered panes on the Discord Dark palette) is always available,
-//! and example themes (Discord Classic, Discord Light, test themes) live in
-//! `examples/themes/` for Import. With the "Custom
+//! background image). The four built-in themes (`builtin_themes.rs`:
+//! RustCord Dark / Light, Discord Dark / Light) are always available; other
+//! example themes live in `examples/themes/` for Import. With the "Custom
 //! themes" module off, nothing is read from disk.
 //!
 //! Memory: only the active theme's background image is decoded, downscaled
@@ -70,6 +69,8 @@ pub struct ThemeStore {
     pub entries: Vec<ThemeEntry>,
     /// What's applied now (mirror of `Config`; see `sync_with`).
     pub active_custom: Option<String>,
+    /// The built-in theme in use when `active_custom` is `None`.
+    pub active_builtin: crate::builtin_themes::BuiltinTheme,
     pub notice: Option<Notice>,
 }
 
@@ -81,6 +82,7 @@ impl ThemeStore {
             enabled,
             entries: Vec::new(),
             active_custom: None,
+            active_builtin: Default::default(),
             notice: None,
         };
         s.refresh();
@@ -110,6 +112,7 @@ impl ThemeStore {
         } else {
             None
         };
+        self.active_builtin = config.builtin_theme;
         self.set_enabled(config.modules.custom_themes);
     }
 
@@ -665,12 +668,22 @@ pub struct ActiveTheme {
 }
 
 impl ActiveTheme {
-    /// The default look (blocky bordered panes on the Discord Dark
-    /// palette), used when no custom theme applies.
+    /// The default look (RustCord Dark: blocky bordered panes on the
+    /// Discord Dark palette).
     pub fn default_theme() -> Self {
         Self {
             palette: ThemeChoice::DiscordDark.palette(),
             style: ThemeStyle::default(),
+            bg: None,
+        }
+    }
+
+    /// A built-in theme (no image, nothing read from disk).
+    pub fn builtin(t: crate::builtin_themes::BuiltinTheme) -> Self {
+        let def = t.def();
+        Self {
+            palette: def.palette,
+            style: def.style,
             bg: None,
         }
     }
@@ -692,7 +705,8 @@ impl ActiveTheme {
     }
 
     /// The theme `config` asks for: the custom one if the module is on and it
-    /// loads, else the default look. The error says why a custom theme didn't load.
+    /// loads, else the chosen built-in theme. The error says why a custom
+    /// theme didn't load.
     pub fn from_config(
         ctx: &egui::Context,
         config: &Config,
@@ -703,10 +717,12 @@ impl ActiveTheme {
         {
             match store.load(id) {
                 Ok(t) => return (Self::from_loaded(ctx, t), None),
-                Err(e) => return (Self::default_theme(), Some(format!("{e:#}"))),
+                Err(e) => {
+                    return (Self::builtin(config.builtin_theme), Some(format!("{e:#}")));
+                }
             }
         }
-        (Self::default_theme(), None)
+        (Self::builtin(config.builtin_theme), None)
     }
 
     /// Set egui's visuals and text sizes. Call when the theme changes (and
@@ -926,6 +942,7 @@ pub fn apply_style(ctx: &egui::Context, s: &ThemeStyle) {
     let (wr, mr) = (s.radius(s.window_radius), s.radius(s.menu_radius));
     crate::theme::set_corner_scale(s.corner_scale);
     crate::theme::set_frame_border(s.frame.border.filter(|_| s.frame.enabled));
+    crate::theme::set_shapes(s.shape, s.avatar_shape);
     let (ws, ps, link, border) = (s.window_shadow, s.popup_shadow, s.link, s.widget_border);
     let scale = s.font_scale;
     ctx.global_style_mut(|st| {
@@ -1159,7 +1176,7 @@ pub fn paint_preview(painter: &Painter, rect: Rect, pal: &Palette, style: &Theme
     for i in 0..4 {
         let c = pos2(rail.center().x, rail.top() + 10.0 + i as f32 * (d + 5.0));
         let col = if i == 0 { pal.accent } else { pal.rail_icon };
-        painter.circle_filled(c, d / 2.0, col);
+        s.shape.dot(&painter, c, d / 2.0, col);
     }
     // Sidebar: channel rows, one selected.
     for i in 0..5 {
@@ -1183,7 +1200,7 @@ pub fn paint_preview(painter: &Painter, rect: Rect, pal: &Palette, style: &Theme
         let y = chat.top() + 12.0 + i as f32 * 24.0;
         let av = pos2(chat.left() + 11.0, y + 4.0);
         let colors = [pal.online, pal.accent, pal.idle];
-        painter.circle_filled(av, 6.0, colors[i]);
+        s.avatar_shape.dot(&painter, av, 6.0, colors[i]);
         let x = chat.left() + 22.0;
         painter.rect_filled(
             Rect::from_min_size(pos2(x, y), vec2(26.0, 3.5)),

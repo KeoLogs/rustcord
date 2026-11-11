@@ -247,6 +247,11 @@ async fn run(
 
     // Handle requests from the UI.
     while let Some(req) = rx.recv().await {
+        // RUSTCORD_TEST_ACCOUNT (memprobe live runs): reads only.
+        if crate::config::live::on(&crate::config::live::READ_ONLY) && !read_only_ok(&req) {
+            eprintln!("read-only test run: dropped a write request");
+            continue;
+        }
         // Gateway ops are just forwarded (sent once the session is ready).
         let op = match &req {
             // Op 14 is for user accounts only.
@@ -699,4 +704,48 @@ async fn run(
     // keeping it (and its platform) around until it times out.
     drop(gw_tx);
     let _ = tokio::time::timeout(Duration::from_secs(3), gateway).await;
+}
+
+/// What a read-only test-account run (`RUSTCORD_TEST_ACCOUNT`) may still
+/// do: load things and gateway reads. Everything that would send, ack,
+/// type, react, join, edit or change settings is dropped.
+fn read_only_ok(req: &ToBackend) -> bool {
+    matches!(
+        req,
+        ToBackend::LoadHistory { .. }
+            | ToBackend::LoadAround { .. }
+            | ToBackend::LoadPins { .. }
+            | ToBackend::LoadGifs { .. }
+            | ToBackend::LoadProfile { .. }
+            | ToBackend::LoadNote { .. }
+            | ToBackend::LoadUserSettings
+            | ToBackend::LoadActiveThreads { .. }
+            | ToBackend::LoadReactors { .. }
+            | ToBackend::ResolveInvite { .. }
+            | ToBackend::Search { .. }
+            | ToBackend::SubscribeMembers { .. }
+            | ToBackend::RequestMembers { .. }
+            | ToBackend::RequestMemberList { .. }
+            | ToBackend::Notify { .. }
+    )
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+
+    #[test]
+    fn writes_are_not_read_only() {
+        assert!(read_only_ok(&ToBackend::LoadHistory {
+            channel_id: "1".into()
+        }));
+        assert!(!read_only_ok(&ToBackend::Typing {
+            channel_id: "1".into()
+        }));
+        assert!(!read_only_ok(&ToBackend::AckBulk(Vec::new())));
+        assert!(read_only_ok(&ToBackend::LoadUserSettings));
+        assert!(!read_only_ok(&ToBackend::PatchUserSettings {
+            settings_b64: String::new()
+        }));
+    }
 }

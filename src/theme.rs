@@ -21,9 +21,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::layout::Pane;
 
-/// The base palette of a theme: Discord Dark is the built-in look's palette;
-/// Light is only the `base = "light"` of a `.rctheme` file (e.g. the Discord
-/// Light example in `examples/themes/`). There is no picker for these.
+/// The base palette of a theme (`base = "dark"` / `"light"` in a
+/// `.rctheme` file). The built-in themes (`builtin_themes.rs`) start from
+/// these too; there is no separate picker for them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ThemeChoice {
     #[default]
@@ -130,6 +130,73 @@ pub fn set_corner_scale(scale: f32) {
 pub fn corner(r: u8) -> u8 {
     let scale = f32::from_bits(CORNER_SCALE.load(Ordering::Relaxed));
     (f32::from(r) * scale).round().clamp(0.0, 255.0) as u8
+}
+
+/// Corner shape of avatars, badges, status dots and count boxes
+/// (`[style] shape` / `avatar_shape` in `.rctheme`): the RustCord themes
+/// are square, the Discord ones round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Shape {
+    /// Squares with at most a 2 px corner radius (the blocky look).
+    #[default]
+    Square,
+    /// Circles and pills (Discord).
+    Round,
+}
+
+/// Largest corner radius of a `Shape::Square` item.
+pub const SQUARE_RADIUS: f32 = 2.0;
+
+impl Shape {
+    /// Corner radius for an item whose shorter side is `side` px.
+    pub fn radius(self, side: f32) -> f32 {
+        match self {
+            Shape::Round => side / 2.0,
+            Shape::Square => SQUARE_RADIUS.min(side / 4.0),
+        }
+    }
+
+    /// Paint a dot (status dot, badge dot) of radius `r` at `c`: a circle,
+    /// or a square of side `2r`.
+    pub fn dot(self, painter: &egui::Painter, c: egui::Pos2, r: f32, color: Color32) {
+        match self {
+            Shape::Round => {
+                painter.circle_filled(c, r, color);
+            }
+            Shape::Square => {
+                let rect = egui::Rect::from_center_size(c, egui::vec2(r * 2.0, r * 2.0));
+                painter.rect_filled(rect, self.radius(r * 2.0), color);
+            }
+        }
+    }
+}
+
+/// The active theme's shapes (bit 0: badges / dots round, bit 1: avatars
+/// round), set by `themes::apply_style`. 0 = all square (RustCord Dark).
+static SHAPES: AtomicU32 = AtomicU32::new(0);
+
+/// Called when a theme is applied.
+pub fn set_shapes(shape: Shape, avatar: Shape) {
+    let bit = |s: Shape, b: u32| if s == Shape::Round { b } else { 0 };
+    SHAPES.store(bit(shape, 1) | bit(avatar, 2), Ordering::Relaxed);
+}
+
+/// The active theme's shape for badges, status dots and count boxes.
+pub fn shape() -> Shape {
+    if SHAPES.load(Ordering::Relaxed) & 1 != 0 {
+        Shape::Round
+    } else {
+        Shape::Square
+    }
+}
+
+/// The active theme's avatar shape.
+pub fn avatar_shape() -> Shape {
+    if SHAPES.load(Ordering::Relaxed) & 2 != 0 {
+        Shape::Round
+    } else {
+        Shape::Square
+    }
 }
 
 /// The active theme's pane border colour (premultiplied RGBA; 0 = the

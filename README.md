@@ -20,10 +20,14 @@ improvements, z fixes). It has:
 - **Several accounts** (up to 5 saved): click the user panel to switch;
   right-click an account → *Open in new window* to keep both live (each window
   is one more connection, ~15 MB + caches)
-- **Blocky default look**: every pane is a bordered box with its name cut into
-  the top border (nav, channels, chat, input, members, user), near-square
-  corners and the bundled **Cascadia Mono** font. The old flat Discord look
-  is an example theme (`examples/themes/discord-classic`)
+- **Four built-in themes** (Settings → Themes): **RustCord Dark** (default:
+  every pane a bordered box with its name cut into the top border, square
+  corners, avatars and badges, the bundled **Cascadia Mono** font),
+  **RustCord Light**, and the classic flat **Discord Dark** / **Discord
+  Light** (Noto Sans, round avatars)
+- **GIFs autoplay** in messages and link previews (only on-screen ones keep
+  their frames); animated avatars and emoji play on hover; a message that
+  is just a GIF link shows only the GIF
 - **No OS title bar**: – □ X sit in the top-right pane's header and follow
   when you move panes; drag empty header space to move the window,
   double-click to maximise, drag the edges to resize. Settings → Appearance →
@@ -145,8 +149,8 @@ improvements, z fixes). It has:
 
 - **custom themes** (Settings → Themes, "Custom themes" module): import a
   `.rctheme` file, a theme folder or a `.zip`; colours, rounded corners,
-  shadows, gradients, glass panels, a chat background image. See
-  [Themes](#themes) for the format
+  square or round avatars and badges, shadows, gradients, glass panels, a
+  chat background image. See [Themes](#themes) for the format
 - **your own presets** (Settings → Presets, "Presets" module): save your
   layout, theme and modules as a preset card (layout thumbnail, theme name,
   how many modules change) and apply it with one click (Save Changes keeps
@@ -155,8 +159,7 @@ improvements, z fixes). It has:
   as a preset or a theme. See [Presets](#presets)
 
 What's next: lower memory use (modules that are off cost almost nothing),
-the four built-in themes (RustCord Dark / Light, Discord Dark / Light), GIF
-autoplay, square avatars, server settings and roles, the rest of the
+server settings and roles, the rest of the
 [Discord Messenger](https://github.com/DiscordMessenger/dm) features
 ([docs/PORTING.md](docs/PORTING.md)), theme frames and detached panels, a
 mini chat overlay, and **mods** (`.rcmod`, with permission prompts and no
@@ -224,12 +227,15 @@ optional background image. The format is documented at the top of
 RustCord's data folder under `themes/<id>/` (Settings → Themes → *Open
 themes folder*).
 
-RustCord has one built-in look: blocky panes, each a flat dark box with a
-1 px border and its name cut into the top border, small gaps between them
-and a monospace font (Settings → Themes → *Reset to default* goes back to
-it). Every other theme is a file you import. `examples/themes/` holds
-`discord-classic` (the old Discord Dark look: flat panes, no borders, Noto
-Sans), `discord-light` (Discord's light look) and
+RustCord has four built-in themes (Settings → Themes; they can't be
+deleted): **RustCord Dark**, the default (blocky panes, each a flat dark
+box with a 1 px border and its name cut into the top border, small gaps
+between them, square corners, avatars and badges, a monospace font;
+*Reset to default* goes back to it), **RustCord Light** (the same in light
+colours), and **Discord Dark** / **Discord Light** (the classic flat
+Discord look: no borders, Noto Sans, round avatars and badges). Every other
+theme is a file you import. `examples/themes/` holds `discord-classic` and
+`discord-light` (the same as the Discord built-ins, to copy and edit) and
 the **test themes** `2000s-messenger`, `frosted-glass` and `frutiger-aero`.
 They aren't installed by default, aren't compiled into the binary and aren't
 part of release builds. Import one with Settings → Themes → *Import
@@ -267,6 +273,8 @@ base64 of the `.rctheme` text.
 | `src/themes_page.rs` | Settings → Themes page: theme cards with previews, import, delete |
 | `src/presets.rs` | The `.rcpreset` format, preset / theme codes, the presets folder |
 | `src/presets_page.rs` | Settings → Presets page: preset cards, save / import / export, paste box |
+| `src/builtin_themes.rs` | The four built-in themes (RustCord Dark / Light, Discord Dark / Light) |
+| `src/anim.rs` | GIF autoplay: animated URIs, hover-to-play avatars / emoji, freeing off-screen GIFs |
 | `src/timefmt.rs` | Local-time message timestamps and date-divider labels |
 | `src/emoji.rs` | Splits text into text + emoji images |
 | `src/markdown.rs` | Discord markdown: parser, renderer, parse cache |

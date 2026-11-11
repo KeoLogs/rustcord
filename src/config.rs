@@ -11,11 +11,15 @@ pub const CONFIG_KEY: &str = "config_v1";
 #[serde(default)]
 pub struct Config {
     /// Id (folder name) of the applied custom theme, if any; it overrides
-    /// the default look (bordered panes) while the Custom themes module is on.
+    /// the built-in theme while the Custom themes module is on.
     /// Older configs also carry a `theme` key (the removed Dark / Light
     /// picker); it is ignored, so they load with the default look.
     #[serde(default)]
     pub custom_theme: Option<String>,
+    /// The built-in theme used when no imported theme applies
+    /// (`builtin_themes.rs`). Older configs load as RustCord Dark.
+    #[serde(default)]
+    pub builtin_theme: crate::builtin_themes::BuiltinTheme,
     /// UI scale (1.0 = 100%).
     pub zoom: f32,
     pub modules: Modules,
@@ -101,6 +105,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             custom_theme: None,
+            builtin_theme: Default::default(),
             zoom: 1.0,
             modules: Modules::default(),
             remember_login: true,
@@ -299,6 +304,51 @@ fn on() -> bool {
     true
 }
 
+impl Modules {
+    /// `RUSTCORD_MODULES` override for measuring runs (demo only, never
+    /// saved): `all`, `none`, `default`, or a comma list that starts from
+    /// one of those (default: `none`) and turns flags on (`images`) or off
+    /// (`-images`) by their config name, e.g. `all,-embeds` or
+    /// `images,member_list`.
+    pub fn from_override(spec: &str) -> Result<Self, String> {
+        let all = |on: bool| {
+            let mut v = serde_json::to_value(Modules::default()).expect("Modules serialises");
+            for flag in v.as_object_mut().into_iter().flat_map(|o| o.values_mut()) {
+                *flag = serde_json::Value::Bool(on);
+            }
+            v
+        };
+        let mut parts = spec
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .peekable();
+        let mut v = match parts.peek().copied() {
+            Some("all") => all(true),
+            Some("default") => {
+                serde_json::to_value(Modules::default()).expect("Modules serialises")
+            }
+            // `none`, or a bare list.
+            _ => all(false),
+        };
+        if matches!(parts.peek().copied(), Some("all" | "none" | "default")) {
+            parts.next();
+        }
+        let obj = v.as_object_mut().expect("Modules is a struct");
+        for part in parts {
+            let (name, on) = match part.strip_prefix('-') {
+                Some(name) => (name, false),
+                None => (part, true),
+            };
+            match obj.get_mut(name) {
+                Some(flag) => *flag = serde_json::Value::Bool(on),
+                None => return Err(format!("unknown module \"{name}\"")),
+            }
+        }
+        serde_json::from_value(v).map_err(|e| e.to_string())
+    }
+}
+
 /// Module flags readable off the UI thread (the gateway task), so a module
 /// that is off does no gateway work. The app stores them every frame.
 pub mod live {
@@ -312,6 +362,9 @@ pub mod live {
     pub static INVITES: AtomicBool = AtomicBool::new(true);
     pub static LAYOUT_SHARING: AtomicBool = AtomicBool::new(true);
     pub static CUSTOM_THEMES: AtomicBool = AtomicBool::new(true);
+    /// `RUSTCORD_TEST_ACCOUNT` run: the backend drops every write request
+    /// (sends, acks, typing...). Set once at start, never synced.
+    pub static READ_ONLY: AtomicBool = AtomicBool::new(false);
     // (end of flags)
 
     pub fn sync(m: &super::Modules) {
@@ -507,6 +560,23 @@ mod tests {
     }"#;
 
     #[test]
+    fn modules_override() {
+        let all = Modules::from_override("all").unwrap();
+        assert!(all.status_bar && all.images && all.favourite_gifs);
+        let none = Modules::from_override("none").unwrap();
+        assert!(!none.images && !none.layout_editor && !none.favourite_gifs);
+        assert_eq!(
+            Modules::from_override("default").unwrap(),
+            Modules::default()
+        );
+        let some = Modules::from_override("images, member_list").unwrap();
+        assert!(some.images && some.member_list && !some.embeds && !some.reactions);
+        let minus = Modules::from_override("all,-embeds").unwrap();
+        assert!(!minus.embeds && minus.images);
+        assert!(Modules::from_override("all,nope").is_err());
+    }
+
+    #[test]
     fn old_config_still_loads() {
         let c: Config = serde_json::from_str(POLISH2_CONFIG).expect("polish-2 config loads");
         // Old values are kept, new modules default on.
@@ -537,6 +607,10 @@ mod tests {
         )
         .expect("old config loads");
         assert_eq!(c.custom_theme, None);
+        assert_eq!(
+            c.builtin_theme,
+            crate::builtin_themes::BuiltinTheme::RustcordDark
+        );
         assert!(!c.modules.layout_sharing);
     }
 

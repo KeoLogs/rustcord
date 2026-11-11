@@ -9,6 +9,34 @@ use std::path::PathBuf;
 pub const APP_ID: &str = "RustCord";
 /// eframe app id of every demo run.
 pub const DEMO_APP_ID: &str = "RustCord-Demo";
+/// eframe app id of a `RUSTCORD_TEST_ACCOUNT` run (memprobe live mode).
+pub const TEST_APP_ID: &str = "RustCord-Test";
+
+/// `RUSTCORD_TEST_ACCOUNT=<user id>`: log in as that saved account (token
+/// from the OS credential store, never from the environment), with its own
+/// storage, read-only. Ignored in demo runs.
+pub fn test_account_from_env() -> Option<String> {
+    std::env::var("RUSTCORD_TEST_ACCOUNT")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `RUSTCORD_START_MINIMIZED=1` (memprobe and other test launches): the
+/// window starts hidden and unfocused, then minimises itself on the first
+/// frame and keeps rendering in the taskbar. The saved window state is
+/// never touched by such runs.
+pub fn start_minimized_from_env() -> bool {
+    std::env::var("RUSTCORD_START_MINIMIZED").is_ok_and(|v| v.trim() == "1")
+}
+
+/// `RUSTCORD_START_OFFSCREEN=1` (memprobe): the window opens far off
+/// screen without taking focus. Unlike a minimised window it still runs
+/// its UI and paints (eframe skips both while minimised), so memory and
+/// frame-time numbers are real. The saved window state is never touched.
+pub fn start_offscreen_from_env() -> bool {
+    std::env::var("RUSTCORD_START_OFFSCREEN").is_ok_and(|v| v.trim() == "1")
+}
 
 /// True when `RUSTCORD_DEMO` asks for the offline demo.
 pub fn demo_from_env() -> bool {

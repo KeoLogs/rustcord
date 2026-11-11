@@ -6,8 +6,7 @@ Settings → About). Version x.y.z:
 - y: add-ons and improvements (z resets to 0)
 - z: bug and issue fixes
 
-## Unreleased
-
+## 0.9.0: Your own presets
 - Your own presets (Settings → Presets, "Presets" module): save your layout,
   theme and modules as a preset, apply it from its card (the card shows the
   theme, a layout thumbnail and how many modules change; Save Changes keeps
@@ -15,7 +14,46 @@ Settings → About). Version x.y.z:
   preset or theme as code, and paste preset or theme code to save it as a
   preset or a theme. Presets never contain account data. The demo has two
   example presets.
-- Linux builds no longer warn about the Windows-only taskbar badge code.
+
+## 0.8.0: Looks
+- Four built-in themes in Settings → Themes, shown as cards next to your
+  imported ones, each with Apply; they can't be deleted:
+  - **RustCord Dark** (the default): bordered panes with labels,
+    monospace, square corners.
+  - **RustCord Light**: the same blocky look in light colours.
+  - **Discord Dark** and **Discord Light**: the classic flat Discord look
+    with Noto Sans and round shapes.
+  "Reset to default" goes back to RustCord Dark. They work with the Custom
+  themes module off. Old settings load as RustCord Dark.
+- GIFs play by themselves in messages and link previews (Tenor, Giphy,
+  Klipy and plain `.gif` files), at the same size as before. Only GIFs on
+  screen keep their frames in memory; scrolled-away ones are freed.
+  Animated avatars and emoji stay still until you hover them.
+- A message that is only a GIF link shows just the GIF: the link text is
+  hidden (other words in the message stay). Right-click → *Copy Link*
+  still copies it.
+- Square everything in the RustCord themes: avatars (user panel, members,
+  DMs, chat, profile card), server icons and the DM button, mention and
+  unread badges, the taskbar badge and status dots. The Discord themes keep
+  them round. Themes choose with the new `.rctheme` tokens
+  `[style] shape` and `avatar_shape` (`"square"` or `"round"`).
+- Members header: the online / offline counts are small square boxes in
+  their own spot left of – □ X. Hover one and it widens smoothly to read
+  "7 online". A blue bots box shows when the count is exact (the whole
+  list is loaded); otherwise it's left out rather than showing a partial
+  number.
+- The window buttons now stay in a narrow Members header instead of
+  floating over it.
+
+## 0.7.0: Memory measuring tools
+- Settings → Performance has a memory details panel.
+- `scripts/memprobe.ps1` measures memory (Task Manager numbers) and
+  frame-time p95, with module profiles and a live read-only mode.
+- `RUSTCORD_DEMO_BIG=1` loads a big synthetic account through the real
+  READY path; `RUSTCORD_START_MINIMIZED` / `RUSTCORD_START_OFFSCREEN` for
+  test launches.
+- Release builds use `panic = "abort"` (about 10 MB less RAM, smaller exe).
+  A crash in a background task now closes the app.
 
 ## 0.6.1: Composer and user panel match the blocky look
 - The message box has no bubble any more: one flat row with a plain +,
