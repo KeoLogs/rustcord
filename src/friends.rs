@@ -715,7 +715,8 @@ pub fn count_badge(ui: &egui::Ui, right_center: egui::Pos2, n: usize, pal: &Pale
         egui::pos2(right_center.x - w, right_center.y - 8.0),
         egui::pos2(right_center.x, right_center.y + 8.0),
     );
-    ui.painter().rect_filled(rect, 8, pal.mention);
+    ui.painter()
+        .rect_filled(rect, crate::theme::shape().radius(16.0), pal.mention);
     let text = if n > 999 {
         "999+".into()
     } else {
@@ -1432,7 +1433,7 @@ fn request_row(
     match c.recipients.first() {
         Some(u) => (cx.avatar)(ui, av, u),
         None => {
-            ui.painter().circle_filled(av.center(), 16.0, pal.accent);
+            crate::theme::avatar_shape().dot(ui.painter(), av.center(), 16.0, pal.accent);
         }
     }
 

@@ -11,11 +11,15 @@ pub const CONFIG_KEY: &str = "config_v1";
 #[serde(default)]
 pub struct Config {
     /// Id (folder name) of the applied custom theme, if any; it overrides
-    /// the default look (bordered panes) while the Custom themes module is on.
+    /// the built-in theme while the Custom themes module is on.
     /// Older configs also carry a `theme` key (the removed Dark / Light
     /// picker); it is ignored, so they load with the default look.
     #[serde(default)]
     pub custom_theme: Option<String>,
+    /// The built-in theme used when no imported theme applies
+    /// (`builtin_themes.rs`). Older configs load as RustCord Dark.
+    #[serde(default)]
+    pub builtin_theme: crate::builtin_themes::BuiltinTheme,
     /// UI scale (1.0 = 100%).
     pub zoom: f32,
     pub modules: Modules,
@@ -101,6 +105,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             custom_theme: None,
+            builtin_theme: Default::default(),
             zoom: 1.0,
             modules: Modules::default(),
             remember_login: true,
@@ -592,6 +597,10 @@ mod tests {
         )
         .expect("old config loads");
         assert_eq!(c.custom_theme, None);
+        assert_eq!(
+            c.builtin_theme,
+            crate::builtin_themes::BuiltinTheme::RustcordDark
+        );
         assert!(!c.modules.layout_sharing);
     }
 

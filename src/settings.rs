@@ -451,25 +451,29 @@ impl SettingsPage {
                             .get(id)
                             .map(|t| t.meta.name.clone())
                             .unwrap_or_else(|| id.clone()),
-                        _ => "RustCord (default)".to_owned(),
+                        _ => config.builtin_theme.name().to_owned(),
                     };
+                    let is_default = (config.custom_theme.is_none()
+                        || !config.modules.custom_themes)
+                        && config.builtin_theme == Default::default();
                     ui.label(RichText::new(name).bold().color(pal.strong));
                     ui.add_space(8.0);
                     if ui
                         .add_enabled(
-                            config.custom_theme.is_some(),
+                            !is_default,
                             egui::Button::new(icons::label(icons::RESET, "Reset to default")),
                         )
-                        .on_hover_text("Back to the default look (bordered panes)")
+                        .on_hover_text("Back to RustCord Dark")
                         .clicked()
                     {
                         config.custom_theme = None;
+                        config.builtin_theme = Default::default();
                     }
                 });
                 hint(
                     ui,
                     pal,
-                    "Import and apply other themes in Settings → Themes.",
+                    "Pick a built-in theme or import others in Settings → Themes.",
                 );
                 ui.add_space(12.0);
                 label(ui, pal, "UI SCALE");
@@ -698,7 +702,14 @@ impl SettingsPage {
                     themes.refresh();
                 }
                 match ThemesPage::show(ui, themes, pal) {
-                    Some(ThemesAction::ResetDefault) => config.custom_theme = None,
+                    Some(ThemesAction::ResetDefault) => {
+                        config.custom_theme = None;
+                        config.builtin_theme = Default::default();
+                    }
+                    Some(ThemesAction::ApplyBuiltin(t)) => {
+                        config.custom_theme = None;
+                        config.builtin_theme = t;
+                    }
                     Some(ThemesAction::Apply(id)) => config.custom_theme = Some(id),
                     Some(ThemesAction::Delete(id)) => {
                         if themes.delete(&id).is_ok() && config.custom_theme.as_ref() == Some(&id) {
@@ -1004,7 +1015,7 @@ fn account(ui: &mut egui::Ui, me: Option<&User>, pal: &Palette) {
                 ui.add(
                     egui::Image::from_uri(&me.avatar_url)
                         .fit_to_exact_size(vec2(72.0, 72.0))
-                        .corner_radius(36),
+                        .corner_radius(crate::theme::avatar_shape().radius(72.0)),
                 );
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&me.name).size(20.0).bold().color(pal.strong));

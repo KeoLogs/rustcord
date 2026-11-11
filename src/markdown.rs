@@ -1821,8 +1821,16 @@ impl Renderer<'_, '_> {
             AtomKind::CustomEmoji { name, id, animated } => {
                 let url = crate::emoji::custom_emoji_url(id, animated);
                 let size = self.emoji_size;
-                ui.add(egui::Image::from_uri(url).fit_to_exact_size(vec2(size, size)))
-                    .on_hover_text(format!(":{name}:"));
+                let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+                // Still; animated emoji play while hovered (over the still
+                // frame, which stays while the animated copy loads).
+                egui::Image::from_uri(url.as_str()).paint_at(ui, rect);
+                if let std::borrow::Cow::Owned(anim) = crate::anim::on_hover(ui, rect, &url) {
+                    egui::Image::from_uri(anim)
+                        .show_loading_spinner(false)
+                        .paint_at(ui, rect);
+                }
+                resp.on_hover_text(format!(":{name}:"));
             }
             AtomKind::Timestamp(unix, style) => {
                 let now = Local::now();

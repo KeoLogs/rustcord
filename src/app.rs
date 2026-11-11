@@ -85,8 +85,8 @@ pub struct RustCordApp {
     theme_store: crate::themes::ThemeStore,
     /// The theme the UI draws with.
     active_theme: crate::themes::ActiveTheme,
-    /// (custom id, module on) the active theme was built for.
-    theme_key: Option<(Option<String>, bool)>,
+    /// (custom id, module on, built-in theme) the active theme was built for.
+    theme_key: Option<(Option<String>, bool, crate::builtin_themes::BuiltinTheme)>,
     /// Status bar module's RAM reading.
     ram: RamSampler,
     /// The running session (token in memory only), to reconnect with a
@@ -670,6 +670,18 @@ impl RustCordApp {
                     .ok()
             })
             .flatten();
+        // `…:rustcord-light`, `…:discord-dark`, `…:discord-light`: a
+        // built-in theme for the screenshot (not saved).
+        use crate::builtin_themes::BuiltinTheme;
+        let builtin = match arg {
+            "rustcord-light" => Some(BuiltinTheme::RustcordLight),
+            "discord-dark" => Some(BuiltinTheme::DiscordDark),
+            "discord-light" => Some(BuiltinTheme::DiscordLight),
+            _ => None,
+        };
+        if let Some(t) = builtin {
+            self.config.builtin_theme = t;
+        }
         if let Some(section) = section {
             let mut page = SettingsPage::new(&self.config);
             page.section = section;
@@ -751,7 +763,7 @@ impl RustCordApp {
             .custom_theme
             .clone()
             .filter(|_| cfg.modules.custom_themes);
-        let key = (custom, cfg.modules.custom_themes);
+        let key = (custom, cfg.modules.custom_themes, cfg.builtin_theme);
         if self.theme_key.as_ref() != Some(&key) {
             self.theme_store.set_enabled(cfg.modules.custom_themes);
             let (active, error) =
@@ -905,7 +917,7 @@ impl eframe::App for RustCordApp {
             crate::taskbar::frame_target(frame),
             count,
             self.config.taskbar_badge,
-            crate::taskbar::rgb(self.active_theme.palette.danger),
+            crate::taskbar::look(self.active_theme.palette.danger),
         );
         let Screen::Main(state) = &mut self.screen else {
             return;
@@ -929,6 +941,7 @@ impl eframe::App for RustCordApp {
         main_ui(self, ui);
         let pal = self.active_theme.palette;
         crate::window_frame::end_pass(&ctx, &pal);
+        crate::anim::sweep(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -1419,6 +1432,7 @@ fn window_ui(w: &Mutex<AccountWindow>, ui: &mut egui::Ui) {
     window_screen(w, ui);
     let pal = w.theme.palette;
     crate::window_frame::end_pass(&ctx, &pal);
+    crate::anim::sweep(&ctx);
 }
 
 /// One pass of an account window's session and chat screen.
@@ -1439,7 +1453,7 @@ fn window_screen(w: &mut AccountWindow, ui: &mut egui::Ui) {
         Target::Title(&w.title),
         count,
         w.config.taskbar_badge,
-        crate::taskbar::rgb(w.theme.palette.danger),
+        crate::taskbar::look(w.theme.palette.danger),
     );
     let mut close = ctx.input(|i| i.viewport().close_requested());
     if let Some(reason) = state.fatal.take() {
@@ -5342,8 +5356,9 @@ impl State {
         // Status dot with a ring in the panel colour (Discord's cut-out).
         let ring = if resp.hovered() { pal.hover } else { bg };
         let c = av.right_bottom() - vec2(3.0, 3.0);
-        ui.painter().circle_filled(c, 7.0, ring);
-        ui.painter().circle_filled(c, 5.0, dot);
+        let shape = theme::shape();
+        shape.dot(ui.painter(), c, 7.0, ring);
+        shape.dot(ui.painter(), c, 5.0, dot);
         if show_text {
             let x = av.right() + 8.0;
             let max_w = hit.right() - x - 4.0;
@@ -6174,7 +6189,15 @@ impl State {
             self.messages[&channel_id]
                 .iter()
                 .map(|m| {
-                    let blocks = cache.get(&m.id, &m.content, formatting);
+                    // A link that became a GIF embed shows only the GIF
+                    // (other text stays; "Copy Link" is in the menu).
+                    let shown = if config.modules.embeds && !m.embeds.is_empty() {
+                        embed::hide_gif_links(&m.content, &m.embeds)
+                    } else {
+                        None
+                    };
+                    let content = shown.as_deref().unwrap_or(&m.content);
+                    let blocks = cache.get(&m.id, content, formatting);
                     let reply = m.reply.as_ref().map(|r| {
                         if r.content.is_empty() {
                             "Click to see attachment".to_string()
@@ -7425,17 +7448,35 @@ impl State {
         let total = list.map_or(fallback.len(), |l| l.total_rows().min(100_000));
         // Header: green "online" and grey "offline" count pills (the
         // "recently active" fallback has no meaningful counts).
+        // Blue bots box only when the count is exact: the bot-built list
+        // (under its cap), a fully loaded op 14 list, or a DM's recipients.
+        let from_bot_list = self.member_list.as_ref().is_none_or(|l| l.rows.is_empty())
+            && self
+                .bot_list
+                .as_ref()
+                .is_some_and(|b| !b.list.rows.is_empty());
         let counts = match list {
-            Some(l) => Some(l.online_offline(&self.presences)),
-            None if self.dms.channel(&channel_id).is_some() => Some(members::count_online(
-                fallback.iter().flatten(),
-                &self.presences,
-            )),
+            Some(l) => {
+                let bots = match &self.bot_list {
+                    Some(b) if from_bot_list => (b.members.len()
+                        < members::BOT_LIST_LIMIT as usize)
+                        .then(|| b.members.iter().filter(|m| m.user.bot).count() as u32),
+                    _ => l.exact_bots(),
+                };
+                let (on, off) = l.online_offline(&self.presences);
+                Some((on, off, bots))
+            }
+            None if self.dms.channel(&channel_id).is_some() => {
+                let rows = fallback.iter().flatten();
+                let (on, off) = members::count_online(rows.clone(), &self.presences);
+                Some((on, off, Some(members::count_bots(rows))))
+            }
             None => None,
         };
         match counts {
-            Some((on, off)) if on + off > 0 => {
-                members::count_pills(ui, header.left() + 16.0, header.center().y, on, off, pal)
+            Some((on, off, bots)) if on + off > 0 => {
+                let boxes = members::count_boxes_for(on, off, bots.filter(|n| *n > 0));
+                members::count_boxes(ui, header, &boxes, pal)
             }
             _ => {
                 let galley = truncated(
@@ -8467,8 +8508,10 @@ fn forget_message_images(ctx: &egui::Context, messages: &[Message]) {
 // Widgets
 // ===========================================================================
 
-/// Round avatar. With the Images module off, a coloured circle with the
-/// first letter instead (no download, no texture).
+/// Avatar in the theme's `avatar_shape` (round or square). With the
+/// Images module off, a coloured disc / square with the first letter
+/// instead (no download, no texture). Animated avatars stay still until
+/// hovered (`anim`).
 pub(crate) fn avatar(
     ui: &mut egui::Ui,
     user_id: &str,
@@ -8494,20 +8537,28 @@ pub(crate) fn paint_avatar(
     pal: &Palette,
 ) {
     let size = rect.width();
+    let radius = theme::avatar_shape().radius(size);
     if config.modules.images && !url.is_empty() {
-        // Placeholder disc while loading (or if the download fails).
-        ui.painter()
-            .circle_filled(rect.center(), size / 2.0, pal.hover);
+        // Placeholder while loading (or if the download fails).
+        ui.painter().rect_filled(rect, radius, pal.hover);
         egui::Image::from_uri(url)
-            .corner_radius(size / 2.0)
+            .corner_radius(radius)
             .show_loading_spinner(false)
             .paint_at(ui, rect);
+        // Animated avatars play while hovered, over the still frame (which
+        // stays visible while the animated copy loads).
+        if let std::borrow::Cow::Owned(anim) = crate::anim::on_hover(ui, rect, url) {
+            egui::Image::from_uri(anim)
+                .corner_radius(radius)
+                .show_loading_spinner(false)
+                .paint_at(ui, rect);
+        }
     } else {
         let hue = user_id
             .bytes()
             .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
         let col = egui::ecolor::Hsva::new((hue % 360) as f32 / 360.0, 0.45, 0.6, 1.0);
-        ui.painter().circle_filled(rect.center(), size / 2.0, col);
+        ui.painter().rect_filled(rect, radius, col);
         let letter = name
             .chars()
             .next()
@@ -8787,7 +8838,7 @@ fn channel_row(
         match c.recipients.first().filter(|_| c.kind == CHANNEL_DM) {
             Some(u) => paint_avatar(ui, a, &u.id, &u.name, &u.avatar_url, config, pal),
             None => {
-                ui.painter().circle_filled(a.center(), 16.0, pal.accent);
+                theme::avatar_shape().dot(ui.painter(), a.center(), 16.0, pal.accent);
                 ui.painter().text(
                     a.center(),
                     egui::Align2::CENTER_CENTER,
@@ -9067,7 +9118,8 @@ fn window_focused(ctx: &egui::Context) -> bool {
 fn unread_pill(ui: &egui::Ui, item: egui::Rect, height: f32, pal: &Palette) {
     let x = ui.clip_rect().left();
     let rect = egui::Rect::from_center_size(egui::pos2(x, item.center().y), vec2(8.0, height));
-    ui.painter().rect_filled(rect, 4, pal.unread);
+    ui.painter()
+        .rect_filled(rect, theme::shape().radius(8.0), pal.unread);
 }
 
 /// Red rounded badge with a count ("99+" past 99).
@@ -9090,9 +9142,13 @@ fn mention_badge(
     let size = vec2((galley.size().x + 9.0).max(16.0), 16.0);
     let rect = align.align_size_within_rect(size, egui::Rect::from_min_size(at, egui::Vec2::ZERO));
     let rect = egui::Rect::from_min_size(rect.min, size);
-    // Ring in the panel colour so it stands out over icons.
-    ui.painter().rect_filled(rect.expand(2.0), 10, ring);
-    ui.painter().rect_filled(rect, 8, pal.mention);
+    // Ring in the panel colour so it stands out over icons. Pill or
+    // square as the theme's `shape` says.
+    let shape = theme::shape();
+    ui.painter()
+        .rect_filled(rect.expand(2.0), shape.radius(size.y + 4.0), ring);
+    ui.painter()
+        .rect_filled(rect, shape.radius(size.y), pal.mention);
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
 }
@@ -9253,7 +9309,8 @@ fn rail_item(
     if h > 0.5 {
         let left = ui.clip_rect().left();
         let pill = egui::Rect::from_center_size(egui::pos2(left, rect.center().y), vec2(8.0, h));
-        ui.painter().rect_filled(pill, 4, pal.unread);
+        ui.painter()
+            .rect_filled(pill, theme::shape().radius(8.0), pal.unread);
     }
 
     if badge.mentions > 0 {
@@ -9375,14 +9432,15 @@ fn folder_item(
             );
             match &g.icon_url {
                 Some(url) if config.modules.images => {
-                    painter.circle_filled(r.center(), mini / 2.0, pal.rail_icon);
+                    let mr = theme::shape().radius(mini);
+                    painter.rect_filled(r, mr, pal.rail_icon);
                     egui::Image::from_uri(url)
-                        .corner_radius(mini / 2.0)
+                        .corner_radius(mr)
                         .show_loading_spinner(false)
                         .paint_at(ui, r);
                 }
                 _ => {
-                    painter.circle_filled(r.center(), mini / 2.0, pal.rail_icon);
+                    painter.rect_filled(r, theme::shape().radius(mini), pal.rail_icon);
                     let i: String = initials(&g.name).chars().take(1).collect();
                     painter.text(
                         r.center(),
@@ -9410,7 +9468,8 @@ fn folder_item(
     if h > 0.5 {
         let left = ui.clip_rect().left();
         let pill = egui::Rect::from_center_size(egui::pos2(left, rect.center().y), vec2(8.0, h));
-        ui.painter().rect_filled(pill, 4, pal.unread);
+        ui.painter()
+            .rect_filled(pill, theme::shape().radius(8.0), pal.unread);
     }
     if f.badge.mentions > 0 {
         mention_badge(
@@ -10778,6 +10837,16 @@ fn message_menu(
         n,
         MessageAction::Copy(m.link(menu.guild_id.as_deref())),
     );
+    // GIF links whose text is hidden under the GIF.
+    for url in embed::hidden_gif_links(&m.content, &m.embeds) {
+        pick(
+            ui,
+            icons::LINK,
+            "Copy Link",
+            n,
+            MessageAction::Copy(url.to_string()),
+        );
+    }
     for a in m.attachments.iter().filter(|a| a.is_image()) {
         let label = if m.attachments.len() == 1 {
             "Save Image".to_string()
@@ -10833,15 +10902,24 @@ fn attachment_ui(
         // `forget_message_images`); only the shown size follows the column.
         let url = a.thumbnail_url(cap_w as u32, max_h as u32);
         let max_w = widgets::media_width(ui.available_width(), cap_w);
-        let mut image = egui::Image::from_uri(url)
-            .corner_radius(6)
-            .sense(egui::Sense::click());
-        image = match a.display_size(max_w, max_h) {
-            Some((w, h)) => image.fit_to_exact_size(vec2(w, h)),
-            None => image.max_size(vec2(max_w, max_h)),
+        // GIFs autoplay while on screen (`anim`), at the same size.
+        let gif = a.display_size(max_w, max_h).and_then(|(w, h)| {
+            crate::anim::gif_image(ui, &url, None, vec2(w, h), 6.0, egui::Sense::click())
+        });
+        let resp = match gif {
+            Some(resp) => resp,
+            None => {
+                let mut image = egui::Image::from_uri(url)
+                    .corner_radius(6)
+                    .sense(egui::Sense::click());
+                image = match a.display_size(max_w, max_h) {
+                    Some((w, h)) => image.fit_to_exact_size(vec2(w, h)),
+                    None => image.max_size(vec2(max_w, max_h)),
+                };
+                ui.add(image)
+            }
         };
-        let resp = ui
-            .add(image)
+        let resp = resp
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(format!(
                 "{} ({}) · click to open full size",
